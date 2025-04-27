@@ -1,63 +1,178 @@
 .csv-reader-container {
-    margin: 20px 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
     width: 100%;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.csv-reader-card {
+    width: 100%;
+    background-color: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+}
+
+.csv-reader-upload-area {
+    padding: 30px 20px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
+    min-height: 200px;
+    border: 2px dashed #e1e5ea;
+    border-radius: 8px;
+    margin: 20px;
+    position: relative;
 }
 
-.file-upload-container {
-    padding: 30px;
-    text-align: center;
-    border: 1px solid #AAAAAA;
-    border-radius: 8px;
-    background-color: #AAAAAA;
-    width: 100%;
-    max-width: 400px;
+.csv-reader-empty-state {
     display: flex;
     flex-direction: column;
     align-items: center;
-}
-
-.file-upload-container p {
-    margin: 0 0 20px 0;
-    color: #333;
-}
-
-.upload-button {
-    display: inline-block;
-    padding: 10px 20px;
-    background-color: #0066cc;
-    color: white;
-    border-radius: 4px;
-    cursor: pointer;
-    font-weight: bold;
-    transition: background-color 0.3s;
-}
-
-.upload-button:hover {
-    background-color: #0052a3;
-}
-
-.file-name {
-    margin-top: 15px;
-    font-style: italic;
-    color: #444;
+    justify-content: center;
+    color: #5e6c84;
     text-align: center;
-    width: 100%;
 }
 
-.error-message {
-    color: #d32f2f;
+.csv-reader-empty-state svg {
+    margin-bottom: 15px;
+    color: #0066cc;
+}
+
+.csv-reader-empty-state p {
+    margin: 5px 0;
+    line-height: 1.5;
+}
+
+.csv-reader-subtitle {
+    font-size: 0.8rem;
+    opacity: 0.7;
+}
+
+.csv-reader-empty-state label {
+    color: #0066cc;
+    cursor: pointer;
+    font-weight: 500;
+    text-decoration: underline;
+}
+
+.csv-reader-file-selected {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 15px;
+    background-color: #f0f7ff;
+    border-radius: 6px;
+}
+
+.csv-reader-file-info {
+    display: flex;
+    align-items: center;
+}
+
+.csv-reader-file-info svg {
+    color: #0066cc;
+    margin-right: 10px;
+}
+
+.csv-reader-filename {
+    font-weight: 500;
+    word-break: break-word;
+    max-width: 300px;
+}
+
+.csv-reader-reset-button {
+    background: none;
+    border: none;
+    color: #5e6c84;
+    cursor: pointer;
+    padding: 5px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.csv-reader-reset-button:hover {
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+.csv-reader-reset-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.csv-reader-loading {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(255, 255, 255, 0.8);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 2;
+}
+
+.csv-reader-spinner {
+    width: 30px;
+    height: 30px;
+    border: 3px solid #e1e5ea;
+    border-top: 3px solid #0066cc;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 10px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.csv-reader-error {
+    color: #e53e3e;
     margin-top: 10px;
     text-align: center;
-    width: 100%;
 }
 
-.loading-indicator {
-    margin-top: 15px;
-    color: #0066cc;
+.csv-reader-actions {
+    padding: 15px 20px;
+    display: flex;
+    justify-content: center;
+    border-top: 1px solid #e1e5ea;
+}
+
+.csv-reader-button {
+    background-color: #0066cc;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background-color 0.2s;
+    display: inline-block;
     text-align: center;
-    width: 100%;
+}
+
+.csv-reader-button:hover {
+    background-color: #0055aa;
+}
+
+@media (max-width: 500px) {
+    .csv-reader-file-selected {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .csv-reader-filename {
+        max-width: 100%;
+        text-align: center;
+    }
 }
