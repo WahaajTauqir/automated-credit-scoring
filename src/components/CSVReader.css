@@ -72,6 +72,7 @@
 .csv-reader-file-info {
     display: flex;
     align-items: center;
+    color: #1a1a1a;
 }
 
 .csv-reader-file-info svg {
@@ -172,7 +173,7 @@
     }
 
     .csv-reader-filename {
-        max-width: 100%;
-        text-align: center;
+        font-weight: 500;
+        max-width: 300px;
     }
 }
