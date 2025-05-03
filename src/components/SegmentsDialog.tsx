@@ -18,7 +18,7 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
     const [isLoading, setIsLoading] = useState<boolean>(true);
     const [error, setError] = useState<string | null>(null);
     const [clusterData, setClusterData] = useState<ClusterInfo[] | null>(null);
-    const [elbowPlot, setElbowPlot] = useState<string | null>(null);
+    const [scatterPlot, setElbowPlot] = useState<string | null>(null);
 
     useEffect(() => {
         if (isOpen && selectedColumns.length > 0) {
@@ -101,12 +101,12 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                         </div>
                     ) : (
                         <>
-                            {elbowPlot && (
+                            {scatterPlot && (
                                 <div style={{ textAlign: 'center', marginBottom: '20px' }}>
-                                    <h4>Elbow Method Plot</h4>
+                                    <h4>Scatter Plot</h4>
                                     <img
-                                        src={`data:image/png;base64,${elbowPlot}`}
-                                        alt="Elbow Method Plot"
+                                        src={`data:image/png;base64,${scatterPlot}`}
+                                        alt="Scatter Plot"
                                         style={{ maxWidth: '100%', height: 'auto' }}
                                     />
                                 </div>
@@ -197,10 +197,11 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                                                                     borderBottom: '1px solid #ddd',
                                                                     textAlign: 'center'
                                                                 }}>
-                                                                    {typeof point[column] === 'number'
-                                                                        ? (point[column] as number).toFixed(2)
-                                                                        : String(point[column])}
-
+                                                                    {point[column] === null || point[column] === undefined
+                                                                        ? 'N/A'
+                                                                        : typeof point[column] === 'number'
+                                                                            ? (point[column] as number).toFixed(2)
+                                                                            : String(point[column])}
                                                                 </td>
                                                             ))}
                                                         </tr>

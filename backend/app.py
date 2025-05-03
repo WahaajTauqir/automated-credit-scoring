@@ -8,7 +8,6 @@ from kmeans_clustering import perform_kmeans
 app = Flask(__name__)
 CORS(app)
 
-# Custom JSON encoder that handles NumPy types
 class NumpyJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -17,6 +16,7 @@ class NumpyJSONEncoder(json.JSONEncoder):
             return float(obj)
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
+        # Add this specific check for NaN values
         elif isinstance(obj, float) and np.isnan(obj):
             return None
         return super().default(obj)
@@ -24,11 +24,13 @@ class NumpyJSONEncoder(json.JSONEncoder):
 # Set the custom encoder
 app.json_encoder = NumpyJSONEncoder
 
-# Helper function to convert numpy types to Python native types
 def convert_numpy_types(obj):
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
+        # Handle NaN values specifically
+        if np.isnan(obj):
+            return None  # Convert NaN to null in JSON
         return float(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
@@ -36,6 +38,9 @@ def convert_numpy_types(obj):
         return {key: convert_numpy_types(value) for key, value in obj.items()}
     elif isinstance(obj, list):
         return [convert_numpy_types(item) for item in obj]
+    # Handle Python's float NaN as well
+    elif isinstance(obj, float) and np.isnan(obj):
+        return None
     else:
         return obj
 
@@ -84,7 +89,7 @@ def cluster_data():
         # Convert data to DataFrame
         try:
             df = pd.DataFrame(data['data'])
-            # Convert None back to NaN for pandas operations
+            # Add this line to explicitly convert None to NaN for pandas operations
             df = df.replace({None: np.nan})
         except Exception as e:
             return jsonify({'success': False, 'error': f'Error creating DataFrame: {str(e)}'}), 400
