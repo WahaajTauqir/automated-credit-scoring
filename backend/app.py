@@ -16,21 +16,18 @@ class NumpyJSONEncoder(json.JSONEncoder):
             return float(obj)
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
-        # Add this specific check for NaN values
         elif isinstance(obj, float) and np.isnan(obj):
             return None
         return super().default(obj)
 
-# Set the custom encoder
 app.json_encoder = NumpyJSONEncoder
 
 def convert_numpy_types(obj):
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
-        # Handle NaN values specifically
         if np.isnan(obj):
-            return None  # Convert NaN to null in JSON
+            return None
         return float(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
@@ -38,7 +35,6 @@ def convert_numpy_types(obj):
         return {key: convert_numpy_types(value) for key, value in obj.items()}
     elif isinstance(obj, list):
         return [convert_numpy_types(item) for item in obj]
-    # Handle Python's float NaN as well
     elif isinstance(obj, float) and np.isnan(obj):
         return None
     else:
@@ -55,16 +51,9 @@ def upload_csv():
             return jsonify({'error': 'No file selected'}), 400
 
         if file:
-            # Read CSV file
             df = pd.read_csv(file)
-
-            # Get columns
             columns = df.columns.tolist()
-
-            # Replace NaN values with None and convert to dict
             df = df.replace({np.nan: None})
-
-            # Convert DataFrame to records and handle NumPy types explicitly
             records = df.to_dict(orient='records')
             data = convert_numpy_types(records)
 
@@ -80,16 +69,13 @@ def upload_csv():
 @app.route('/api/cluster', methods=['POST'])
 def cluster_data():
     try:
-        # Get request data
         data = request.json
 
         if not data or 'data' not in data or 'columns' not in data:
             return jsonify({'success': False, 'error': 'Invalid request format. Need "data" and "columns"'}), 400
 
-        # Convert data to DataFrame
         try:
             df = pd.DataFrame(data['data'])
-            # Add this line to explicitly convert None to NaN for pandas operations
             df = df.replace({None: np.nan})
         except Exception as e:
             return jsonify({'success': False, 'error': f'Error creating DataFrame: {str(e)}'}), 400
@@ -98,38 +84,36 @@ def cluster_data():
         if not columns_to_cluster or not isinstance(columns_to_cluster, list):
             return jsonify({'success': False, 'error': 'Invalid columns list'}), 400
 
-        # Optional parameters
         k_range = range(1, data.get('max_k', 11))
         find_optimal_k = data.get('find_optimal_k', True)
         output_col = data.get('output_column', 'cluster')
 
-        # Perform clustering for individual columns
         individual_results = {}
         for col in columns_to_cluster:
             result = perform_kmeans(df, [col], k_range, f"{col}_cluster", find_optimal_k)
             if result['error'] is None:
-                # Convert NumPy types before serialization
                 cluster_info = convert_numpy_types(result['cluster_info'])
+                explanations = convert_numpy_types(result['explanations'])
                 individual_results[col] = {
-                    'k': int(result['k_used']),  # Convert to native Python int
+                    'k': int(result['k_used']),
                     'cluster_info': cluster_info,
-                    'plot': result['plot']
+                    'plot': result['plot'],
+                    'explanations': explanations
                 }
 
-        # Perform clustering on combined columns
         combined_result = None
         if len(columns_to_cluster) >= 2:
             result = perform_kmeans(df, columns_to_cluster, k_range, "combined_cluster", find_optimal_k)
             if result['error'] is None:
-                # Convert NumPy types before serialization
                 cluster_info = convert_numpy_types(result['cluster_info'])
+                explanations = convert_numpy_types(result['explanations'])
                 combined_result = {
-                    'k': int(result['k_used']),  # Convert to native Python int
+                    'k': int(result['k_used']),
                     'cluster_info': cluster_info,
-                    'plot': result['plot']
+                    'plot': result['plot'],
+                    'explanations': explanations
                 }
 
-        # Return results with explicitly converted types
         return jsonify({
             'success': True,
             'individual_results': individual_results,

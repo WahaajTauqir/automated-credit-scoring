@@ -1,6 +1,4 @@
 import { useState, useEffect } from 'react';
-import './ColumnsDialog.css';
-
 interface SegmentsDialogProps {
     isOpen: boolean;
     onClose: () => void;
@@ -11,14 +9,38 @@ interface ClusterInfo {
     id: number;
     count: number;
     center: Record<string, number>;
+    column_stats: Record<string, {
+        center: number;
+        min: number;
+        max: number;
+        mean: number;
+    }>;
     sample_data: Array<Record<string, unknown>>;
+    description?: string;
+    top_features?: string[];
+}
+
+interface Explanations {
+    feature_importance: Record<number, Record<string, number>>;
+    cluster_descriptions: Array<{
+        cluster_id: number;
+        description: string;
+        top_features: string[];
+    }>;
+    profile_plot: string;
+}
+
+interface ClusterResult {
+    k: number;
+    cluster_info: ClusterInfo[];
+    plot: string;
+    explanations: Explanations;
 }
 
 const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProps) => {
     const [isLoading, setIsLoading] = useState<boolean>(true);
     const [error, setError] = useState<string | null>(null);
-    const [clusterData, setClusterData] = useState<ClusterInfo[] | null>(null);
-    const [scatterPlot, setElbowPlot] = useState<string | null>(null);
+    const [result, setResult] = useState<ClusterResult | null>(null);
 
     useEffect(() => {
         if (isOpen && selectedColumns.length > 0) {
@@ -55,19 +77,17 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                 throw new Error(errorData.error || `Server responded with status ${response.status}`);
             }
 
-            const result = await response.json();
+            const data = await response.json();
 
-            if (!result.success) {
-                throw new Error(result.error || 'Unknown error occurred during clustering');
+            if (!data.success) {
+                throw new Error(data.error || 'Unknown error occurred during clustering');
             }
 
-            if (result.combined_result && selectedColumns.length > 1) {
-                setClusterData(result.combined_result.cluster_info);
-                setElbowPlot(result.combined_result.plot);
-            } else if (Object.keys(result.individual_results).length > 0) {
-                const firstKey = Object.keys(result.individual_results)[0];
-                setClusterData(result.individual_results[firstKey].cluster_info);
-                setElbowPlot(result.individual_results[firstKey].plot);
+            if (data.combined_result && selectedColumns.length > 1) {
+                setResult(data.combined_result);
+            } else if (Object.keys(data.individual_results).length > 0) {
+                const firstKey = Object.keys(data.individual_results)[0];
+                setResult(data.individual_results[firstKey]);
             } else {
                 throw new Error('No clustering results returned from server');
             }
@@ -99,83 +119,159 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                         <div style={{ color: 'red', padding: '20px' }}>
                             <p>Error: {error}</p>
                         </div>
-                    ) : (
+                    ) : result ? (
                         <>
-                            {scatterPlot && (
+                            {result.plot && (
                                 <div style={{ textAlign: 'center', marginBottom: '20px' }}>
                                     <h4>Scatter Plot</h4>
                                     <img
-                                        src={`data:image/png;base64,${scatterPlot}`}
+                                        src={`data:image/png;base64,${result.plot}`}
                                         alt="Scatter Plot"
                                         style={{ maxWidth: '100%', height: 'auto' }}
                                     />
                                 </div>
                             )}
 
+                            {result.explanations && (
+                                <div style={{ marginBottom: '30px' }}>
+                                    <h4>Cluster Explanations</h4>
+
+                                    {result.explanations.profile_plot && (
+                                        <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+                                            <h5>Cluster Profiles</h5>
+                                            <img
+                                                src={`data:image/png;base64,${result.explanations.profile_plot}`}
+                                                alt="Cluster Profile"
+                                                style={{ maxWidth: '100%', height: 'auto' }}
+                                            />
+                                        </div>
+                                    )}
+
+                                    <div style={{ marginBottom: '20px' }}>
+                                        <h5>Key Characteristics</h5>
+                                        {result.explanations.cluster_descriptions.map((desc) => (
+                                            <div
+                                                key={`desc-${desc.cluster_id}`}
+                                                style={{
+                                                    backgroundColor: '#f8f9fa',
+                                                    padding: '15px',
+                                                    borderRadius: '8px',
+                                                    marginBottom: '10px'
+                                                }}
+                                            >
+                                                <p style={{ fontWeight: 'bold' }}>Cluster {desc.cluster_id + 1}:</p>
+                                                <p>{desc.description}</p>
+                                                <div style={{ marginTop: '10px' }}>
+                                                    <p style={{ fontWeight: 'bold' }}>Top Features:</p>
+                                                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                                                        {desc.top_features.map((feature, i) => (
+                                                            <span
+                                                                key={i}
+                                                                style={{
+                                                                    backgroundColor: '#e9f5ff',
+                                                                    padding: '5px 10px',
+                                                                    borderRadius: '20px',
+                                                                    fontSize: '0.9em'
+                                                                }}
+                                                            >
+                                                                {feature}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
                             <div style={{ overflowX: 'auto', width: '100%' }}>
-                                <div style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: `repeat(${Math.min(clusterData?.length || 1, 4)}, 1fr)`,
-                                    gap: '10px',
-                                    marginBottom: '20px'
-                                }}>
-                                    {clusterData?.map((cluster, idx) => (
-                                        <div key={idx} style={{
-                                            padding: '15px',
-                                            backgroundColor: '#f0f7ff',
-                                            borderRadius: '8px',
-                                            textAlign: 'center',
-                                            border: '1px solid #d0e3ff'
-                                        }}>
+                                <div
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: `repeat(${Math.min(result.cluster_info.length, 4)}, 1fr)`,
+                                        gap: '10px',
+                                        marginBottom: '20px'
+                                    }}
+                                >
+                                    {result.cluster_info.map((cluster, idx) => (
+                                        <div
+                                            key={idx}
+                                            style={{
+                                                padding: '15px',
+                                                backgroundColor: '#f0f7ff',
+                                                borderRadius: '8px',
+                                                textAlign: 'center',
+                                                border: '1px solid #d0e3ff'
+                                            }}
+                                        >
                                             <h4>Cluster {cluster.id + 1}</h4>
                                             <div style={{ marginBottom: '10px' }}>
                                                 {Object.entries(cluster.center).map(([col, value], i) => (
-                                                    <div key={i} style={{ marginBottom: '5px', textAlign: 'left' }}>
-                                                        <strong>{col}:</strong> {typeof value === 'number' ? value.toFixed(2) : value}
+                                                    <div
+                                                        key={i}
+                                                        style={{ marginBottom: '5px', textAlign: 'left' }}
+                                                    >
+                                                        <strong>{col}:</strong> {value.toFixed(2)}
                                                     </div>
                                                 ))}
                                             </div>
-                                            <div style={{
-                                                fontSize: '1.2em',
-                                                fontWeight: 'bold',
-                                                backgroundColor: '#0066cc',
-                                                color: 'white',
-                                                padding: '5px 10px',
-                                                borderRadius: '4px',
-                                                marginBottom: '15px'
-                                            }}>
+                                            <div
+                                                style={{
+                                                    fontSize: '1.2em',
+                                                    fontWeight: 'bold',
+                                                    backgroundColor: '#0066cc',
+                                                    color: 'white',
+                                                    padding: '5px 10px',
+                                                    borderRadius: '4px',
+                                                    marginBottom: '15px'
+                                                }}
+                                            >
                                                 {cluster.count} records
                                             </div>
 
-                                            <div style={{
-                                                height: '200px',
-                                                overflowY: 'auto',
-                                                border: '1px solid #ddd',
-                                                borderRadius: '4px',
-                                                backgroundColor: 'white'
-                                            }}>
-                                                <table style={{
-                                                    width: '100%',
-                                                    borderCollapse: 'collapse'
-                                                }}>
-                                                    <thead style={{
-                                                        position: 'sticky',
-                                                        top: 0,
-                                                        backgroundColor: '#f0f0f0',
-                                                        zIndex: 1
-                                                    }}>
+                                            <div
+                                                style={{
+                                                    height: '200px',
+                                                    overflowY: 'auto',
+                                                    border: '1px solid #ddd',
+                                                    borderRadius: '4px',
+                                                    backgroundColor: 'white'
+                                                }}
+                                            >
+                                                <table
+                                                    style={{
+                                                        width: '100%',
+                                                        borderCollapse: 'collapse'
+                                                    }}
+                                                >
+                                                    <thead
+                                                        style={{
+                                                            position: 'sticky',
+                                                            top: 0,
+                                                            backgroundColor: '#f0f0f0',
+                                                            zIndex: 1
+                                                        }}
+                                                    >
                                                     <tr>
-                                                        <th style={{
-                                                            padding: '8px',
-                                                            borderBottom: '1px solid #ddd',
-                                                            textAlign: 'center'
-                                                        }}>#</th>
-                                                        {selectedColumns.map((column, i) => (
-                                                            <th key={i} style={{
+                                                        <th
+                                                            style={{
                                                                 padding: '8px',
                                                                 borderBottom: '1px solid #ddd',
                                                                 textAlign: 'center'
-                                                            }}>
+                                                            }}
+                                                        >
+                                                            #
+                                                        </th>
+                                                        {selectedColumns.map((column, i) => (
+                                                            <th
+                                                                key={i}
+                                                                style={{
+                                                                    padding: '8px',
+                                                                    borderBottom: '1px solid #ddd',
+                                                                    textAlign: 'center'
+                                                                }}
+                                                            >
                                                                 {column}
                                                             </th>
                                                         ))}
@@ -183,21 +279,32 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                                                     </thead>
                                                     <tbody>
                                                     {cluster.sample_data.map((point, i) => (
-                                                        <tr key={i} style={{
-                                                            backgroundColor: i % 2 === 0 ? '#f9f9f9' : 'white'
-                                                        }}>
-                                                            <td style={{
-                                                                padding: '6px',
-                                                                borderBottom: '1px solid #ddd',
-                                                                textAlign: 'center'
-                                                            }}>{i+1}</td>
-                                                            {selectedColumns.map((column, j) => (
-                                                                <td key={j} style={{
+                                                        <tr
+                                                            key={i}
+                                                            style={{
+                                                                backgroundColor: i % 2 === 0 ? '#f9f9f9' : 'white'
+                                                            }}
+                                                        >
+                                                            <td
+                                                                style={{
                                                                     padding: '6px',
                                                                     borderBottom: '1px solid #ddd',
                                                                     textAlign: 'center'
-                                                                }}>
-                                                                    {point[column] === null || point[column] === undefined
+                                                                }}
+                                                            >
+                                                                {i + 1}
+                                                            </td>
+                                                            {selectedColumns.map((column, j) => (
+                                                                <td
+                                                                    key={j}
+                                                                    style={{
+                                                                        padding: '6px',
+                                                                        borderBottom: '1px solid #ddd',
+                                                                        textAlign: 'center'
+                                                                    }}
+                                                                >
+                                                                    {point[column] === null ||
+                                                                    point[column] === undefined
                                                                         ? 'N/A'
                                                                         : typeof point[column] === 'number'
                                                                             ? (point[column] as number).toFixed(2)
@@ -214,7 +321,7 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                                 </div>
                             </div>
                         </>
-                    )}
+                    ) : null}
                 </div>
                 <div className="dialog-footer">
                     <button className="ok-button" onClick={onClose}>Close</button>

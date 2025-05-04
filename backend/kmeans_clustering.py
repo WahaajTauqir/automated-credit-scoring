@@ -26,69 +26,183 @@ K_RANGE = range(1, 11)
 def generate_cluster_scatter(data, cluster_labels, columns, title="Cluster Distribution"):
     """Generate a scatter plot of the clusters with different colors for each cluster"""
     plt.figure(figsize=(10, 8))
-    
+
     # Get unique clusters
     unique_clusters = np.unique(cluster_labels)
     num_clusters = len(unique_clusters)
-    
+
     # Create colormap
     cmap = plt.cm.get_cmap('viridis', num_clusters)
-    
+
     # For 1D data, create a scatter with jittered y-values
     if len(columns) == 1:
-        # Add small random noise for y-axis to spread points vertically
         y_jitter = np.random.normal(0, 0.1, size=len(cluster_labels))
-        
+
         for cluster_id in unique_clusters:
             mask = cluster_labels == cluster_id
-            plt.scatter(data[mask], y_jitter[mask], alpha=0.6, 
+            plt.scatter(data[mask], y_jitter[mask], alpha=0.6,
                         label=f'Cluster {cluster_id+1}', color=cmap(cluster_id))
-        
+
         plt.xlabel(columns[0])
         plt.ylabel('Jittered Value (for visualization only)')
-        
+
     # For 2D data, create a regular scatter plot
     elif len(columns) == 2:
         for cluster_id in unique_clusters:
             mask = cluster_labels == cluster_id
             plt.scatter(data[mask, 0], data[mask, 1], alpha=0.6,
                         label=f'Cluster {cluster_id+1}', color=cmap(cluster_id))
-        
+
         plt.xlabel(columns[0])
         plt.ylabel(columns[1])
-        
+
     # For 3D+ data, use PCA to reduce to 2D for visualization
     else:
         from sklearn.decomposition import PCA
-        
-        # Reduce to 2D for visualization
+
         pca = PCA(n_components=2)
         data_2d = pca.fit_transform(data)
-        
+
         for cluster_id in unique_clusters:
             mask = cluster_labels == cluster_id
             plt.scatter(data_2d[mask, 0], data_2d[mask, 1], alpha=0.6,
                         label=f'Cluster {cluster_id+1}', color=cmap(cluster_id))
-        
+
         plt.xlabel('Principal Component 1')
         plt.ylabel('Principal Component 2')
-        plt.text(0.05, 0.95, f'PCA applied: {len(columns)}-D → 2-D', 
-                transform=plt.gca().transAxes, fontsize=9, va='top')
-    
-    # Add plot elements
+        plt.text(0.05, 0.95, f'PCA applied: {len(columns)}-D → 2-D',
+                 transform=plt.gca().transAxes, fontsize=9, va='top')
+
     plt.title(title)
     plt.grid(linestyle='--', alpha=0.3)
     plt.legend(title="Clusters")
     plt.tight_layout()
-    
-    # Convert the plot to a base64-encoded string
+
     buffer = io.BytesIO()
     plt.savefig(buffer, format='png', dpi=100)
     buffer.seek(0)
     plot_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
     plt.close()
-    
+
     return plot_data
+
+def generate_cluster_profile_plot(cluster_stats, columns, title="Cluster Profile"):
+    """Generate a radar chart showing how each cluster differs across dimensions"""
+    plt.figure(figsize=(10, 8))
+
+    categories = columns
+    N = len(categories)
+
+    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+    angles += angles[:1]
+
+    ax = plt.subplot(111, polar=True)
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+
+    plt.xticks(angles[:-1], categories)
+    ax.set_rlabel_position(0)
+
+    for cluster_id, stats in cluster_stats.items():
+        values = [stats[col]['normalized_mean'] for col in columns]
+        values += values[:1]
+        ax.plot(angles, values, linewidth=1, linestyle='solid',
+                label=f'Cluster {cluster_id+1}')
+        ax.fill(angles, values, alpha=0.1)
+
+    plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+    plt.title(title, y=1.1)
+
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
+    buffer.seek(0)
+    plot_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    plt.close()
+
+    return plot_data
+
+def calculate_feature_importance(cluster_info, columns):
+    """Calculate feature importance for each cluster"""
+    feature_importance = {}
+
+    global_means = {col: np.mean([c['column_stats'][col]['mean']
+                                  for c in cluster_info])
+                    for col in columns}
+
+    for cluster in cluster_info:
+        cluster_id = cluster['id']
+        importance_scores = {}
+
+        for col in columns:
+            cluster_mean = cluster['column_stats'][col]['mean']
+            global_mean = global_means[col]
+            std_dev = np.std([c['column_stats'][col]['mean']
+                              for c in cluster_info])
+
+            if std_dev > 0:
+                importance = abs(cluster_mean - global_mean) / std_dev
+            else:
+                importance = 0
+
+            importance_scores[col] = importance
+
+        total = sum(importance_scores.values())
+        if total > 0:
+            importance_scores = {k: v/total for k, v in importance_scores.items()}
+
+        feature_importance[cluster_id] = importance_scores
+
+    return feature_importance
+
+def generate_cluster_descriptions(cluster_info, columns, feature_importance):
+    """Generate natural language descriptions of each cluster"""
+    descriptions = []
+
+    global_stats = {
+        col: {
+            'mean': np.mean([c['column_stats'][col]['mean'] for c in cluster_info]),
+            'min': np.min([c['column_stats'][col]['min'] for c in cluster_info]),
+            'max': np.max([c['column_stats'][col]['max'] for c in cluster_info])
+        }
+        for col in columns
+    }
+
+    for cluster in cluster_info:
+        cluster_id = cluster['id']
+        description_parts = []
+
+        top_features = sorted(feature_importance[cluster_id].items(),
+                              key=lambda x: x[1], reverse=True)[:3]
+
+        for feature, importance in top_features:
+            cluster_mean = cluster['column_stats'][feature]['mean']
+            global_mean = global_stats[feature]['mean']
+
+            if cluster_mean > global_mean * 1.2:
+                relation = "higher than average"
+            elif cluster_mean < global_mean * 0.8:
+                relation = "lower than average"
+            else:
+                relation = "about average"
+
+            description_parts.append(
+                f"{feature} ({relation})"
+            )
+
+        description = (
+                f"Cluster {cluster_id+1} is characterized by: " +
+                ", ".join(description_parts) + ". " +
+                f"It contains {cluster['count']} records " +
+                f"({cluster['count']/sum(c['count'] for c in cluster_info):.1%} of total)."
+        )
+
+        descriptions.append({
+            'cluster_id': cluster_id,
+            'description': description,
+            'top_features': [f[0] for f in top_features]
+        })
+
+    return descriptions
 
 def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluster_col_name="cluster", find_optimal_k=True):
     result = {
@@ -97,37 +211,31 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
         'cluster_info': [],
         'centers': None,
         'plot': None,
-        'error': None
+        'error': None,
+        'explanations': None
     }
 
     try:
-        # --- Data Preparation ---
-        # 1. Check if all columns exist
+        # Data Preparation
         missing_cols = [col for col in columns_to_cluster if col not in dataframe.columns]
         if missing_cols:
             result['error'] = f"The following columns were not found: {missing_cols}"
             return result
 
-        # 2. Select the subset and create a copy
         df_cluster = dataframe[columns_to_cluster].copy()
 
-        # 3. Handle missing values and check numeric types
         for col in columns_to_cluster:
             if df_cluster[col].isnull().any():
                 if pd.api.types.is_numeric_dtype(df_cluster[col]):
-                    # Use median instead of mean for more robust handling of outliers
                     median_value = df_cluster[col].median()
                     df_cluster[col].fillna(median_value, inplace=True)
-                    print(f"Imputed NaNs in '{col}' using median: {median_value}")
                 else:
-                    # For non-numeric columns
                     result['error'] = f"Column '{col}' has NaNs and is not numeric"
                     return result
             if not pd.api.types.is_numeric_dtype(df_cluster[col]):
                 result['error'] = f"Column '{col}' is not numeric (Type: {df_cluster[col].dtype})"
                 return result
 
-        # 4. Extract data as NumPy array
         if len(columns_to_cluster) == 1:
             X = df_cluster.values.reshape(-1, 1)
         else:
@@ -137,53 +245,46 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
             result['error'] = "No data available for clustering after preparation"
             return result
 
-        # 5. Scale the data
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
-                # --- Determine Optimal K ---
+        # Determine Optimal K
         optimal_k = DEFAULT_K
         distortions = []
 
         if find_optimal_k:
             valid_k_range = []
             k_scores = {}
-            
-            # Calculate scores using multiple methods for each k
+
             for k in k_range:
-                if k <= X_scaled.shape[0] and k > 1:  # Some metrics require at least 2 clusters
+                if k <= X_scaled.shape[0] and k > 1:
                     kmeans_model = KMeans(n_clusters=k, random_state=42, n_init=10)
                     cluster_labels = kmeans_model.fit_predict(X_scaled)
-                    
-                    # 1. Inertia (distortion)
+
                     distortion = kmeans_model.inertia_
                     distortions.append(distortion)
-                    
-                    # 2. Silhouette Score (higher is better)
-                    silhouette = -1  # Default for k=1
+
+                    silhouette = -1
                     try:
                         if k > 1:
                             silhouette = sklearn.metrics.silhouette_score(X_scaled, cluster_labels, random_state=42)
                     except:
                         silhouette = -1
-                    
-                    # 3. Calinski-Harabasz Index (higher is better)
-                    ch_score = -1  # Default for k=1
+
+                    ch_score = -1
                     try:
                         if k > 1:
                             ch_score = sklearn.metrics.calinski_harabasz_score(X_scaled, cluster_labels)
                     except:
                         ch_score = -1
-                    
-                    # 4. Davies-Bouldin Index (lower is better)
-                    db_score = float('inf')  # Default for k=1
+
+                    db_score = float('inf')
                     try:
                         if k > 1:
                             db_score = sklearn.metrics.davies_bouldin_score(X_scaled, cluster_labels)
                     except:
                         db_score = float('inf')
-                    
-                    # Store all scores
+
                     k_scores[k] = {
                         'distortion': distortion,
                         'silhouette': silhouette,
@@ -191,112 +292,93 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
                         'db_score': db_score
                     }
                     valid_k_range.append(k)
-            
-            # Process scores only if we have valid data
+
             if len(valid_k_range) >= 2:
-                # Normalize scores to 0-1 range for comparison
                 normalized_scores = {}
-                
-                # 1. Process distortion (lower is better)
+
                 if len(distortions) >= 2:
                     min_dist = min(distortions)
                     max_dist = max(distortions)
                     dist_range = max_dist - min_dist
-                    
+
                     if dist_range > 0:
                         for k in k_scores:
-                            # Invert so higher is better
                             normalized_scores.setdefault(k, {})
                             normalized_scores[k]['distortion'] = (max_dist - k_scores[k]['distortion']) / dist_range
-                    
-                    # Try to use KneeLocator for distortion
+
                     try:
                         if has_kneelocator:
                             kneedle = KneeLocator(valid_k_range, distortions, S=1.0, curve='convex', direction='decreasing')
                             if kneedle.elbow:
                                 normalized_scores.setdefault(kneedle.elbow, {})
-                                normalized_scores[kneedle.elbow].setdefault('votes', 0)
-                                normalized_scores[kneedle.elbow]['votes'] = normalized_scores[kneedle.elbow].get('votes', 0) + 2  # Extra weight for elbow method
+                                normalized_scores[kneedle.elbow]['votes'] = normalized_scores[kneedle.elbow].get('votes', 0) + 2
                     except Exception:
                         pass
-                
-                # 2. Process silhouette (higher is better)
+
                 silhouette_values = [k_scores[k]['silhouette'] for k in k_scores if k_scores[k]['silhouette'] > -1]
                 if silhouette_values:
                     min_sil = min(silhouette_values)
                     max_sil = max(silhouette_values)
                     sil_range = max_sil - min_sil
-                    
+
                     if sil_range > 0:
                         for k in k_scores:
                             if k_scores[k]['silhouette'] > -1:
                                 normalized_scores.setdefault(k, {})
                                 normalized_scores[k]['silhouette'] = (k_scores[k]['silhouette'] - min_sil) / sil_range
-                    
-                    # Find k with maximum silhouette score
+
                     best_silhouette_k = max([k for k in k_scores], key=lambda k: k_scores[k]['silhouette'])
                     if best_silhouette_k > 0:
                         normalized_scores.setdefault(best_silhouette_k, {})
-                        normalized_scores[best_silhouette_k].setdefault('votes', 0)
-                        normalized_scores[best_silhouette_k]['votes'] = normalized_scores[best_silhouette_k].get('votes', 0) + 2  # Extra weight
-                
-                # 3. Process CH score (higher is better)
+                        normalized_scores[best_silhouette_k]['votes'] = normalized_scores[best_silhouette_k].get('votes', 0) + 2
+
                 ch_values = [k_scores[k]['ch_score'] for k in k_scores if k_scores[k]['ch_score'] > -1]
                 if ch_values:
                     min_ch = min(ch_values)
                     max_ch = max(ch_values)
                     ch_range = max_ch - min_ch
-                    
+
                     if ch_range > 0:
                         for k in k_scores:
                             if k_scores[k]['ch_score'] > -1:
                                 normalized_scores.setdefault(k, {})
                                 normalized_scores[k]['ch_score'] = (k_scores[k]['ch_score'] - min_ch) / ch_range
-                    
-                    # Find k with maximum CH score
+
                     best_ch_k = max([k for k in k_scores], key=lambda k: k_scores[k]['ch_score'])
                     if best_ch_k > 0:
                         normalized_scores.setdefault(best_ch_k, {})
-                        normalized_scores[best_ch_k].setdefault('votes', 0)
                         normalized_scores[best_ch_k]['votes'] = normalized_scores[best_ch_k].get('votes', 0) + 1
-                
-                # 4. Process DB score (lower is better)
+
                 db_values = [k_scores[k]['db_score'] for k in k_scores if k_scores[k]['db_score'] < float('inf')]
                 if db_values:
                     min_db = min(db_values)
                     max_db = max(db_values)
                     db_range = max_db - min_db
-                    
+
                     if db_range > 0:
                         for k in k_scores:
                             if k_scores[k]['db_score'] < float('inf'):
                                 normalized_scores.setdefault(k, {})
-                                # Invert so higher is better
                                 normalized_scores[k]['db_score'] = (max_db - k_scores[k]['db_score']) / db_range
-                    
-                    # Find k with minimum DB score
+
                     best_db_k = min([k for k in k_scores], key=lambda k: k_scores[k]['db_score'])
                     if best_db_k > 0:
                         normalized_scores.setdefault(best_db_k, {})
-                        normalized_scores[best_db_k].setdefault('votes', 0)
                         normalized_scores[best_db_k]['votes'] = normalized_scores[best_db_k].get('votes', 0) + 1
-                
-                # Calculate aggregate scores and make final decision
+
                 final_scores = {}
                 for k in normalized_scores:
-                    # Sum up normalized scores (all metrics now have higher=better orientation)
                     metrics = ['distortion', 'silhouette', 'ch_score', 'db_score']
                     score_values = [normalized_scores[k].get(metric, 0) for metric in metrics]
                     score_count = sum(1 for x in score_values if x > 0)
-                    
+
                     if score_count > 0:
                         final_scores[k] = sum(score_values) / score_count + normalized_scores[k].get('votes', 0) * 0.2
-                
-                # Choose k with the highest score
+
                 if final_scores:
                     optimal_k = max(final_scores.items(), key=lambda x: x[1])[0]
-        # --- Apply K-Means ---
-        # Ensure optimal_k is valid
+
+        # Apply K-Means
         if optimal_k > X_scaled.shape[0]:
             optimal_k = max(1, X_scaled.shape[0])
         if optimal_k <= 0:
@@ -307,18 +389,15 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
         kmeans.fit(X_scaled)
         cluster_labels = kmeans.labels_
 
-        # Add cluster labels to DataFrame
-        dataframe = dataframe.copy()  # Don't modify the input DataFrame
+        dataframe = dataframe.copy()
         dataframe[output_cluster_col_name] = pd.Series(cluster_labels, index=df_cluster.index)
         dataframe[output_cluster_col_name] = dataframe[output_cluster_col_name].fillna(-1).astype(int)
 
-        # Get cluster centers in original scale
         cluster_centers_original = scaler.inverse_transform(kmeans.cluster_centers_)
         centers_df = pd.DataFrame(cluster_centers_original, columns=columns_to_cluster)
 
-        # Generate scatter plot of clusters
         scatter_plot = generate_cluster_scatter(
-            X,  # Use original unscaled data for better interpretability
+            X,
             cluster_labels,
             columns_to_cluster,
             f"Scatter Plot of {optimal_k} Clusters for {', '.join(columns_to_cluster)}"
@@ -331,7 +410,6 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
             cluster_df = dataframe[dataframe[output_cluster_col_name] == cluster_id]
             cluster_data = {}
 
-            # For each column in the cluster, get some representative data points
             for col in columns_to_cluster:
                 cluster_data[col] = {
                     'center': centers_df.loc[cluster_id, col],
@@ -340,11 +418,9 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
                     'mean': cluster_df[col].mean() if not cluster_df.empty else None
                 }
 
-            # Get sample data points (limited to 20 for performance)
             sample_size = min(20, len(cluster_df))
             sample_data = cluster_df.sample(n=sample_size) if not cluster_df.empty and sample_size > 0 else pd.DataFrame()
 
-            # Convert to dictionary for JSON serialization
             sample_data_dict = []
             for idx, row in sample_data.iterrows():
                 row_dict = {}
@@ -360,78 +436,48 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
                 'sample_data': sample_data_dict
             })
 
-        # Populate result
+        # Add explainability features
+        feature_importance = calculate_feature_importance(cluster_info, columns_to_cluster)
+        cluster_descriptions = generate_cluster_descriptions(cluster_info, columns_to_cluster, feature_importance)
+
+        # Generate cluster profile plot
+        global_stats = {
+            col: {
+                'min': np.min([c['column_stats'][col]['min'] for c in cluster_info]),
+                'max': np.max([c['column_stats'][col]['max'] for c in cluster_info])
+            }
+            for col in columns_to_cluster
+        }
+
+        cluster_stats = {
+            c['id']: {
+                col: {
+                    'normalized_mean': (c['column_stats'][col]['mean'] - global_stats[col]['min']) /
+                                       (global_stats[col]['max'] - global_stats[col]['min'])
+                }
+                for col in columns_to_cluster
+            }
+            for c in cluster_info
+        }
+
+        profile_plot = generate_cluster_profile_plot(
+            cluster_stats,
+            columns_to_cluster,
+            f"Cluster Profiles for {', '.join(columns_to_cluster)}"
+        )
+
         result['df'] = dataframe
         result['k_used'] = optimal_k
         result['cluster_info'] = cluster_info
         result['centers'] = centers_df.to_dict(orient='records')
+        result['explanations'] = {
+            'feature_importance': feature_importance,
+            'cluster_descriptions': cluster_descriptions,
+            'profile_plot': profile_plot
+        }
 
         return result
 
     except Exception as e:
         result['error'] = str(e)
         return result
-
-# Flask application
-app = Flask(__name__)
-CORS(app)
-
-@app.route('/api/cluster', methods=['POST'])
-def cluster_data():
-    try:
-        # Get request data
-        data = request.json
-
-        if not data or 'data' not in data or 'columns' not in data:
-            return jsonify({'success': False, 'error': 'Invalid request format. Need "data" and "columns"'}), 400
-
-        # Convert data to DataFrame
-        try:
-            df = pd.DataFrame(data['data'])
-        except Exception as e:
-            return jsonify({'success': False, 'error': f'Error creating DataFrame: {str(e)}'}), 400
-
-        columns_to_cluster = data['columns']
-        if not columns_to_cluster or not isinstance(columns_to_cluster, list):
-            return jsonify({'success': False, 'error': 'Invalid columns list'}), 400
-
-        # Optional parameters
-        k_range = range(1, data.get('max_k', 11))
-        find_optimal_k = data.get('find_optimal_k', True)
-        output_col = data.get('output_column', 'cluster')
-
-        # Perform clustering for individual columns
-        individual_results = {}
-        for col in columns_to_cluster:
-            result = perform_kmeans(df, [col], k_range, f"{col}_cluster", find_optimal_k)
-            if result['error'] is None:
-                individual_results[col] = {
-                    'k': result['k_used'],
-                    'cluster_info': result['cluster_info'],
-                    'plot': result['plot']
-                }
-
-        # Perform clustering on combined columns
-        combined_result = None
-        if len(columns_to_cluster) >= 2:
-            result = perform_kmeans(df, columns_to_cluster, k_range, "combined_cluster", find_optimal_k)
-            if result['error'] is None:
-                combined_result = {
-                    'k': result['k_used'],
-                    'cluster_info': result['cluster_info'],
-                    'plot': result['plot']
-                }
-
-        # Return results
-        return jsonify({
-            'success': True,
-            'individual_results': individual_results,
-            'combined_result': combined_result,
-            'error': None
-        })
-
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)

@@ -28,12 +28,10 @@ function App() {
     };
 
     const handleSelectColumns = (selected: string[]) => {
-        console.log("Selected columns:", selected); // Debug logging
         setSelectedColumns(selected);
     };
 
     const handleOpenSelectedColumnsDialog = () => {
-        console.log("Opening selected columns dialog. Columns:", selectedColumns); // Debug logging
         setIsSelectedColumnsDialogOpen(true);
     };
 
