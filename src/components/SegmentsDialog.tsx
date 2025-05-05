@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import './SegmentsDialog.css';
+
 interface SegmentsDialogProps {
     isOpen: boolean;
     onClose: () => void;
@@ -103,7 +105,7 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
 
     return (
         <div className="dialog-overlay">
-            <div className="dialog-content" style={{ width: '90%', maxWidth: '1200px' }}>
+            <div className="dialog-content segments-dialog">
                 <div className="dialog-header">
                     <h2>Data Segments</h2>
                     <button className="close-button" onClick={onClose}>×</button>
@@ -112,68 +114,62 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                     <h3>K-means Clustering Results</h3>
 
                     {isLoading ? (
-                        <div style={{ textAlign: 'center', padding: '20px' }}>
+                        <div className="loading-container">
                             <p>Generating clusters...</p>
                         </div>
                     ) : error ? (
-                        <div style={{ color: 'red', padding: '20px' }}>
+                        <div className="error-container">
                             <p>Error: {error}</p>
                         </div>
                     ) : result ? (
                         <>
                             {result.plot && (
-                                <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+                                <div className="plot-container">
                                     <h4>Scatter Plot</h4>
                                     <img
                                         src={`data:image/png;base64,${result.plot}`}
                                         alt="Scatter Plot"
-                                        style={{ maxWidth: '100%', height: 'auto' }}
+                                        className="plot-image"
                                     />
                                 </div>
                             )}
 
                             {result.explanations && (
-                                <div style={{ marginBottom: '30px' }}>
-                                    <h4>Cluster Explanations</h4>
+                                <div className="explanations-container">
+                                    <h4 className="explanations-title">Cluster Explanations</h4>
 
                                     {result.explanations.profile_plot && (
-                                        <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+                                        <div className="profile-plot-container">
                                             <h5>Cluster Profiles</h5>
                                             <img
                                                 src={`data:image/png;base64,${result.explanations.profile_plot}`}
                                                 alt="Cluster Profile"
-                                                style={{ maxWidth: '100%', height: 'auto' }}
+                                                className="profile-image"
                                             />
                                         </div>
                                     )}
 
-                                    <div style={{ marginBottom: '20px' }}>
-                                        <h5>Key Characteristics</h5>
+                                    <div className="clusters-grid">
                                         {result.explanations.cluster_descriptions.map((desc) => (
-                                            <div
-                                                key={`desc-${desc.cluster_id}`}
-                                                style={{
-                                                    backgroundColor: '#f8f9fa',
-                                                    padding: '15px',
-                                                    borderRadius: '8px',
-                                                    marginBottom: '10px'
-                                                }}
-                                            >
-                                                <p style={{ fontWeight: 'bold' }}>Cluster {desc.cluster_id + 1}:</p>
-                                                <p>{desc.description}</p>
-                                                <div style={{ marginTop: '10px' }}>
-                                                    <p style={{ fontWeight: 'bold' }}>Top Features:</p>
-                                                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                                            <div key={`desc-${desc.cluster_id}`} className="cluster-card">
+                                                <div className="cluster-header">
+                                                    <h5 className="cluster-title">
+                                                        Cluster {desc.cluster_id + 1}
+                                                    </h5>
+                                                    <span className="cluster-count">
+                                                        {result.cluster_info.find(c => c.id === desc.cluster_id)?.count} records
+                                                    </span>
+                                                </div>
+
+                                                <p className="cluster-description">
+                                                    {desc.description}
+                                                </p>
+
+                                                <div className="features-section">
+                                                    <p className="features-title">Key Features:</p>
+                                                    <div className="features-container">
                                                         {desc.top_features.map((feature, i) => (
-                                                            <span
-                                                                key={i}
-                                                                style={{
-                                                                    backgroundColor: '#e9f5ff',
-                                                                    padding: '5px 10px',
-                                                                    borderRadius: '20px',
-                                                                    fontSize: '0.9em'
-                                                                }}
-                                                            >
+                                                            <span key={i} className="feature-tag">
                                                                 {feature}
                                                             </span>
                                                         ))}
@@ -185,124 +181,38 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                                 </div>
                             )}
 
-                            <div style={{ overflowX: 'auto', width: '100%' }}>
-                                <div
-                                    style={{
-                                        display: 'grid',
-                                        gridTemplateColumns: `repeat(${Math.min(result.cluster_info.length, 4)}, 1fr)`,
-                                        gap: '10px',
-                                        marginBottom: '20px'
-                                    }}
-                                >
+                            <div className="clusters-table-container">
+                                <div className="clusters-grid">
                                     {result.cluster_info.map((cluster, idx) => (
-                                        <div
-                                            key={idx}
-                                            style={{
-                                                padding: '15px',
-                                                backgroundColor: '#f0f7ff',
-                                                borderRadius: '8px',
-                                                textAlign: 'center',
-                                                border: '1px solid #d0e3ff'
-                                            }}
-                                        >
+                                        <div key={idx} className="cluster-data-card">
                                             <h4>Cluster {cluster.id + 1}</h4>
-                                            <div style={{ marginBottom: '10px' }}>
+                                            <div className="cluster-center">
                                                 {Object.entries(cluster.center).map(([col, value], i) => (
-                                                    <div
-                                                        key={i}
-                                                        style={{ marginBottom: '5px', textAlign: 'left' }}
-                                                    >
+                                                    <div key={i} className="center-item">
                                                         <strong>{col}:</strong> {value.toFixed(2)}
                                                     </div>
                                                 ))}
                                             </div>
-                                            <div
-                                                style={{
-                                                    fontSize: '1.2em',
-                                                    fontWeight: 'bold',
-                                                    backgroundColor: '#0066cc',
-                                                    color: 'white',
-                                                    padding: '5px 10px',
-                                                    borderRadius: '4px',
-                                                    marginBottom: '15px'
-                                                }}
-                                            >
+                                            <div className="cluster-count-badge">
                                                 {cluster.count} records
                                             </div>
 
-                                            <div
-                                                style={{
-                                                    height: '200px',
-                                                    overflowY: 'auto',
-                                                    border: '1px solid #ddd',
-                                                    borderRadius: '4px',
-                                                    backgroundColor: 'white'
-                                                }}
-                                            >
-                                                <table
-                                                    style={{
-                                                        width: '100%',
-                                                        borderCollapse: 'collapse'
-                                                    }}
-                                                >
-                                                    <thead
-                                                        style={{
-                                                            position: 'sticky',
-                                                            top: 0,
-                                                            backgroundColor: '#f0f0f0',
-                                                            zIndex: 1
-                                                        }}
-                                                    >
+                                            <div className="sample-data-container">
+                                                <table className="sample-data-table">
+                                                    <thead>
                                                     <tr>
-                                                        <th
-                                                            style={{
-                                                                padding: '8px',
-                                                                borderBottom: '1px solid #ddd',
-                                                                textAlign: 'center'
-                                                            }}
-                                                        >
-                                                            #
-                                                        </th>
+                                                        <th>#</th>
                                                         {selectedColumns.map((column, i) => (
-                                                            <th
-                                                                key={i}
-                                                                style={{
-                                                                    padding: '8px',
-                                                                    borderBottom: '1px solid #ddd',
-                                                                    textAlign: 'center'
-                                                                }}
-                                                            >
-                                                                {column}
-                                                            </th>
+                                                            <th key={i}>{column}</th>
                                                         ))}
                                                     </tr>
                                                     </thead>
                                                     <tbody>
                                                     {cluster.sample_data.map((point, i) => (
-                                                        <tr
-                                                            key={i}
-                                                            style={{
-                                                                backgroundColor: i % 2 === 0 ? '#f9f9f9' : 'white'
-                                                            }}
-                                                        >
-                                                            <td
-                                                                style={{
-                                                                    padding: '6px',
-                                                                    borderBottom: '1px solid #ddd',
-                                                                    textAlign: 'center'
-                                                                }}
-                                                            >
-                                                                {i + 1}
-                                                            </td>
+                                                        <tr key={i} className={i % 2 === 0 ? 'even-row' : 'odd-row'}>
+                                                            <td>{i + 1}</td>
                                                             {selectedColumns.map((column, j) => (
-                                                                <td
-                                                                    key={j}
-                                                                    style={{
-                                                                        padding: '6px',
-                                                                        borderBottom: '1px solid #ddd',
-                                                                        textAlign: 'center'
-                                                                    }}
-                                                                >
+                                                                <td key={j}>
                                                                     {point[column] === null ||
                                                                     point[column] === undefined
                                                                         ? 'N/A'

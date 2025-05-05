@@ -1,0 +1,267 @@
+/* Base dialog styles */
+.dialog-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+.segments-dialog {
+    background-color: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    width: 90%;
+    max-width: 1200px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.dialog-header {
+    padding: 20px;
+    border-bottom: 1px solid #e0e0e0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.dialog-header h2 {
+    margin: 0;
+    color: #2c3e50;
+}
+
+.close-button {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: #666;
+    padding: 0;
+    line-height: 1;
+}
+
+.close-button:hover {
+    color: #333;
+}
+
+.dialog-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex-grow: 1;
+}
+
+.dialog-body h3 {
+    color: #333;
+    margin-top: 0;
+}
+
+.dialog-footer {
+    padding: 15px 20px;
+    border-top: 1px solid #e0e0e0;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.ok-button {
+    padding: 8px 16px;
+    background-color: #0066cc;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.ok-button:hover {
+    background-color: #0052a3;
+}
+
+/* Loading and error states */
+.loading-container,
+.error-container {
+    text-align: center;
+    padding: 20px;
+}
+
+.error-container {
+    color: #d32f2f;
+}
+
+/* Plot containers */
+.plot-container,
+.profile-plot-container {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.plot-image,
+.profile-image {
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+}
+
+/* Explanations section */
+.explanations-container {
+    margin-bottom: 30px;
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.explanations-title {
+    color: #2c3e50;
+    margin-bottom: 15px;
+    font-size: 1.2rem;
+    font-weight: 600;
+    border-bottom: 1px solid #e0e0e0;
+    padding-bottom: 10px;
+}
+
+.clusters-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 15px;
+    margin-top: 15px;
+}
+
+/* Cluster card styles */
+.cluster-card {
+    background-color: white;
+    border-radius: 6px;
+    padding: 15px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    border-left: 4px solid #0066cc;
+}
+
+.cluster-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.cluster-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #0066cc;
+    margin: 0;
+}
+
+.cluster-count {
+    background-color: #e6f2ff;
+    color: #0066cc;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: bold;
+}
+
+.cluster-description {
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: #333;
+    margin-bottom: 12px;
+}
+
+.features-section {
+    margin-top: 10px;
+}
+
+.features-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 8px;
+}
+
+.features-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.feature-tag {
+    background-color: #e9f5ff;
+    padding: 5px 10px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    color: #0066cc;
+    font-weight: 500;
+}
+
+/* Cluster data cards */
+.cluster-data-card {
+    padding: 15px;
+    background-color: #f0f7ff;
+    border-radius: 8px;
+    text-align: center;
+    border: 1px solid #d0e3ff;
+}
+
+.cluster-center {
+    margin-bottom: 10px;
+}
+
+.center-item {
+    margin-bottom: 5px;
+    text-align: left;
+}
+
+.cluster-count-badge {
+    font-size: 1.2em;
+    font-weight: bold;
+    background-color: #0066cc;
+    color: white;
+    padding: 5px 10px;
+    border-radius: 4px;
+    margin-bottom: 15px;
+}
+
+.sample-data-container {
+    height: 300px;
+    overflow-y: auto;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background-color: white;
+}
+
+.sample-data-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.sample-data-table th {
+    padding: 8px;
+    border-bottom: 1px solid #ddd;
+    text-align: center;
+    position: sticky;
+    top: 0;
+    background-color: #f0f0f0;
+    z-index: 1;
+}
+
+.sample-data-table td {
+    padding: 6px;
+    border-bottom: 1px solid #ddd;
+    text-align: center;
+}
+
+.even-row {
+    background-color: #f9f9f9;
+}
+
+.odd-row {
+    background-color: white;
+}
