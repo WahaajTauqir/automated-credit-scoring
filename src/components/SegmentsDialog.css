@@ -111,6 +111,54 @@
     border: 1px solid #ddd;
 }
 
+/* Validation metrics styles */
+.validation-metrics {
+    margin: 20px 0;
+    padding: 15px;
+    background-color: #f5f7fa;
+    border-radius: 8px;
+}
+
+.validation-metrics h4 {
+    margin-top: 0;
+    color: #2c3e50;
+    border-bottom: 1px solid #e0e0e0;
+    padding-bottom: 8px;
+}
+
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 15px;
+    margin-top: 15px;
+}
+
+.metric-card {
+    background-color: white;
+    padding: 15px;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    text-align: center;
+}
+
+.metric-card h5 {
+    margin: 0 0 8px 0;
+    color: #0066cc;
+    font-size: 1rem;
+}
+
+.metric-card p {
+    font-size: 1.2rem;
+    font-weight: bold;
+    margin: 0 0 5px 0;
+    color: #333;
+}
+
+.metric-card small {
+    color: #666;
+    font-size: 0.8rem;
+}
+
 /* Explanations section */
 .explanations-container {
     margin-bottom: 30px;
@@ -224,8 +272,7 @@
     font-weight: bold;
     background-color: #0066cc;
     color: white;
-    padding: 5px 10px;
-    border-radius: 4px;
+    padding: 5px 10px;   border-radius: 4px;
     margin-bottom: 15px;
 }
 

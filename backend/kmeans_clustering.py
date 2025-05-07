@@ -9,6 +9,8 @@ import io
 import base64
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from sklearn import metrics
+from sklearn.decomposition import PCA
 
 # Try to import kneed, handle if not found
 try:
@@ -22,6 +24,26 @@ except ImportError:
 # Default configuration
 DEFAULT_K = 3
 K_RANGE = range(1, 11)
+
+def calculate_validation_metrics(X, labels, true_labels=None):
+    """Calculate various cluster validation metrics"""
+    validation_results = {}
+
+    # Silhouette Score
+    if len(np.unique(labels)) > 1:
+        validation_results['silhouette_score'] = metrics.silhouette_score(X, labels)
+
+    # Calinski-Harabasz Index
+    validation_results['calinski_harabasz_score'] = metrics.calinski_harabasz_score(X, labels)
+
+    # Davies-Bouldin Index
+    validation_results['davies_bouldin_score'] = metrics.davies_bouldin_score(X, labels)
+
+    # Adjusted Rand Index (if true labels are available)
+    if true_labels is not None:
+        validation_results['adjusted_rand_score'] = metrics.adjusted_rand_score(true_labels, labels)
+
+    return validation_results
 
 def generate_cluster_scatter(data, cluster_labels, columns, title="Cluster Distribution"):
     """Generate a scatter plot of the clusters with different colors for each cluster"""
@@ -58,7 +80,6 @@ def generate_cluster_scatter(data, cluster_labels, columns, title="Cluster Distr
 
     # For 3D+ data, use PCA to reduce to 2D for visualization
     else:
-        from sklearn.decomposition import PCA
 
         pca = PCA(n_components=2)
         data_2d = pca.fit_transform(data)
@@ -204,7 +225,7 @@ def generate_cluster_descriptions(cluster_info, columns, feature_importance):
 
     return descriptions
 
-def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluster_col_name="cluster", find_optimal_k=True):
+def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluster_col_name="cluster", find_optimal_k=True, true_labels=None):
     result = {
         'df': None,
         'k_used': -1,
@@ -212,7 +233,7 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
         'centers': None,
         'plot': None,
         'error': None,
-        'explanations': None
+        'validation_metrics': None
     }
 
     try:
@@ -311,6 +332,7 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
                             kneedle = KneeLocator(valid_k_range, distortions, S=1.0, curve='convex', direction='decreasing')
                             if kneedle.elbow:
                                 normalized_scores.setdefault(kneedle.elbow, {})
+                                normalized_scores[kneedle.elbow].setdefault('votes', 0)
                                 normalized_scores[kneedle.elbow]['votes'] = normalized_scores[kneedle.elbow].get('votes', 0) + 2
                     except Exception:
                         pass
@@ -330,6 +352,7 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
                     best_silhouette_k = max([k for k in k_scores], key=lambda k: k_scores[k]['silhouette'])
                     if best_silhouette_k > 0:
                         normalized_scores.setdefault(best_silhouette_k, {})
+                        normalized_scores[best_silhouette_k].setdefault('votes', 0)
                         normalized_scores[best_silhouette_k]['votes'] = normalized_scores[best_silhouette_k].get('votes', 0) + 2
 
                 ch_values = [k_scores[k]['ch_score'] for k in k_scores if k_scores[k]['ch_score'] > -1]
@@ -347,6 +370,7 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
                     best_ch_k = max([k for k in k_scores], key=lambda k: k_scores[k]['ch_score'])
                     if best_ch_k > 0:
                         normalized_scores.setdefault(best_ch_k, {})
+                        normalized_scores[best_ch_k].setdefault('votes', 0)
                         normalized_scores[best_ch_k]['votes'] = normalized_scores[best_ch_k].get('votes', 0) + 1
 
                 db_values = [k_scores[k]['db_score'] for k in k_scores if k_scores[k]['db_score'] < float('inf')]
@@ -364,6 +388,7 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
                     best_db_k = min([k for k in k_scores], key=lambda k: k_scores[k]['db_score'])
                     if best_db_k > 0:
                         normalized_scores.setdefault(best_db_k, {})
+                        normalized_scores[best_db_k].setdefault('votes', 0)
                         normalized_scores[best_db_k]['votes'] = normalized_scores[best_db_k].get('votes', 0) + 1
 
                 final_scores = {}
@@ -403,6 +428,13 @@ def perform_kmeans(dataframe, columns_to_cluster, k_range=K_RANGE, output_cluste
             f"Scatter Plot of {optimal_k} Clusters for {', '.join(columns_to_cluster)}"
         )
         result['plot'] = scatter_plot
+
+        # Calculate validation metrics
+        result['validation_metrics'] = calculate_validation_metrics(
+            X_scaled,
+            cluster_labels,
+            true_labels=true_labels
+        )
 
         # Collect cluster information
         cluster_info = []

@@ -32,11 +32,19 @@ interface Explanations {
     profile_plot: string;
 }
 
+interface ValidationMetrics {
+    silhouette_score?: number;
+    calinski_harabasz_score?: number;
+    davies_bouldin_score?: number;
+    adjusted_rand_score?: number;
+}
+
 interface ClusterResult {
     k: number;
     cluster_info: ClusterInfo[];
     plot: string;
     explanations: Explanations;
+    validation_metrics?: ValidationMetrics;
 }
 
 const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProps) => {
@@ -131,6 +139,42 @@ const SegmentsDialog = ({ isOpen, onClose, selectedColumns }: SegmentsDialogProp
                                         alt="Scatter Plot"
                                         className="plot-image"
                                     />
+                                </div>
+                            )}
+
+                            {result.validation_metrics && (
+                                <div className="validation-metrics">
+                                    <h4>Cluster Validation Metrics</h4>
+                                    <div className="metrics-grid">
+                                        {result.validation_metrics.silhouette_score !== undefined && (
+                                            <div className="metric-card">
+                                                <h5>Silhouette Score</h5>
+                                                <p>{result.validation_metrics.silhouette_score.toFixed(3)}</p>
+                                                <small>Higher is better (-1 to 1)</small>
+                                            </div>
+                                        )}
+                                        {result.validation_metrics.calinski_harabasz_score !== undefined && (
+                                            <div className="metric-card">
+                                                <h5>Calinski-Harabasz</h5>
+                                                <p>{result.validation_metrics.calinski_harabasz_score.toFixed(1)}</p>
+                                                <small>Higher is better</small>
+                                            </div>
+                                        )}
+                                        {result.validation_metrics.davies_bouldin_score !== undefined && (
+                                            <div className="metric-card">
+                                                <h5>Davies-Bouldin</h5>
+                                                <p>{result.validation_metrics.davies_bouldin_score.toFixed(3)}</p>
+                                                <small>Lower is better</small>
+                                            </div>
+                                        )}
+                                        {result.validation_metrics.adjusted_rand_score !== undefined && (
+                                            <div className="metric-card">
+                                                <h5>Adjusted Rand Index</h5>
+                                                <p>{result.validation_metrics.adjusted_rand_score.toFixed(3)}</p>
+                                                <small>Higher is better (-1 to 1)</small>
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
                             )}
 

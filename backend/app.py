@@ -87,31 +87,34 @@ def cluster_data():
         k_range = range(1, data.get('max_k', 11))
         find_optimal_k = data.get('find_optimal_k', True)
         output_col = data.get('output_column', 'cluster')
+        true_labels = data.get('true_labels')
 
         individual_results = {}
         for col in columns_to_cluster:
-            result = perform_kmeans(df, [col], k_range, f"{col}_cluster", find_optimal_k)
+            result = perform_kmeans(df, [col], k_range, f"{col}_cluster", find_optimal_k, true_labels)
             if result['error'] is None:
                 cluster_info = convert_numpy_types(result['cluster_info'])
-                explanations = convert_numpy_types(result['explanations'])
+                explanations = convert_numpy_types(result.get('explanations', {}))
                 individual_results[col] = {
                     'k': int(result['k_used']),
                     'cluster_info': cluster_info,
                     'plot': result['plot'],
-                    'explanations': explanations
+                    'explanations': explanations,
+                    'validation_metrics': result['validation_metrics']
                 }
 
         combined_result = None
         if len(columns_to_cluster) >= 2:
-            result = perform_kmeans(df, columns_to_cluster, k_range, "combined_cluster", find_optimal_k)
+            result = perform_kmeans(df, columns_to_cluster, k_range, "combined_cluster", find_optimal_k, true_labels)
             if result['error'] is None:
                 cluster_info = convert_numpy_types(result['cluster_info'])
-                explanations = convert_numpy_types(result['explanations'])
+                explanations = convert_numpy_types(result.get('explanations', {}))
                 combined_result = {
                     'k': int(result['k_used']),
                     'cluster_info': cluster_info,
                     'plot': result['plot'],
-                    'explanations': explanations
+                    'explanations': explanations,
+                    'validation_metrics': result['validation_metrics']
                 }
 
         return jsonify({
