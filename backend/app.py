@@ -30,6 +30,16 @@ def upload_csv():
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "Not a CSV file"}), 400
 
+@app.route('/api/target-distribution', methods=['POST'])
+def target_distribution():
+    try:
+        df = pd.read_csv("uploaded.csv")
+        data = request.get_json()
+        col = data['column']
+        counts = df[col].value_counts().to_dict()
+        return jsonify(counts)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ---------- BINNING LOGIC ----------
 def coarse_binning_continuous(df, col, target='is_bad', bins=10):
