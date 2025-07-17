@@ -8,6 +8,7 @@ import datetime
 app = Flask(__name__)
 CORS(app)
 
+# ----------- Upload CSV -----------
 @app.route('/api/upload-csv', methods=['POST'])
 def upload_csv():
     if 'file' not in request.files:
@@ -18,7 +19,6 @@ def upload_csv():
     if file and file.filename.endswith('.csv'):
         try:
             df = pd.read_csv(file)
-            # Save file content for reuse later
             df.to_csv("uploaded.csv", index=False)
             return jsonify({
                 "success": True,
@@ -30,6 +30,7 @@ def upload_csv():
             return jsonify({"error": str(e)}), 500
     return jsonify({"error": "Not a CSV file"}), 400
 
+# ----------- Target Distribution -----------
 @app.route('/api/target-distribution', methods=['POST'])
 def target_distribution():
     try:
@@ -41,141 +42,196 @@ def target_distribution():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ---------- BINNING LOGIC ----------
-def coarse_binning_continuous(df, col, target='is_bad', bins=10):
-    df = df.copy()
-
+# ----------- Coarse Binning: Continuous -----------
+def coarse_bin_continuous(df, var, target, bins=10):
     try:
-        df = df[[col, target]].dropna()
+        binned, _ = pd.qcut(df[var], q=bins, retbins=True, labels=False, duplicates='drop')
+        n_bins = len(np.unique(binned.dropna()))
+        df[f'{var}_binned'] = pd.qcut(df[var], q=n_bins, labels=range(1, n_bins + 1), duplicates='drop')
+    except ValueError:
+        df[f'{var}_binned'] = 1
 
-        # Ensure the column is numeric
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    tab = pd.crosstab(df[f'{var}_binned'], df[target])
+    tab.columns = ['Good', 'Bad']
+    tab['Total'] = tab['Good'] + tab['Bad']
+    tab['Freq%'] = (tab['Total'] / tab['Total'].sum()) * 100
+    tab['Bad Rate'] = (tab['Bad'] / tab['Total']) * 100
+    return tab.reset_index(), df[f'{var}_binned']
 
-        # Sort the dataframe by the column to bin
-        df = df.sort_values(by=col).reset_index(drop=True)
+# ----------- Coarse Binning: Discrete -----------
+def coarse_bin_discrete(df, var, target, bad_rate_diff=0.5):
+    tab = pd.crosstab(df[var], df[target])
+    tab.columns = ['Good', 'Bad']
+    tab['Total'] = tab['Good'] + tab['Bad']
+    tab['Bad Rate'] = (tab['Bad'] / tab['Total']) * 100
+    tab = tab.sort_values('Bad Rate')
 
-        # Create equal-sized bins by index slicing (10% each)
-        total_rows = df.shape[0]
-        bin_size = total_rows // bins
-        labels = []
+    bin_mapping = {}
+    current_bin = 1
+    prev_bad_rate = tab['Bad Rate'].iloc[0]
 
-        for i in range(bins):
-            start_idx = i * bin_size
-            end_idx = (i + 1) * bin_size if i < bins - 1 else total_rows
+    for idx, row in tab.iterrows():
+        if abs(row['Bad Rate'] - prev_bad_rate) > bad_rate_diff:
+            current_bin += 1
+        bin_mapping[idx] = current_bin
+        prev_bad_rate = row['Bad Rate']
 
-            bin_label = f"Bin {i+1}"
-            labels.extend([bin_label] * (end_idx - start_idx))
+    df[f'{var}_binned'] = df[var].map(bin_mapping)
 
-        df['bin'] = labels
+    final_tab = pd.crosstab(df[f'{var}_binned'], df[target])
+    final_tab.columns = ['Good', 'Bad']
+    final_tab['Total'] = final_tab['Good'] + final_tab['Bad']
+    final_tab['Freq%'] = (final_tab['Total'] / final_tab['Total'].sum()) * 100
+    final_tab['Bad Rate'] = (final_tab['Bad'] / final_tab['Total']) * 100
 
-        # Now group and compute stats
-        stats = df.groupby('bin')[target].agg(['count', 'sum'])
-        stats['good'] = stats['count'] - stats['sum']
-        stats['freq'] = stats['count'] / total_rows * 100
-        stats['bad_rate'] = stats['sum'] / stats['count'] * 100
+    return final_tab.reset_index(), df[f'{var}_binned'], bin_mapping
 
-        # Round for clarity
-        stats = stats.reset_index()
-        stats['freq'] = stats['freq'].round(4)
-        stats['bad_rate'] = stats['bad_rate'].round(4)
+# ----------- Fine Binning: Continuous -----------
+def fine_bin_continuous(df, var, target, bin_merges):
+    binned_col = f'{var}_binned'
+    fine_binned_col = f'{var}_fine_binned'
 
-        return stats
+    bin_map = {}
+    for new_bin, old_bins in bin_merges.items():
+        for old_bin in old_bins:
+            bin_map[old_bin] = new_bin
 
-    except Exception as e:
-        return pd.DataFrame([{"error": f"Binning failed for {col}: {str(e)}"}])
+    df[fine_binned_col] = df[binned_col].map(bin_map)
 
+    cross_tab = pd.crosstab(df[fine_binned_col], df[target])
+    cross_tab.columns = ['Good', 'Bad']
+    cross_tab['Total'] = cross_tab['Good'] + cross_tab['Bad']
+    cross_tab['Freq%'] = (cross_tab['Total'] / cross_tab['Total'].sum()) * 100
+    cross_tab['Bad Rate'] = (cross_tab['Bad'] / cross_tab['Total']) * 100
 
+    return cross_tab.reset_index(), df[fine_binned_col]
 
-def coarse_binning_discrete(df, col, target='is_bad', threshold=0.5):
-    df = df.copy()
-    try:
-        df = df[[col, target]].dropna()
-        stats = df.groupby(col)[target].agg(['count', 'sum']).reset_index()
-        stats['good'] = stats['count'] - stats['sum']
-        stats['bad_rate'] = stats['sum'] / stats['count'] * 100
+# ----------- Fine Binning: Discrete -----------
+def fine_bin_discrete(df, var, target, bin_merges):
+    binned_col = f'{var}_binned'
+    fine_binned_col = f'{var}_fine_binned'
 
-        # Round float column
-        stats['bad_rate'] = stats['bad_rate'].round(4)
+    bin_map = {}
+    for new_bin, old_bins in bin_merges.items():
+        for old_bin in old_bins:
+            bin_map[old_bin] = new_bin
 
-        return stats
-    except Exception as e:
-        return pd.DataFrame([{"error": f"Binning failed for {col}: {str(e)}"}])
+    df[fine_binned_col] = df[binned_col].map(bin_map)
 
+    cross_tab = pd.crosstab(df[fine_binned_col], df[target])
+    cross_tab.columns = ['Good', 'Bad']
+    cross_tab['Total'] = cross_tab['Good'] + cross_tab['Bad']
+    cross_tab['Freq%'] = (cross_tab['Total'] / cross_tab['Total'].sum()) * 100
+    cross_tab['Bad Rate'] = (cross_tab['Bad'] / cross_tab['Total']) * 100
 
+    return cross_tab.reset_index(), df[fine_binned_col]
 
-def auto_merge_discrete_bins(df, col, target='is_bad', threshold=0.5):
-    df = df[[col, target]].dropna()
-    stats = df.groupby(col)[target].agg(['count', 'sum']).reset_index()
-    stats['good'] = stats['count'] - stats['sum']
-    stats['bad_rate'] = (stats['sum'] / stats['count']) * 100
+# ----------- Cross Tab View -----------
+def create_cross_tab_view(df, var, target):
+    binned_col = f'{var}_fine_binned' if f'{var}_fine_binned' in df.columns else f'{var}_binned'
+    if binned_col not in df.columns:
+        return None, None
 
-    # Sort by bad rate
-    stats = stats.sort_values('bad_rate').reset_index(drop=True)
+    tab = pd.crosstab(df[binned_col], df[target])
+    tab.columns = ['Good', 'Bad']
+    tab['Total'] = tab['Good'] + tab['Bad']
+    tab['Freq%'] = (tab['Total'] / tab['Total'].sum()) * 100
+    tab['Bad Rate'] = (tab['Bad'] / tab['Total']) * 100
+    tab['Freq%'] = tab['Freq%'].round(1)
+    tab['Bad Rate'] = tab['Bad Rate'].round(1)
 
-    # Auto merge adjacent groups within threshold
-    merged_bins = []
-    current_bin = [stats.iloc[0]]
+    return f"{var} (Binned) * {target} Crosstabulation", tab.reset_index()
 
-    for i in range(1, len(stats)):
-        prev = current_bin[-1]
-        curr = stats.iloc[i]
-        if abs(prev['bad_rate'] - curr['bad_rate']) <= threshold:
-            current_bin.append(curr)
-        else:
-            # merge current_bin
-            merged = {
-                col: ', '.join([str(x[col]) for x in current_bin]),
-                'count': sum(x['count'] for x in current_bin),
-                'sum': sum(x['sum'] for x in current_bin),
-            }
-            merged['good'] = merged['count'] - merged['sum']
-            merged['bad_rate'] = (merged['sum'] / merged['count']) * 100
-            merged_bins.append(merged)
-            current_bin = [curr]
-
-    # Final merge
-    if current_bin:
-        merged = {
-            col: ', '.join([str(x[col]) for x in current_bin]),
-            'count': sum(x['count'] for x in current_bin),
-            'sum': sum(x['sum'] for x in current_bin),
-        }
-        merged['good'] = merged['count'] - merged['sum']
-        merged['bad_rate'] = (merged['sum'] / merged['count']) * 100
-        merged_bins.append(merged)
-
-    return pd.DataFrame(merged_bins)
-
-
-
-@app.route('/api/univariate-analysis', methods=['POST'])
-def univariate_analysis():
+# ----------- Fine Binning API -----------
+@app.route('/api/fine-bin', methods=['POST'])
+def fine_bin_api():
     try:
         req = request.get_json()
-        discrete_cols = req['discrete']
-        continuous_cols = req['continuous']
+        var = req['variable']
+        target = req['target']
+        bin_merges = req['bin_merges']
+        var_type = req['type']  # 'continuous' or 'discrete'
+
+        df = pd.read_csv("uploaded.csv")
+        if target not in df.columns or var not in df.columns:
+            return jsonify({"error": f"Column '{target}' or '{var}' not found."}), 400
+
+        df[target] = df[target].fillna(0).astype(int)
+
+        # Perform coarse binning first if not already done
+        if var_type == 'continuous':
+            _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
+            tab, _ = fine_bin_continuous(df, var, target, bin_merges)
+        else:
+            _, df[f'{var}_binned'], _ = coarse_bin_discrete(df, var, target)
+            tab, _ = fine_bin_discrete(df, var, target, bin_merges)
+
+        # Save the updated dataframe
+        df.to_csv("uploaded.csv", index=False)
+
+        return jsonify({
+            "success": True,
+            "stats": tab.to_dict(orient='records')
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Fine binning failed: {str(e)}"}), 500
+
+# ----------- Cross Tab View API -----------
+@app.route('/api/cross-tab-view', methods=['POST'])
+def cross_tab_view_api():
+    try:
+        req = request.get_json()
+        variables = req['variables']
         target = req['target']
 
         df = pd.read_csv("uploaded.csv")
-
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found."}), 400
 
         df[target] = df[target].fillna(0).astype(int)
+        results = {}
 
+        for var in variables:
+            title, tab = create_cross_tab_view(df, var, target)
+            if tab is not None:
+                results[var] = {
+                    'title': title,
+                    'stats': tab.to_dict(orient='records')
+                }
+
+        return jsonify(results)
+
+    except Exception as e:
+        return jsonify({"error": f"Cross tab view failed: {str(e)}"}), 500
+
+# ----------- Univariate Analysis API -----------
+@app.route('/api/univariate-analysis', methods=['POST'])
+def univariate_analysis():
+    try:
+        req = request.get_json()
+        discrete_cols = req.get('discrete', [])
+        continuous_cols = req.get('continuous', [])
+        target = req['target']
+
+        df = pd.read_csv("uploaded.csv")
+        if target not in df.columns:
+            return jsonify({"error": f"Target column '{target}' not found."}), 400
+
+        df[target] = df[target].fillna(0).astype(int)
         results = {}
 
         for col in discrete_cols:
-            if col != target:
-                stats = coarse_binning_discrete(df, col, target)
+            if col != target and col in df.columns:
+                stats, _, _ = coarse_bin_discrete(df, col, target)
                 results[col] = {
                     'type': 'discrete',
                     'stats': stats.to_dict(orient='records')
                 }
 
         for col in continuous_cols:
-            if col != target:
-                stats = coarse_binning_continuous(df, col, target)
+            if col != target and col in df.columns:
+                stats, _ = coarse_bin_continuous(df, col, target)
                 results[col] = {
                     'type': 'continuous',
                     'stats': stats.to_dict(orient='records')
@@ -186,11 +242,10 @@ def univariate_analysis():
     except Exception as e:
         return jsonify({"error": f"Univariate failed: {str(e)}"}), 500
 
-# Health check
+# ----------- Health Check -----------
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({"status": "OK", "time": str(datetime.datetime.now())})
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

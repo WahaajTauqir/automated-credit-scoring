@@ -9,6 +9,8 @@ function App() {
   const [continuousColumns, setContinuousColumns] = useState<string[]>([]);
   const [targetVariable, setTargetVariable] = useState<string>('');
   const [univariateResults, setUnivariateResults] = useState<any>({});
+  const [fineBinResults, setFineBinResults] = useState<any>({});
+  const [crossTabResults, setCrossTabResults] = useState<any>({});
   const [loading, setLoading] = useState<boolean>(false);
   const [targetCounts, setTargetCounts] = useState<{ [key: string]: number }>({});
 
@@ -27,6 +29,8 @@ function App() {
     setContinuousColumns([]);
     setTargetVariable('');
     setUnivariateResults({});
+    setFineBinResults({});
+    setCrossTabResults({});
     setCurrentPage(1);
     setTargetCounts({});
   };
@@ -47,9 +51,16 @@ function App() {
       return;
     }
 
+    const variables = [...discreteColumns, ...continuousColumns];
+    if (variables.length === 0) {
+      alert('Please select at least one discrete or continuous column.');
+      return;
+    }
+
     setLoading(true);
     try {
-      const res = await fetch('http://localhost:5000/api/univariate-analysis', {
+      // Run Univariate Analysis
+      const univariateRes = await fetch('http://localhost:5000/api/univariate-analysis', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -60,31 +71,81 @@ function App() {
           target: targetVariable,
         }),
       });
+      const univariateData = await univariateRes.json();
+      if (univariateData.error) {
+        alert(univariateData.error);
+        setLoading(false);
+        return;
+      }
+      setUnivariateResults(univariateData);
 
-      const data = await res.json();
-      if (data.error) {
-        alert(data.error);
+      // Run Fine Binning for each variable
+      const fineBinResultsTemp: any = {};
+      for (const col of variables) {
+        const varType = discreteColumns.includes(col) ? 'discrete' : 'continuous';
+        // Default bin merges (customize as needed)
+        const binMerges = varType === 'continuous'
+          ? { 1: [1, 2], 2: [3, 4, 5], 3: [6, 7, 8, 9, 10] }
+          : { 1: [1, 2], 2: [3, 4], 3: [5, 6, 7, 8] };
+
+        const fineBinRes = await fetch('http://localhost:5000/api/fine-bin', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            variable: col,
+            target: targetVariable,
+            type: varType,
+            bin_merges: binMerges,
+          }),
+        });
+        const fineBinData = await fineBinRes.json();
+        if (!fineBinData.error) {
+          fineBinResultsTemp[col] = fineBinData.stats;
+        }
+      }
+      setFineBinResults(fineBinResultsTemp);
+
+      // Run Cross-Tabulation
+      const crossTabRes = await fetch('http://localhost:5000/api/cross-tab-view', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          variables,
+          target: targetVariable,
+        }),
+      });
+      const crossTabData = await crossTabRes.json();
+      if (crossTabData.error) {
+        alert(crossTabData.error);
       } else {
-        setUnivariateResults(data);
+        setCrossTabResults(crossTabData);
       }
     } catch (err) {
-      alert('Univariate analysis failed.');
+      alert('Analysis failed.');
     } finally {
       setLoading(false);
     }
   };
 
   const fetchTargetCounts = async (col: string) => {
-    const res = await fetch('http://localhost:5000/api/target-distribution', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ column: col }),
-    });
-    const data = await res.json();
-    if (!data.error) {
-      setTargetCounts(data);
+    try {
+      const res = await fetch('http://localhost:5000/api/target-distribution', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ column: col }),
+      });
+      const data = await res.json();
+      if (!data.error) {
+        setTargetCounts(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch target counts:', err);
     }
   };
 
@@ -100,6 +161,14 @@ function App() {
 
   const handlePrevPage = () => {
     if (currentPage > 1) setCurrentPage((prev) => prev - 1);
+  };
+
+  // Helper function to format numbers to 4 decimal places
+  const formatToFourDecimals = (value: any): string => {
+    if (typeof value === 'number') {
+      return value.toFixed(4);
+    }
+    return String(value);
   };
 
   return (
@@ -202,7 +271,7 @@ function App() {
                       <div className="donut-chart">
                         {Object.entries(targetCounts).map(([label, count], idx) => {
                           const total = Object.values(targetCounts).reduce((a, b) => a + b, 0);
-                          const percent = ((count / total) * 100).toFixed(1);
+                          const percent = total ? ((count / total) * 100).toFixed(1) : 0;
                           const color = label === '1' ? '#f85149' : '#238636';
 
                           return (
@@ -248,11 +317,11 @@ function App() {
                 onClick={handleRunUnivariate}
                 disabled={loading}
               >
-                {loading ? 'Running Analysis...' : 'Run Univariate Analysis'}
+                {loading ? 'Running Analysis...' : 'Run Analysis'}
               </button>
             </div>
 
-            {/* Result Tables */}
+            {/* Univariate Results */}
             {Object.keys(univariateResults).length > 0 && (
               <div style={{ marginTop: '40px', width: '100%' }}>
                 <h2 style={{ textAlign: 'center', marginBottom: '10px' }}>
@@ -275,9 +344,85 @@ function App() {
                         <tbody>
                           {result.stats.map((row: any, i: number) => (
                             <tr key={i}>
-                              {Object.values(row).map((val, j) => (
+                              {Object.entries(row).map(([key, val], j) => (
                                 <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
-                                  {String(val)}
+                                  {key === 'Freq%' || key === 'Bad Rate' ? formatToFourDecimals(val) : String(val)}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Fine Binning Results */}
+            {Object.keys(fineBinResults).length > 0 && (
+              <div style={{ marginTop: '40px', width: '100%' }}>
+                <h2 style={{ textAlign: 'center', marginBottom: '10px' }}>
+                  Fine Binning Results
+                </h2>
+                {Object.entries(fineBinResults).map(([col, stats]: any, idx) => (
+                  <div key={idx} className="column-panel" style={{ marginBottom: '20px' }}>
+                    <h3>{col} (Fine Binned)</h3>
+                    <div className="column-list">
+                      <table style={{ width: '100%', color: 'white', fontSize: '14px' }}>
+                        <thead>
+                          <tr>
+                            {Object.keys(stats[0]).map((key) => (
+                              <th key={key} style={{ padding: '4px', borderBottom: '1px solid gray' }}>
+                                {key}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {stats.map((row: any, i: number) => (
+                            <tr key={i}>
+                              {Object.entries(row).map(([key, val], j) => (
+                                <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
+                                  {key === 'Freq%' || key === 'Bad Rate' ? formatToFourDecimals(val) : String(val)}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Cross-Tabulation Results */}
+            {Object.keys(crossTabResults).length > 0 && (
+              <div style={{ marginTop: '40px', width: '100%' }}>
+                <h2 style={{ textAlign: 'center', marginBottom: '10px' }}>
+                  Cross-Tabulation Results
+                </h2>
+                {Object.entries(crossTabResults).map(([col, result]: any, idx) => (
+                  <div key={idx} className="column-panel" style={{ marginBottom: '20px' }}>
+                    <h3>{result.title}</h3>
+                    <div className="column-list">
+                      <table style={{ width: '100%', color: 'white', fontSize: '14px' }}>
+                        <thead>
+                          <tr>
+                            {Object.keys(result.stats[0]).map((key) => (
+                              <th key={key} style={{ padding: '4px', borderBottom: '1px solid gray' }}>
+                                {key}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {result.stats.map((row: any, i: number) => (
+                            <tr key={i}>
+                              {Object.entries(row).map(([key, val], j) => (
+                                <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
+                                  {key === 'Freq%' || key === 'Bad Rate' ? formatToFourDecimals(val) : String(val)}
                                 </td>
                               ))}
                             </tr>
