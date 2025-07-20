@@ -1,0 +1,39 @@
+.results-container {
+  margin-top: 40px;
+  width: 100%;
+}
+
+.results-container h2 {
+  text-align: center;
+  color: white;
+  margin-bottom: 10px;
+}
+
+.results-container .column-panel {
+  background-color: #2d333b;
+  padding: 20px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.results-container h3 {
+  color: white;
+  margin-bottom: 10px;
+}
+
+.results-container table {
+  width: 100%;
+  color: white;
+  font-size: 14px;
+  border-collapse: collapse;
+}
+
+.results-container th,
+.results-container td {
+  padding: 4px;
+  text-align: center;
+}
+
+.results-container th {
+  border-bottom: 1px solid gray;
+}
