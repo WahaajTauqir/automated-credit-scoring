@@ -11,7 +11,7 @@ const UnivariateResults = ({ univariateResults, formatToFourDecimals }: Univaria
   return (
     <div style={{ marginTop: '40px', width: '100%' }}>
       <h2 style={{ textAlign: 'center', marginBottom: '10px' }}>
-        Univariate Analysis Results
+        Coarse Binning Results
       </h2>
       {Object.entries(univariateResults).map(([col, result]: any, idx) => (
         <div key={idx} className="column-panel" style={{ marginBottom: '20px' }}>
