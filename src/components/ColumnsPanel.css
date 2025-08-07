@@ -108,6 +108,20 @@
   font-size: 6px;
   font-weight: bold;
 }
+.assign-button {
+  margin-top: 10px;
+  padding: 8px 14px;
+  font-size: 14px;
+  background-color: #238636;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.assign-button:hover {
+  background-color: #2ea043;
+}
 
 @media (max-width: 900px) {
   .columns-layout {

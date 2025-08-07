@@ -38,7 +38,13 @@ function App() {
     setCurrentPage(1);
     setTargetCounts({});
   };
-
+ const assignRemainingToContinuous = () => {
+  const selectedDiscrete = new Set(discreteColumns);
+  const remaining = columns.filter(
+    (col) => !selectedDiscrete.has(col) && col !== targetVariable
+  );
+  setContinuousColumns(remaining);
+};
   const handleTypeChange = (column: string, type: string) => {
     if (type === 'discrete') {
       setDiscreteColumns((prev) => [...new Set([...prev, column])]);
@@ -196,6 +202,7 @@ function App() {
               totalPages={totalPages}
               onNextPage={handleNextPage}
               onPrevPage={handlePrevPage}
+              assignRemainingToContinuous={assignRemainingToContinuous}
             />
             <div style={{ marginTop: '30px', textAlign: 'center' }}>
               <button

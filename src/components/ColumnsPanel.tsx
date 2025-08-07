@@ -14,6 +14,7 @@ interface ColumnPanelsProps {
   totalPages: number;
   onNextPage: () => void;
   onPrevPage: () => void;
+  assignRemainingToContinuous: () => void;
 }
 
 const ColumnPanels = ({
@@ -29,6 +30,7 @@ const ColumnPanels = ({
   totalPages,
   onNextPage,
   onPrevPage,
+  assignRemainingToContinuous,
 }: ColumnPanelsProps) => {
   return (
     <div className="columns-layout">
@@ -51,20 +53,16 @@ const ColumnPanels = ({
                   />
                   Discrete
                 </label>
-                <label>
-                  <input
-                    type="radio"
-                    name={`type-${col}`}
-                    value="continuous"
-                    checked={continuousColumns.includes(col)}
-                    onChange={() => handleTypeChange(col, 'continuous')}
-                  />
-                  Continuous
-                </label>
               </div>
             </div>
           ))}
         </div>
+        <button
+                  className="assign-button"
+                  onClick={assignRemainingToContinuous}
+        >
+                  Send Remaining to Continuous
+        </button>
         {/* Render Pagination below All Columns */}
         <Pagination
           currentPage={currentPage}
