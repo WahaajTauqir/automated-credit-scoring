@@ -12,6 +12,9 @@ CORS(app)
 # ----------- Upload CSV -----------
 @app.route('/api/upload-csv', methods=['POST'])
 def upload_csv():
+    """
+    Handles CSV file uploads, saves the file, and returns column information.
+    """
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
     file = request.files['file']
@@ -36,6 +39,9 @@ def upload_csv():
 # ----------- Target Distribution -----------
 @app.route('/api/target-distribution', methods=['POST'])
 def target_distribution():
+    """
+    Computes and returns the value counts for a specified target column.
+    """
     try:
         df = pd.read_csv("uploaded.csv")
         data = request.get_json()
@@ -47,19 +53,26 @@ def target_distribution():
     except Exception as e:
         return jsonify({"error": f"Failed to compute target distribution: {str(e)}"}), 500
 
-# ----------- Coarse Binning: Continuous -----------
+# ----------- Coarse Binning: Continuous (CORRECTED & REORDERED) -----------
 def coarse_bin_continuous(df, var, target, bins=10):
+    """
+    Performs coarse binning on a continuous variable using quantiles (qcut).
+    The output is a dataframe with a specific column order.
+    """
     try:
         if var not in df.columns or df[var].isna().all():
             raise ValueError(f"Column '{var}' is missing or contains only NaN values")
         if target not in df.columns:
             raise ValueError(f"Target column '{target}' not found")
 
-        binned, _ = pd.qcut(df[var], q=bins, retbins=True, labels=False, duplicates='drop')
-        n_bins = len(np.unique(binned.dropna()))
-        if n_bins == 0:
-            raise ValueError(f"No valid bins created for '{var}'")
-        df[f'{var}_binned'] = pd.qcut(df[var], q=n_bins, labels=range(1, n_bins + 1), duplicates='drop')
+        _, bin_edges = pd.qcut(df[var], q=bins, retbins=True, labels=False, duplicates='drop')
+        n_bins = len(bin_edges) - 1
+        
+        if n_bins <= 0:
+            raise ValueError(f"No valid bins could be created for '{var}'.")
+        
+        bin_labels = [f'Bin_{i}' for i in range(1, n_bins + 1)]
+        df[f'{var}_binned'] = pd.cut(df[var], bins=bin_edges, labels=bin_labels, include_lowest=True, right=True)
 
         tab = pd.crosstab(df[f'{var}_binned'], df[target])
         tab.columns = ['Good', 'Bad']
@@ -67,13 +80,20 @@ def coarse_bin_continuous(df, var, target, bins=10):
         tab['Freq%'] = (tab['Total'] / tab['Total'].sum()) * 100
         tab['Bad Rate'] = (tab['Bad'] / tab['Total']) * 100
         tab = tab.reset_index()
-        columns_order = [f'{var}_binned'] + [col for col in tab.columns if col != f'{var}_binned']
+
+        # Reorder columns to the requested format
+        columns_order = [f'{var}_binned', 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%']
         tab = tab[columns_order]
         return tab, df[f'{var}_binned']
     except Exception as e:
         raise ValueError(f"Coarse binning (continuous) failed for '{var}': {str(e)}")
-# ----------- Coarse Binning: Discrete -----------
+
+# ----------- Coarse Binning: Discrete (REORDERED) -----------
 def coarse_bin_discrete(df, var, target, bad_rate_diff=0.5):
+    """
+    Performs coarse binning on a discrete variable.
+    The output is a dataframe with a specific column order.
+    """
     try:
         if var not in df.columns or df[var].isna().all():
             raise ValueError(f"Column '{var}' is missing or contains only NaN values")
@@ -104,18 +124,24 @@ def coarse_bin_discrete(df, var, target, bad_rate_diff=0.5):
         final_tab['Freq%'] = (final_tab['Total'] / final_tab['Total'].sum()) * 100
         final_tab['Bad Rate'] = (final_tab['Bad'] / final_tab['Total']) * 100
         final_tab = final_tab.reset_index()
-        columns_order = [f'{var}_binned'] + [col for col in final_tab.columns if col != f'{var}_binned']
+
+        # Reorder columns to the requested format
+        columns_order = [f'{var}_binned', 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%']
         final_tab = final_tab[columns_order]
         return final_tab, df[f'{var}_binned'], bin_mapping
     except Exception as e:
         raise ValueError(f"Coarse binning (discrete) failed for '{var}': {str(e)}")
+
 # ----------- Dynamic Bin Merging: Continuous -----------
 def dynamic_bin_merges_continuous(df, var, target, coarse_bins):
+    """
+    Dynamically determines a small number of final bins for a continuous variable.
+    """
     try:
         n_coarse_bins = len(np.unique(df[f'{var}_binned'].dropna()))
         if n_coarse_bins == 0:
             raise ValueError(f"No valid coarse bins for '{var}'")
-        target_fine_bins = min(max(3, ceil(n_coarse_bins ** 0.5)), 5)  # Dynamic: 3 to 5 bins
+        target_fine_bins = min(max(3, ceil(n_coarse_bins ** 0.5)), 5)
         bins_per_group = ceil(n_coarse_bins / target_fine_bins)
 
         bin_merges = {}
@@ -132,6 +158,9 @@ def dynamic_bin_merges_continuous(df, var, target, coarse_bins):
 
 # ----------- Dynamic Bin Merging: Discrete -----------
 def dynamic_bin_merges_discrete(df, var, target, bin_mapping):
+    """
+    Dynamically determines a small number of final bins for a discrete variable.
+    """
     try:
         tab = pd.crosstab(df[f'{var}_binned'], df[target])
         tab.columns = ['Good', 'Bad']
@@ -142,7 +171,7 @@ def dynamic_bin_merges_discrete(df, var, target, bin_mapping):
         n_coarse_bins = len(np.unique(df[f'{var}_binned'].dropna()))
         if n_coarse_bins == 0:
             raise ValueError(f"No valid coarse bins for '{var}'")
-        target_fine_bins = min(max(3, ceil(n_coarse_bins ** 0.5)), 5)  # Dynamic: 3 to 5 bins
+        target_fine_bins = min(max(3, ceil(n_coarse_bins ** 0.5)), 5)
         bins_per_group = ceil(n_coarse_bins / target_fine_bins)
 
         bin_merges = {}
@@ -163,8 +192,12 @@ def dynamic_bin_merges_discrete(df, var, target, bin_mapping):
     except Exception as e:
         raise ValueError(f"Dynamic bin merging (discrete) failed for '{var}': {str(e)}")
 
-# ----------- Fine Binning: Continuous -----------
+# ----------- Fine Binning: Continuous (REORDERED) -----------
 def fine_bin_continuous(df, var, target, bin_merges=None):
+    """
+    Performs fine binning by merging coarse bins for a continuous variable.
+    The output is a dataframe with a specific column order.
+    """
     try:
         binned_col = f'{var}_binned'
         fine_binned_col = f'{var}_fine_binned'
@@ -185,14 +218,20 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
         cross_tab['Freq%'] = (cross_tab['Total'] / cross_tab['Total'].sum()) * 100
         cross_tab['Bad Rate'] = (cross_tab['Bad'] / cross_tab['Total']) * 100
         cross_tab = cross_tab.reset_index()
-        columns_order = [fine_binned_col] + [col for col in cross_tab.columns if col != fine_binned_col]
+        
+        # Reorder columns to the requested format
+        columns_order = [fine_binned_col, 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%']
         cross_tab = cross_tab[columns_order]
         return cross_tab, df[fine_binned_col], bin_merges
     except Exception as e:
         raise ValueError(f"Fine binning (continuous) failed for '{var}': {str(e)}")
 
-# ----------- Fine Binning: Discrete -----------
+# ----------- Fine Binning: Discrete (REORDERED) -----------
 def fine_bin_discrete(df, var, target, bin_merges=None, bin_mapping=None):
+    """
+    Performs fine binning by merging coarse bins for a discrete variable.
+    The output is a dataframe with a specific column order.
+    """
     try:
         binned_col = f'{var}_binned'
         fine_binned_col = f'{var}_fine_binned'
@@ -213,14 +252,19 @@ def fine_bin_discrete(df, var, target, bin_merges=None, bin_mapping=None):
         cross_tab['Freq%'] = (cross_tab['Total'] / cross_tab['Total'].sum()) * 100
         cross_tab['Bad Rate'] = (cross_tab['Bad'] / cross_tab['Total']) * 100
         cross_tab = cross_tab.reset_index()
-        columns_order = [fine_binned_col] + [col for col in cross_tab.columns if col != fine_binned_col]
+
+        # Reorder columns to the requested format
+        columns_order = [fine_binned_col, 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%']
         cross_tab = cross_tab[columns_order]
         return cross_tab, df[fine_binned_col], bin_merges
     except Exception as e:
         raise ValueError(f"Fine binning (discrete) failed for '{var}': {str(e)}")
 
-# ----------- Cross Tab View -----------
+# ----------- Cross Tab View (REORDERED) -----------
 def create_cross_tab_view(df, var, target):
+    """
+    Creates a crosstabulation view of a binned variable against the target with a specific column order.
+    """
     try:
         binned_col = f'{var}_fine_binned' if f'{var}_fine_binned' in df.columns else f'{var}_binned'
         if binned_col not in df.columns:
@@ -233,20 +277,28 @@ def create_cross_tab_view(df, var, target):
         tab['Bad Rate'] = (tab['Bad'] / tab['Total']) * 100
         tab['Freq%'] = tab['Freq%'].round(1)
         tab['Bad Rate'] = tab['Bad Rate'].round(1)
+        tab = tab.reset_index()
 
-        return f"{var} (Binned) * {target} Crosstabulation", tab.reset_index()
+        # Reorder columns to the requested format
+        columns_order = [binned_col, 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%']
+        tab = tab[columns_order]
+
+        return f"{var} (Binned) * {target} Crosstabulation", tab
     except Exception as e:
         raise ValueError(f"Cross tab view failed for '{var}': {str(e)}")
 
 # ----------- Fine Binning API -----------
 @app.route('/api/fine-bin', methods=['POST'])
 def fine_bin_api():
+    """
+    Performs fine binning (merging of coarse bins) via a REST API endpoint.
+    """
     try:
         req = request.get_json()
         var = req.get('variable')
         target = req.get('target')
-        var_type = req.get('type')  # 'continuous' or 'discrete'
-        bin_merges = req.get('bin_merges', None)  # Allow optional bin_merges from frontend
+        var_type = req.get('type')
+        bin_merges = req.get('bin_merges', None)
 
         if not var or not target or not var_type:
             return jsonify({"error": "Missing required fields: variable, target, or type"}), 400
@@ -257,7 +309,6 @@ def fine_bin_api():
 
         df[target] = df[target].fillna(0).astype(int)
 
-        # Perform coarse binning first if not already done
         if var_type == 'continuous':
             _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
             tab, _, bin_merges = fine_bin_continuous(df, var, target, bin_merges)
@@ -265,13 +316,12 @@ def fine_bin_api():
             _, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
             tab, _, bin_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
 
-        # Save the updated dataframe
         df.to_csv("uploaded.csv", index=False)
 
         return jsonify({
             "success": True,
             "stats": tab.to_dict(orient='records'),
-            "bin_merges": bin_merges  # Return the used bin merges
+            "bin_merges": bin_merges
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -279,6 +329,9 @@ def fine_bin_api():
 # ----------- Cross Tab View API -----------
 @app.route('/api/cross-tab-view', methods=['POST'])
 def cross_tab_view_api():
+    """
+    Provides a cross-tabulation view for one or more binned variables.
+    """
     try:
         req = request.get_json()
         variables = req.get('variables', [])
@@ -309,6 +362,9 @@ def cross_tab_view_api():
 # ----------- Univariate Analysis API -----------
 @app.route('/api/univariate-analysis', methods=['POST'])
 def univariate_analysis():
+    """
+    Performs univariate analysis (coarse binning) for a list of variables.
+    """
     try:
         req = request.get_json()
         discrete_cols = req.get('discrete', [])
@@ -348,6 +404,9 @@ def univariate_analysis():
 # ----------- Health Check -----------
 @app.route('/api/health', methods=['GET'])
 def health():
+    """
+    A simple health check endpoint.
+    """
     return jsonify({"status": "OK", "time": str(datetime.datetime.now())})
 
 if __name__ == '__main__':

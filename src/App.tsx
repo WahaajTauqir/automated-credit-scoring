@@ -17,6 +17,8 @@ function App() {
   const [crossTabResults, setCrossTabResults] = useState<any>({});
   const [loading, setLoading] = useState<boolean>(false);
   const [targetCounts, setTargetCounts] = useState<{ [key: string]: number }>({});
+  const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
+
 
   // Pagination setup
   const columnsPerPage = 7;
@@ -38,13 +40,18 @@ function App() {
     setCurrentPage(1);
     setTargetCounts({});
   };
- const assignRemainingToContinuous = () => {
-  const selectedDiscrete = new Set(discreteColumns);
-  const remaining = columns.filter(
-    (col) => !selectedDiscrete.has(col) && col !== targetVariable
-  );
-  setContinuousColumns(remaining);
-};
+  const toggleSelectedForUnivariate = (col: string) => {
+    setSelectedForUnivariate((prev) =>
+      prev.includes(col) ? prev.filter((c) => c !== col) : [...prev, col]
+    );
+  };
+  const assignRemainingToContinuous = () => {
+    const selectedDiscrete = new Set(discreteColumns);
+    const remaining = columns.filter(
+      (col) => !selectedDiscrete.has(col) && col !== targetVariable
+    );
+    setContinuousColumns(remaining);
+  };
   const handleTypeChange = (column: string, type: string) => {
     if (type === 'discrete') {
       setDiscreteColumns((prev) => [...new Set([...prev, column])]);
@@ -61,26 +68,29 @@ function App() {
       return;
     }
 
-    const variables = [...discreteColumns, ...continuousColumns];
-    if (variables.length === 0) {
-      alert('Please select at least one discrete or continuous column.');
+    if (selectedForUnivariate.length === 0) {
+      alert('Please select at least one column to analyze.');
       return;
     }
 
     setLoading(true);
     try {
-      // Run Univariate Analysis
+      // Split selected columns into discrete and continuous
+      const selectedDiscrete = selectedForUnivariate.filter((col) => discreteColumns.includes(col));
+      const selectedContinuous = selectedForUnivariate.filter((col) => continuousColumns.includes(col));
+
       const univariateRes = await fetch('http://localhost:5000/api/univariate-analysis', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          discrete: discreteColumns,
-          continuous: continuousColumns,
+          discrete: selectedDiscrete,
+          continuous: selectedContinuous,
           target: targetVariable,
         }),
       });
+
       const univariateData = await univariateRes.json();
       if (univariateData.error) {
         alert(univariateData.error);
@@ -89,9 +99,9 @@ function App() {
       }
       setUnivariateResults(univariateData);
 
-      // Run Fine Binning for each variable
+      // Fine binning only for selected columns
       const fineBinResultsTemp: any = {};
-      for (const col of variables) {
+      for (const col of selectedForUnivariate) {
         const varType = discreteColumns.includes(col) ? 'discrete' : 'continuous';
 
         const fineBinRes = await fetch('http://localhost:5000/api/fine-bin', {
@@ -103,33 +113,28 @@ function App() {
             variable: col,
             target: targetVariable,
             type: varType,
-            // No bin_merges sent; let backend handle dynamic merging
           }),
         });
         const fineBinData = await fineBinRes.json();
         if (!fineBinData.error) {
           fineBinResultsTemp[col] = fineBinData.stats;
-          // Optionally log bin_merges for debugging
-          console.log(`Bin merges for ${col}:`, fineBinData.bin_merges);
         }
       }
       setFineBinResults(fineBinResultsTemp);
 
-      // Run Cross-Tabulation
+      // Cross-tabulation
       const crossTabRes = await fetch('http://localhost:5000/api/cross-tab-view', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          variables,
+          variables: selectedForUnivariate,
           target: targetVariable,
         }),
       });
       const crossTabData = await crossTabRes.json();
-      if (crossTabData.error) {
-        alert(crossTabData.error);
-      } else {
+      if (!crossTabData.error) {
         setCrossTabResults(crossTabData);
       }
     } catch (err) {
@@ -138,7 +143,6 @@ function App() {
       setLoading(false);
     }
   };
-
   const fetchTargetCounts = async (col: string) => {
     try {
       const res = await fetch('http://localhost:5000/api/target-distribution', {
@@ -203,6 +207,8 @@ function App() {
               onNextPage={handleNextPage}
               onPrevPage={handlePrevPage}
               assignRemainingToContinuous={assignRemainingToContinuous}
+              selectedForUnivariate={selectedForUnivariate}
+              toggleSelectedForUnivariate={toggleSelectedForUnivariate}
             />
             <div style={{ marginTop: '30px', textAlign: 'center' }}>
               <button
