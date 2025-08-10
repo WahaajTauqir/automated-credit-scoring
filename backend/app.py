@@ -1,3 +1,15 @@
+from flask import Flask, request, jsonify
+import sqlite3
+from flask_cors import CORS
+import pandas as pd
+import numpy as np
+import os
+import datetime
+from math import ceil
+
+
+app = Flask(__name__)
+CORS(app)
 @app.route('/api/record/<int:record_id>', methods=['DELETE'])
 def delete_record(record_id):
     """
@@ -12,18 +24,6 @@ def delete_record(record_id):
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-from flask import Flask, request, jsonify
-import sqlite3
-from flask_cors import CORS
-import pandas as pd
-import numpy as np
-import os
-import datetime
-from math import ceil
-
-
-app = Flask(__name__)
-CORS(app)
 
 # Database initialization
 DB_PATH = os.path.join(os.path.dirname(__file__), 'database.sql')
