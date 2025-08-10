@@ -1,4 +1,19 @@
+@app.route('/api/record/<int:record_id>', methods=['DELETE'])
+def delete_record(record_id):
+    """
+    Delete a specific analysis record by ID.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM records WHERE id = ?", (record_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 from flask import Flask, request, jsonify
+import sqlite3
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
@@ -6,8 +21,94 @@ import os
 import datetime
 from math import ceil
 
+
 app = Flask(__name__)
 CORS(app)
+
+# Database initialization
+DB_PATH = os.path.join(os.path.dirname(__file__), 'database.sql')
+DB_FILE = os.path.join(os.path.dirname(__file__), 'records.db')
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with open(DB_PATH, 'r') as f:
+        sql = f.read()
+    conn = get_db_connection()
+    conn.executescript(sql)
+    conn.commit()
+    conn.close()
+
+init_db()
+# ----------- Health Check -----------
+@app.route('/api/save-record', methods=['POST'])
+def save_record():
+    """
+    Save a record of the analysis, including dataset path, columns, and results.
+    """
+    try:
+        data = request.get_json()
+        dataset_path = data.get('dataset_path', '')
+        discrete_columns = ','.join(data.get('discrete_columns', []))
+        continuous_columns = ','.join(data.get('continuous_columns', []))
+        selected_columns = ','.join(data.get('selected_columns', []))
+        target_variable = data.get('target_variable', '')
+        univariate_results = data.get('univariate_results', '')
+        finebin_results = data.get('finebin_results', '')
+        crosstab_results = data.get('crosstab_results', '')
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO records (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results)
+        )
+        conn.commit()
+        record_id = cur.lastrowid
+        conn.close()
+        return jsonify({"success": True, "id": record_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/records', methods=['GET'])
+def get_records():
+    """
+    List all analysis records (summary only).
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, created_at FROM records ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        records = [dict(row) for row in rows]
+        conn.close()
+        return jsonify(records)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/record/<int:record_id>', methods=['GET'])
+def get_record(record_id):
+    """
+    Get a specific analysis record (full details).
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM records WHERE id = ?", (record_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            return jsonify(dict(row))
+        else:
+            return jsonify({"error": "Record not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ----------- Upload CSV -----------
 @app.route('/api/upload-csv', methods=['POST'])

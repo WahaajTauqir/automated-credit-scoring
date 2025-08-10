@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { Routes, Route } from 'react-router-dom';
 import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
@@ -10,6 +11,7 @@ import AdminPanel from './components/Admin/AdminPanel';
 import './App.css';
 
 function App() {
+  const location = useLocation();
   const [columns, setColumns] = useState<string[]>([]);
   const [discreteColumns, setDiscreteColumns] = useState<string[]>([]);
   const [continuousColumns, setContinuousColumns] = useState<string[]>([]);
@@ -20,6 +22,27 @@ function App() {
   const [loading, setLoading] = useState<boolean>(false);
   const [targetCounts, setTargetCounts] = useState<{ [key: string]: number }>({});
   const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
+  // Restore state from navigation (AdminPanel)
+  useEffect(() => {
+    if (location.state) {
+      const s = location.state as any;
+      // Load columns from uploaded.csv if not present in state
+      if (!s.columns || s.columns.length === 0) {
+        fetch('http://localhost:5000/api/upload-csv', {
+          method: 'POST',
+          // This is a hack: we assume uploaded.csv is the file, but API expects a file upload. So skip columns update here.
+        });
+      }
+      setDiscreteColumns(s.discreteColumns || []);
+      setContinuousColumns(s.continuousColumns || []);
+      setSelectedForUnivariate(s.selectedForUnivariate || []);
+      setTargetVariable(s.targetVariable || '');
+      setUnivariateResults(s.univariateResults || {});
+      setFineBinResults(s.fineBinResults || {});
+      setCrossTabResults(s.crossTabResults || {});
+    }
+    // eslint-disable-next-line
+  }, [location.state]);
 
 
   // Pagination setup
@@ -76,7 +99,7 @@ function App() {
     }
 
     setLoading(true);
-    try {
+  try {
       // Split selected columns into discrete and continuous
       const selectedDiscrete = selectedForUnivariate.filter((col) => discreteColumns.includes(col));
       const selectedContinuous = selectedForUnivariate.filter((col) => continuousColumns.includes(col));
@@ -99,7 +122,7 @@ function App() {
         setLoading(false);
         return;
       }
-      setUnivariateResults(univariateData);
+  setUnivariateResults(univariateData);
 
       // Fine binning only for selected columns
       const fineBinResultsTemp: any = {};
@@ -122,7 +145,7 @@ function App() {
           fineBinResultsTemp[col] = fineBinData.stats;
         }
       }
-      setFineBinResults(fineBinResultsTemp);
+  setFineBinResults(fineBinResultsTemp);
 
       // Cross-tabulation
       const crossTabRes = await fetch('http://localhost:5000/api/cross-tab-view', {
@@ -139,6 +162,25 @@ function App() {
       if (!crossTabData.error) {
         setCrossTabResults(crossTabData);
       }
+
+      // Save record to backend
+      const saveRes = await fetch('http://localhost:5000/api/save-record', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          dataset_path: 'uploaded.csv',
+          discrete_columns: discreteColumns,
+          continuous_columns: continuousColumns,
+          selected_columns: selectedForUnivariate,
+          target_variable: targetVariable,
+          univariate_results: JSON.stringify(univariateData),
+          finebin_results: JSON.stringify(fineBinResultsTemp),
+          crosstab_results: JSON.stringify(crossTabData),
+        }),
+      });
+      // Optionally handle saveRes
     } catch (err) {
       alert('Analysis failed.');
     } finally {

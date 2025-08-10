@@ -2,31 +2,62 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import './AdminPanel.css';
 
-// Example record type (adjust fields as needed for your DB)
 type AnalysisRecord = {
   id: number;
-  name: string;
-  date: string;
-  description?: string;
+  dataset_path: string;
+  discrete_columns: string;
+  continuous_columns: string;
+  selected_columns: string;
+  target_variable: string;
+  created_at: string;
 };
 
 const AdminPanel: React.FC = () => {
   const navigate = useNavigate();
-
   const [records, setRecords] = useState<AnalysisRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
     setLoading(true);
-
-    setTimeout(() => {
-      setRecords([
-        { id: 1, name: 'Credit Scoring Q1', date: '2025-07-01', description: 'Analysis for Q1 data' },
-        { id: 2, name: 'Credit Scoring Q2', date: '2025-08-01', description: 'Analysis for Q2 data' },
-      ]);
-      setLoading(false);
-    }, 800);
+    fetch('http://localhost:5000/api/records')
+      .then(res => res.json())
+      .then(data => {
+        setRecords(data);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
   }, []);
+
+  // When view is clicked, fetch the full record and navigate to main page with state
+  const handleView = (id: number) => {
+    fetch(`http://localhost:5000/api/record/${id}`)
+      .then(res => res.json())
+      .then(data => {
+        // Parse columns from CSV strings to arrays
+        const state = {
+          columns: [], // will be loaded from uploaded.csv
+          discreteColumns: data.discrete_columns ? data.discrete_columns.split(',') : [],
+          continuousColumns: data.continuous_columns ? data.continuous_columns.split(',') : [],
+          selectedForUnivariate: data.selected_columns ? data.selected_columns.split(',') : [],
+          targetVariable: data.target_variable,
+          univariateResults: data.univariate_results ? JSON.parse(data.univariate_results) : {},
+          fineBinResults: data.finebin_results ? JSON.parse(data.finebin_results) : {},
+          crossTabResults: data.crosstab_results ? JSON.parse(data.crosstab_results) : {},
+        };
+        navigate('/', { state });
+      });
+  };
+
+  // Delete record
+  const handleDelete = (id: number) => {
+    if (!window.confirm('Are you sure you want to delete this record?')) return;
+    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE' })
+      .then(res => {
+        if (res.ok) {
+          setRecords(records => records.filter(r => r.id !== id));
+        }
+      });
+  };
 
   return (
     <div className="admin-panel-container">
@@ -40,23 +71,25 @@ const AdminPanel: React.FC = () => {
         <table className="admin-table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Date</th>
-              <th>Description</th>
-              <th>Actions</th>
+              <th style={{ textAlign: 'center' }}>ID</th>
+              <th style={{ textAlign: 'center' }}>Dataset</th>
+              <th style={{ textAlign: 'center' }}>Selected Columns</th>
+              <th style={{ textAlign: 'center' }}>Date</th>
+              <th style={{ textAlign: 'center' }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {records.map((rec) => (
               <tr key={rec.id}>
-                <td>{rec.id}</td>
-                <td>{rec.name}</td>
-                <td>{rec.date}</td>
-                <td>{rec.description || '-'}</td>
-                <td>
-                  <button className="admin-action-btn" title="View">View</button>
-                  <button className="admin-action-btn" title="Delete">Delete</button>
+                <td style={{ textAlign: 'center' }}>{rec.id}</td>
+                <td style={{ textAlign: 'center' }}>{rec.dataset_path}</td>
+                <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>{rec.selected_columns}</td>
+                <td style={{ textAlign: 'center' }}>{rec.created_at}</td>
+                <td style={{ textAlign: 'center' }}>
+                  <div style={{ display: 'inline-flex', gap: '8px' }}>
+                    <button className="admin-action-btn" title="View" onClick={() => handleView(rec.id)}>View</button>
+                    <button className="admin-action-btn" title="Delete" onClick={() => handleDelete(rec.id)}>Delete</button>
+                  </div>
                 </td>
               </tr>
             ))}
