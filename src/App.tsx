@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
+import { Routes, Route } from 'react-router-dom';
 import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
 import ColumnPanels from './components/ColumnsPanel';
 import UnivariateResults from './components/UnivariateResults';
 import FineBinResults from './components/FInebinResults';
 import CrossTabResults from './components/CresstabResults';
+import AdminPanel from './components/Admin/AdminPanel';
 import './App.css';
 
 function App() {
@@ -184,57 +186,65 @@ function App() {
   };
 
   return (
-    <>
-      <Navbar />
-      <div className="app-container">
-        {columns.length === 0 ? (
-          <div className="upload-wrapper">
-            <CSVReader onCSVUploaded={handleCSVUploaded} />
-          </div>
-        ) : (
-          <>
-            <ColumnPanels
-              columns={columns}
-              paginatedColumns={paginatedColumns}
-              discreteColumns={discreteColumns}
-              continuousColumns={continuousColumns}
-              targetVariable={targetVariable}
-              targetCounts={targetCounts}
-              handleTypeChange={handleTypeChange}
-              setTargetVariable={setTargetVariable}
-              currentPage={currentPage}
-              totalPages={totalPages}
-              onNextPage={handleNextPage}
-              onPrevPage={handlePrevPage}
-              assignRemainingToContinuous={assignRemainingToContinuous}
-              selectedForUnivariate={selectedForUnivariate}
-              toggleSelectedForUnivariate={toggleSelectedForUnivariate}
-            />
-            <div style={{ marginTop: '30px', textAlign: 'center' }}>
-              <button
-                className="file-upload-label"
-                onClick={handleRunUnivariate}
-                disabled={loading}
-              >
-                {loading ? 'Running Analysis...' : 'Run Analysis'}
-              </button>
+    <Routes>
+      <Route
+        path="/"
+        element={
+          <div>
+            <Navbar />
+            <div className="app-container">
+              {columns.length === 0 ? (
+                <div className="upload-wrapper">
+                  <CSVReader onCSVUploaded={handleCSVUploaded} />
+                </div>
+              ) : (
+                <>
+                  <ColumnPanels
+                    columns={columns}
+                    paginatedColumns={paginatedColumns}
+                    discreteColumns={discreteColumns}
+                    continuousColumns={continuousColumns}
+                    targetVariable={targetVariable}
+                    targetCounts={targetCounts}
+                    handleTypeChange={handleTypeChange}
+                    setTargetVariable={setTargetVariable}
+                    currentPage={currentPage}
+                    totalPages={totalPages}
+                    onNextPage={handleNextPage}
+                    onPrevPage={handlePrevPage}
+                    assignRemainingToContinuous={assignRemainingToContinuous}
+                    selectedForUnivariate={selectedForUnivariate}
+                    toggleSelectedForUnivariate={toggleSelectedForUnivariate}
+                  />
+                  <div style={{ marginTop: '30px', textAlign: 'center' }}>
+                    <button
+                      className="file-upload-label"
+                      onClick={handleRunUnivariate}
+                      disabled={loading}
+                    >
+                      {loading ? 'Running Analysis...' : 'Run Analysis'}
+                    </button>
+                  </div>
+                  <UnivariateResults
+                    univariateResults={univariateResults}
+                    formatToFourDecimals={formatToFourDecimals}
+                  />
+                  <FineBinResults
+                    fineBinResults={fineBinResults}
+                    formatToFourDecimals={formatToFourDecimals}
+                  />
+                  <CrossTabResults
+                    crossTabResults={crossTabResults}
+                    formatToFourDecimals={formatToFourDecimals}
+                  />
+                </>
+              )}
             </div>
-            <UnivariateResults
-              univariateResults={univariateResults}
-              formatToFourDecimals={formatToFourDecimals}
-            />
-            <FineBinResults
-              fineBinResults={fineBinResults}
-              formatToFourDecimals={formatToFourDecimals}
-            />
-            <CrossTabResults
-              crossTabResults={crossTabResults}
-              formatToFourDecimals={formatToFourDecimals}
-            />
-          </>
-        )}
-      </div>
-    </>
+          </div>
+        }
+      />
+      <Route path="/admin" element={<AdminPanel />} />
+    </Routes>
   );
 }
 
