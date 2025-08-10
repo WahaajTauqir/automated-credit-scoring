@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Routes, Route } from 'react-router-dom';
 import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
@@ -8,6 +8,7 @@ import UnivariateResults from './components/UnivariateResults';
 import FineBinResults from './components/FInebinResults';
 import CrossTabResults from './components/CresstabResults';
 import AdminPanel from './components/Admin/AdminPanel';
+import SelectedColumnsPage from './components/SelectedColumnsPage';
 import './App.css';
 
 function App() {
@@ -22,6 +23,8 @@ function App() {
   const [loading, setLoading] = useState<boolean>(false);
   const [targetCounts, setTargetCounts] = useState<{ [key: string]: number }>({});
   const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
+  const navigate = useNavigate();
+
   // Restore state from navigation (AdminPanel)
   useEffect(() => {
     if (location.state) {
@@ -53,7 +56,20 @@ function App() {
     (currentPage - 1) * columnsPerPage,
     currentPage * columnsPerPage
   );
-
+  const handleProceedToSelectedColumns = () => {
+    if (selectedForUnivariate.length === 0) {
+      alert('Please select at least one column.');
+      return;
+    }
+    navigate('/selected-columns', {
+      state: {
+        selectedColumns: selectedForUnivariate,
+        discreteColumns,
+        continuousColumns,
+        targetVariable
+      }
+    });
+  };
   const handleCSVUploaded = (headers: string[]) => {
     setColumns(headers);
     setDiscreteColumns([]);
@@ -99,7 +115,7 @@ function App() {
     }
 
     setLoading(true);
-  try {
+    try {
       // Split selected columns into discrete and continuous
       const selectedDiscrete = selectedForUnivariate.filter((col) => discreteColumns.includes(col));
       const selectedContinuous = selectedForUnivariate.filter((col) => continuousColumns.includes(col));
@@ -122,7 +138,7 @@ function App() {
         setLoading(false);
         return;
       }
-  setUnivariateResults(univariateData);
+      setUnivariateResults(univariateData);
 
       // Fine binning only for selected columns
       const fineBinResultsTemp: any = {};
@@ -145,7 +161,7 @@ function App() {
           fineBinResultsTemp[col] = fineBinData.stats;
         }
       }
-  setFineBinResults(fineBinResultsTemp);
+      setFineBinResults(fineBinResultsTemp);
 
       // Cross-tabulation
       const crossTabRes = await fetch('http://localhost:5000/api/cross-tab-view', {
@@ -261,10 +277,9 @@ function App() {
                   <div style={{ marginTop: '30px', textAlign: 'center' }}>
                     <button
                       className="file-upload-label"
-                      onClick={handleRunUnivariate}
-                      disabled={loading}
+                      onClick={handleProceedToSelectedColumns}
                     >
-                      {loading ? 'Running Analysis...' : 'Run Analysis'}
+                      Proceed to Selected Columns
                     </button>
                   </div>
                   <UnivariateResults
@@ -286,6 +301,7 @@ function App() {
         }
       />
       <Route path="/admin" element={<AdminPanel />} />
+      <Route path="/selected-columns" element={<SelectedColumnsPage />} />
     </Routes>
   );
 }
