@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { Routes, Route } from 'react-router-dom';
+import { useLocation, useNavigate, Routes, Route } from 'react-router-dom';
 import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
 import ColumnPanels from './components/ColumnsPanel';
@@ -13,29 +12,27 @@ import './App.css';
 
 function App() {
   const location = useLocation();
+  const navigate = useNavigate();
+
+  // State definitions with explicit typing
   const [columns, setColumns] = useState<string[]>([]);
   const [discreteColumns, setDiscreteColumns] = useState<string[]>([]);
   const [continuousColumns, setContinuousColumns] = useState<string[]>([]);
   const [targetVariable, setTargetVariable] = useState<string>('');
-  const [univariateResults, setUnivariateResults] = useState<any>({});
-  const [fineBinResults, setFineBinResults] = useState<any>({});
-  const [crossTabResults, setCrossTabResults] = useState<any>({});
+  const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
+  const [fineBinResults, setFineBinResults] = useState<Record<string, any>>({});
+  const [crossTabResults, setCrossTabResults] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState<boolean>(false);
-  const [targetCounts, setTargetCounts] = useState<{ [key: string]: number }>({});
+  const [targetCounts, setTargetCounts] = useState<Record<string, number>>({});
   const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
-  const navigate = useNavigate();
+
+  // For bin selection in CrossTab
+  const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, any[]>>({});
 
   // Restore state from navigation (AdminPanel)
   useEffect(() => {
     if (location.state) {
       const s = location.state as any;
-      // Load columns from uploaded.csv if not present in state
-      if (!s.columns || s.columns.length === 0) {
-        fetch('http://localhost:5000/api/upload-csv', {
-          method: 'POST',
-          // This is a hack: we assume uploaded.csv is the file, but API expects a file upload. So skip columns update here.
-        });
-      }
       setDiscreteColumns(s.discreteColumns || []);
       setContinuousColumns(s.continuousColumns || []);
       setSelectedForUnivariate(s.selectedForUnivariate || []);
@@ -44,9 +41,7 @@ function App() {
       setFineBinResults(s.fineBinResults || {});
       setCrossTabResults(s.crossTabResults || {});
     }
-    // eslint-disable-next-line
   }, [location.state]);
-
 
   // Pagination setup
   const columnsPerPage = 7;
@@ -56,6 +51,7 @@ function App() {
     (currentPage - 1) * columnsPerPage,
     currentPage * columnsPerPage
   );
+
   const handleProceedToSelectedColumns = () => {
     if (selectedForUnivariate.length === 0) {
       alert('Please select at least one column.');
@@ -70,6 +66,7 @@ function App() {
       }
     });
   };
+
   const handleCSVUploaded = (headers: string[]) => {
     setColumns(headers);
     setDiscreteColumns([]);
@@ -78,28 +75,32 @@ function App() {
     setUnivariateResults({});
     setFineBinResults({});
     setCrossTabResults({});
+    setSelectedBinGroups({});
     setCurrentPage(1);
     setTargetCounts({});
   };
+
   const toggleSelectedForUnivariate = (col: string) => {
-    setSelectedForUnivariate((prev) =>
-      prev.includes(col) ? prev.filter((c) => c !== col) : [...prev, col]
+    setSelectedForUnivariate(prev =>
+      prev.includes(col) ? prev.filter(c => c !== col) : [...prev, col]
     );
   };
+
   const assignRemainingToContinuous = () => {
     const selectedDiscrete = new Set(discreteColumns);
     const remaining = columns.filter(
-      (col) => !selectedDiscrete.has(col) && col !== targetVariable
+      col => !selectedDiscrete.has(col) && col !== targetVariable
     );
     setContinuousColumns(remaining);
   };
+
   const handleTypeChange = (column: string, type: string) => {
     if (type === 'discrete') {
-      setDiscreteColumns((prev) => [...new Set([...prev, column])]);
-      setContinuousColumns((prev) => prev.filter((c) => c !== column));
+      setDiscreteColumns(prev => [...new Set([...prev, column])]);
+      setContinuousColumns(prev => prev.filter(c => c !== column));
     } else if (type === 'continuous') {
-      setContinuousColumns((prev) => [...new Set([...prev, column])]);
-      setDiscreteColumns((prev) => prev.filter((c) => c !== column));
+      setContinuousColumns(prev => [...new Set([...prev, column])]);
+      setDiscreteColumns(prev => prev.filter(c => c !== column));
     }
   };
 
@@ -108,7 +109,6 @@ function App() {
       alert('Please select a target variable.');
       return;
     }
-
     if (selectedForUnivariate.length === 0) {
       alert('Please select at least one column to analyze.');
       return;
@@ -116,59 +116,31 @@ function App() {
 
     setLoading(true);
     try {
-      // Split selected columns into discrete and continuous
-      const selectedDiscrete = selectedForUnivariate.filter((col) => discreteColumns.includes(col));
-      const selectedContinuous = selectedForUnivariate.filter((col) => continuousColumns.includes(col));
+      // Split into discrete/continuous
+      const selectedDiscrete = selectedForUnivariate.filter(col => discreteColumns.includes(col));
+      const selectedContinuous = selectedForUnivariate.filter(col => continuousColumns.includes(col));
 
+      // Univariate analysis
       const univariateRes = await fetch('http://localhost:5000/api/univariate-analysis', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           discrete: selectedDiscrete,
           continuous: selectedContinuous,
           target: targetVariable,
         }),
       });
-
       const univariateData = await univariateRes.json();
       if (univariateData.error) {
         alert(univariateData.error);
-        setLoading(false);
         return;
       }
       setUnivariateResults(univariateData);
 
-      // Fine binning only for selected columns
-      const fineBinResultsTemp: any = {};
-      for (const col of selectedForUnivariate) {
-        const varType = discreteColumns.includes(col) ? 'discrete' : 'continuous';
-
-        const fineBinRes = await fetch('http://localhost:5000/api/fine-bin', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            variable: col,
-            target: targetVariable,
-            type: varType,
-          }),
-        });
-        const fineBinData = await fineBinRes.json();
-        if (!fineBinData.error) {
-          fineBinResultsTemp[col] = fineBinData.stats;
-        }
-      }
-      setFineBinResults(fineBinResultsTemp);
-
       // Cross-tabulation
-      const crossTabRes = await fetch('http://localhost:5000/api/cross-tab-view', {
+      const crossTabRes = await fetch('http://localhost:5000/api/cross-tab', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           variables: selectedForUnivariate,
           target: targetVariable,
@@ -179,12 +151,10 @@ function App() {
         setCrossTabResults(crossTabData);
       }
 
-      // Save record to backend
-      const saveRes = await fetch('http://localhost:5000/api/save-record', {
+      // Save record
+      await fetch('http://localhost:5000/api/save-record', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           dataset_path: 'uploaded.csv',
           discrete_columns: discreteColumns,
@@ -192,24 +162,22 @@ function App() {
           selected_columns: selectedForUnivariate,
           target_variable: targetVariable,
           univariate_results: JSON.stringify(univariateData),
-          finebin_results: JSON.stringify(fineBinResultsTemp),
+          finebin_results: JSON.stringify(fineBinResults),
           crosstab_results: JSON.stringify(crossTabData),
         }),
       });
-      // Optionally handle saveRes
     } catch (err) {
       alert('Analysis failed.');
     } finally {
       setLoading(false);
     }
   };
+
   const fetchTargetCounts = async (col: string) => {
     try {
       const res = await fetch('http://localhost:5000/api/target-distribution', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ column: col }),
       });
       const data = await res.json();
@@ -227,20 +195,26 @@ function App() {
     }
   }, [targetVariable]);
 
+  const toggleBinSelection = (col: string, binValue: any) => {
+    setSelectedBinGroups(prev => {
+      const currentBins = prev[col] || [];
+      if (currentBins.includes(binValue)) {
+        return { ...prev, [col]: currentBins.filter(v => v !== binValue) };
+      }
+      return { ...prev, [col]: [...currentBins, binValue] };
+    });
+  };
+
   const handleNextPage = () => {
-    if (currentPage < totalPages) setCurrentPage((prev) => prev + 1);
+    if (currentPage < totalPages) setCurrentPage(prev => prev + 1);
   };
 
   const handlePrevPage = () => {
-    if (currentPage > 1) setCurrentPage((prev) => prev - 1);
+    if (currentPage > 1) setCurrentPage(prev => prev - 1);
   };
 
-  // Helper function to format numbers to 4 decimal places
   const formatToFourDecimals = (value: any): string => {
-    if (typeof value === 'number') {
-      return value.toFixed(4);
-    }
-    return String(value);
+    return typeof value === 'number' ? value.toFixed(4) : String(value);
   };
 
   return (
@@ -275,10 +249,7 @@ function App() {
                     toggleSelectedForUnivariate={toggleSelectedForUnivariate}
                   />
                   <div style={{ marginTop: '30px', textAlign: 'center' }}>
-                    <button
-                      className="file-upload-label"
-                      onClick={handleProceedToSelectedColumns}
-                    >
+                    <button className="file-upload-label" onClick={handleProceedToSelectedColumns}>
                       Proceed to Selected Columns
                     </button>
                   </div>
@@ -293,6 +264,8 @@ function App() {
                   <CrossTabResults
                     crossTabResults={crossTabResults}
                     formatToFourDecimals={formatToFourDecimals}
+                    selectedBins={selectedBinGroups} // renamed to match component
+                    onBinToggle={toggleBinSelection} // renamed to match component
                   />
                 </>
               )}

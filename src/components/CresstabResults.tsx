@@ -1,45 +1,60 @@
-import './Results.css';
+import React from 'react';
 
 interface CrossTabResultsProps {
-  crossTabResults: any;
+  crossTabResults: Record<string, any>;
   formatToFourDecimals: (value: any) => string;
+  selectedBins: Record<string, any[]>; // keyed by column
+  onBinToggle: (col: string, binValue: any) => void;
 }
 
-const CrossTabResults = ({ crossTabResults, formatToFourDecimals }: CrossTabResultsProps) => {
-  if (Object.keys(crossTabResults).length === 0) return null;
+const CrossTabResults: React.FC<CrossTabResultsProps> = ({ 
+  crossTabResults, 
+  formatToFourDecimals,
+  selectedBins,
+  onBinToggle
+}) => {
+  if (!crossTabResults || Object.keys(crossTabResults).length === 0) {
+    return <div>No cross tabulation results available</div>;
+  }
 
   return (
-    <div style={{ marginTop: '40px', width: '100%' }}>
-      <h2 style={{ textAlign: 'center', marginBottom: '10px' }}>
-        Cross-Tabulation Results
-      </h2>
-      {Object.entries(crossTabResults).map(([col, result]: any, idx) => (
-        <div key={idx} className="column-panel" style={{ marginBottom: '20px' }}>
-          <h3>{result.title}</h3>
-          <div className="column-list">
-            <table style={{ width: '100%', color: 'white', fontSize: '14px' }}>
+    <div className="results-container">
+      {Object.entries(crossTabResults).map(([column, data]) => (
+        <div key={column} className="result-card">
+          <h3>{column} - Select Bins to Merge</h3>
+          {data && Array.isArray(data) ? (
+            <table>
               <thead>
                 <tr>
-                  {Object.keys(result.stats[0]).map((key) => (
-                    <th key={key} style={{ padding: '4px', borderBottom: '1px solid gray' }}>
-                      {key}
-                    </th>
-                  ))}
+                  <th>Select</th>
+                  <th>Category</th>
+                  <th>Count</th>
+                  <th>Percentage</th>
                 </tr>
               </thead>
               <tbody>
-                {result.stats.map((row: any, i: number) => (
-                  <tr key={i}>
-                    {Object.entries(row).map(([key, val], j) => (
-                      <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
-                        {key === 'Freq%' || key === 'Bad Rate' ? formatToFourDecimals(val) : String(val)}
+                {data.map((row, index) => {
+                  const binValue = row.category || 'N/A';
+                  return (
+                    <tr key={index}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={selectedBins[column]?.includes(binValue) || false}
+                          onChange={() => onBinToggle(column, binValue)}
+                        />
                       </td>
-                    ))}
-                  </tr>
-                ))}
+                      <td>{binValue}</td>
+                      <td>{row.count || 0}</td>
+                      <td>{formatToFourDecimals(row.percentage)}%</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
-          </div>
+          ) : (
+            <p>No cross tabulation data available for this column</p>
+          )}
         </div>
       ))}
     </div>
