@@ -63,7 +63,35 @@ const ColumnPanels = ({
         </div>
         <button
           className="assign-button"
-          onClick={assignRemainingToContinuous}
+          onClick={async () => {
+            // Compute remaining columns locally to both update UI and persist to DB in one click
+            const selectedDiscrete = new Set(discreteColumns);
+            const remaining = columns.filter(
+              (col) => !selectedDiscrete.has(col) && col !== targetVariable
+            );
+            // Update parent state
+            assignRemainingToContinuous();
+            // Persist a single record (create if none, else update)
+            try {
+              await fetch('http://localhost:5000/api/upsert-single-record', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  dataset_path: 'uploaded.csv',
+                  discrete_columns: discreteColumns,
+                  continuous_columns: remaining,
+                  selected_columns: selectedForUnivariate,
+                  target_variable: targetVariable,
+                  univariate_results: '',
+                  finebin_results: '',
+                  crosstab_results: ''
+                })
+              });
+            } catch (e) {
+              // Non-blocking: keep UI responsive even if persistence fails
+              console.error('Failed to upsert record:', e);
+            }
+          }}
         >
           Send Remaining to Continuous
         </button>

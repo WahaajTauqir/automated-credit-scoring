@@ -5,9 +5,12 @@ import FineBinResults from './FInebinResults';
 import CrossTabResults from './CresstabResults';
 import './SelectedColumnsPage.css';
 
+
+import { useEffect } from 'react';
+
 const SelectedColumnsPage = () => {
   const { state } = useLocation();
-  const { selectedColumns, discreteColumns, continuousColumns, targetVariable } = state || {};
+  const { selectedColumns, discreteColumns, continuousColumns, targetVariable, fineBinResults: navFineBinResults, finebin_results: navFinebinResultsRaw } = state || {};
 
   interface BinStats {
     [key: string]: any;
@@ -15,6 +18,7 @@ const SelectedColumnsPage = () => {
   interface Bin {
     [key: string]: any;
   }
+
 
   // State for analysis results
   const [loading, setLoading] = useState(false);
@@ -24,6 +28,49 @@ const SelectedColumnsPage = () => {
   const [activeGroup, setActiveGroup] = useState<Record<string, number>>({});
   const [fineBinResults, setFineBinResults] = useState<Record<string, BinStats[]>>({});
   const [crossTabResults, setCrossTabResults] = useState<Record<string, any>>({});
+  const [fineBinDetails, setFineBinDetails] = useState<Record<string, any>>({});
+
+  // Restore fine binning results and bin merge info from navigation state
+  useEffect(() => {
+    // Restore fine bin results (actual stats)
+    if (navFineBinResults && typeof navFineBinResults === 'object') {
+      setFineBinResults(navFineBinResults);
+    }
+    // Restore bin merge info (which bins were merged)
+    if (navFinebinResultsRaw) {
+      let parsed = navFinebinResultsRaw;
+      if (typeof navFinebinResultsRaw === 'string') {
+        try {
+          parsed = JSON.parse(navFinebinResultsRaw);
+        } catch {}
+      }
+      if (parsed && typeof parsed === 'object') {
+        setSelectedBinGroups(parsed);
+      }
+    }
+  }, [navFineBinResults, navFinebinResultsRaw]);
+
+  useEffect(() => {
+    const fetchFineBinDetails = async () => {
+      if (!selectedColumns || !state?.recordId) return;
+
+      const details: Record<string, any> = {};
+      for (const column of selectedColumns) {
+        try {
+          const response = await fetch(`http://localhost:5000/api/finebin-details/${state.recordId}/${column}`);
+          if (response.ok) {
+            const data = await response.json();
+            details[column] = data;
+          }
+        } catch (error) {
+          console.error(`Failed to fetch fine bin details for column ${column}:`, error);
+        }
+      }
+      setFineBinDetails(details);
+    };
+
+    fetchFineBinDetails();
+  }, [selectedColumns, state?.recordId]);
 
   const formatToFourDecimals = (value: any) => {
     if (typeof value === 'number') return value.toFixed(4);
@@ -53,6 +100,50 @@ const SelectedColumnsPage = () => {
       // Reset selection and active group
       setSelectedBinGroups(prev => ({ ...prev, [col]: {} }));
       setActiveGroup(prev => ({ ...prev, [col]: 1 }));
+
+      // Restore previously saved fine-bin merges if present, then recompute stats
+      try {
+        const resFine = await fetch(`http://localhost:5000/api/finebin-details/${state?.recordId || ''}/${col}`);
+        if (resFine.ok) {
+          const merges = await resFine.json();
+          if (Array.isArray(merges) && merges.length > 0) {
+            const restoredGroups: Record<string, any[]> = {};
+            for (const row of merges) {
+              const g = String(row.group_id);
+              const bins = typeof row.merged_bins === 'string' ? JSON.parse(row.merged_bins) : row.merged_bins;
+              restoredGroups[g] = bins;
+            }
+            setSelectedBinGroups(prev => ({ ...prev, [col]: restoredGroups }));
+
+            // Also recompute and display fine-binned stats from restored merges
+            const resReFine = await fetch('http://localhost:5000/api/fine-bin', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                variable: col,
+                target: targetVariable,
+                type: varType,
+                bin_merges: restoredGroups,
+              }),
+            });
+            const refined = await resReFine.json();
+            if (!refined.error && Array.isArray(refined.stats)) {
+              setFineBinResults(prev => ({ ...prev, [col]: refined.stats }));
+            }
+
+            // Hide already-merged bins from the selection table
+            const mergedBinsFlat = Object.values(restoredGroups).flat();
+            setCoarseBinResults(prev => {
+              const prevBins = prev[col] || [];
+              const binLabelKey = `${col}_binned`;
+              const remainingBins = prevBins.filter((bin: Bin) => !mergedBinsFlat.includes(bin[binLabelKey]));
+              return { ...prev, [col]: remainingBins };
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('No saved fine-bin merges to restore for', col);
+      }
     } catch {
       alert('Error fetching coarse bin results');
     } finally {
@@ -60,7 +151,6 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  // Toggle bin selection in a group for a column
   const toggleBinSelection = (col: string, binValue: any, group: number) => {
     setSelectedBinGroups(prev => {
       const colGroups = prev[col] || {};
@@ -86,24 +176,15 @@ const runFineBinning = async (col: string) => {
     alert("Select at least one bin to merge");
     return;
   }
-
   const varType = continuousColumns.includes(col) ? 'continuous' : 'discrete';
-
   setLoading(true);
   try {
     const res = await fetch('http://localhost:5000/api/fine-bin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        variable: col,
-        target: targetVariable,
-        type: varType,
-        bin_merges: colGroupsSnapshot,
-      }),
+      body: JSON.stringify({ variable: col, target: targetVariable, type: varType, bin_merges: colGroupsSnapshot }),
     });
-
     const fineBinData = await res.json();
-
     if (!fineBinData.error) {
       setFineBinResults(prev => {
         const prevFineBins = prev[col] || [];
@@ -160,6 +241,78 @@ const runFineBinning = async (col: string) => {
           ...prev,
           [col]: crossTabData[col] || crossTabData,
         }));
+      }
+
+      // Persist fine bin merge info for all columns
+      try {
+        // Build a structure: { columnName: { ...bin_merges } }
+        const fineBinMergeInfo: Record<string, any> = {};
+        Object.keys(fineBinResults).forEach(fbCol => {
+          fineBinMergeInfo[fbCol] = selectedBinGroups[fbCol] || {};
+        });
+
+        // Fetch previous merges for this column (if any) to union with current selection
+        let previousMerges: Record<string, any[]> = {};
+        try {
+          const prevRes = await fetch(`http://localhost:5000/api/finebin-details/${state?.recordId || ''}/${col}`);
+          if (prevRes.ok) {
+            const prevRows = await prevRes.json();
+            prevRows.forEach((r: any) => {
+              const g = String(r.group_id);
+              const bins = typeof r.merged_bins === 'string' ? JSON.parse(r.merged_bins) : r.merged_bins;
+              previousMerges[g] = bins;
+            });
+          }
+        } catch {}
+
+        // Union merges: keep previous bins and add new ones per group
+        const combined: Record<string, any[]> = { ...previousMerges };
+        Object.entries(colGroupsSnapshot).forEach(([g, bins]) => {
+          const prev = new Set(combined[g] || []);
+          (bins as any[]).forEach(b => prev.add(b));
+          combined[g] = Array.from(prev);
+        });
+
+        // Replace the column's merges with combined
+        fineBinMergeInfo[col] = combined;
+
+        // Upsert record with merged info
+        const upResp = await fetch('http://localhost:5000/api/upsert-single-record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataset_path: 'uploaded.csv',
+            discrete_columns: discreteColumns,
+            continuous_columns: continuousColumns,
+            selected_columns: selectedColumns,
+            target_variable: targetVariable,
+            univariate_results: '',
+            finebin_results: JSON.stringify(fineBinMergeInfo),
+            crosstab_results: ''
+          })
+        });
+        const upJson = await upResp.json().catch(() => ({} as any));
+        const recId = state?.recordId || upJson?.id;
+
+        if (recId) {
+          // Save combined merges for this column to finebin_details
+          await fetch('http://localhost:5000/api/finebin-details', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ record_id: recId, column_name: col, bin_merges: combined })
+          });
+        }
+
+        // Hide merged bins from coarse table using combined merges
+        const combinedFlat = Object.values(combined).flat();
+        setCoarseBinResults(prev => {
+          const prevBins = prev[col] || [];
+          const binLabelKey = `${col}_binned`;
+          const remainingBins = prevBins.filter((bin: Bin) => !combinedFlat.includes(bin[binLabelKey]));
+          return { ...prev, [col]: remainingBins };
+        });
+      } catch (e) {
+        console.error('Failed to upsert fine bin merge info:', e);
       }
     }
   } catch {

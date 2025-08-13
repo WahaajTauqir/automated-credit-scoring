@@ -15,12 +15,12 @@ const FineBinResults = ({ fineBinResults, formatToFourDecimals }: FineBinResults
       </h2>
       {Object.entries(fineBinResults).map(([col, stats], idx) => {
         // Group bins by 'group' key (adjust key name if needed)
-        const groups = stats.reduce((acc: Record<string, any[]>, bin) => {
+        const groups = Array.isArray(stats) ? stats.reduce((acc: Record<string, any[]>, bin) => {
           const groupKey = bin.group ?? 'Ungrouped';
           if (!acc[groupKey]) acc[groupKey] = [];
           acc[groupKey].push(bin);
           return acc;
-        }, {});
+        }, {}) : {};
 
         return (
           <div key={idx} className="column-panel" style={{ marginBottom: '20px' }}>

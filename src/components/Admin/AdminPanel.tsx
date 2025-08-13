@@ -32,17 +32,27 @@ const AdminPanel: React.FC = () => {
   const handleView = (id: number) => {
     fetch(`http://localhost:5000/api/record/${id}`)
       .then(res => res.json())
-      .then(data => {
+      .then(async data => {
+        // Load columns from uploaded.csv (first row)
+        let columns: string[] = [];
+        try {
+          const csvRes = await fetch('http://localhost:5000/api/uploaded-csv-columns');
+          if (csvRes.ok) {
+            const csvData = await csvRes.json();
+            columns = csvData.columns || [];
+          }
+        } catch {}
         // Parse columns from CSV strings to arrays
         const state = {
-          columns: [], // will be loaded from uploaded.csv
-          discreteColumns: data.discrete_columns ? data.discrete_columns.split(',') : [],
-          continuousColumns: data.continuous_columns ? data.continuous_columns.split(',') : [],
-          selectedForUnivariate: data.selected_columns ? data.selected_columns.split(',') : [],
+          columns,
+          discreteColumns: data.discrete_columns ? data.discrete_columns.split(',').filter(Boolean) : [],
+          continuousColumns: data.continuous_columns ? data.continuous_columns.split(',').filter(Boolean) : [],
+          selectedForUnivariate: data.selected_columns ? data.selected_columns.split(',').filter(Boolean) : [],
           targetVariable: data.target_variable,
           univariateResults: data.univariate_results ? JSON.parse(data.univariate_results) : {},
           fineBinResults: data.finebin_results ? JSON.parse(data.finebin_results) : {},
           crossTabResults: data.crosstab_results ? JSON.parse(data.crosstab_results) : {},
+          recordId: id,
         };
         navigate('/', { state });
       });

@@ -52,10 +52,42 @@ function App() {
     currentPage * columnsPerPage
   );
 
-  const handleProceedToSelectedColumns = () => {
+  const handleProceedToSelectedColumns = async () => {
     if (selectedForUnivariate.length === 0) {
       alert('Please select at least one column.');
       return;
+    }
+    // Save the current selection to the backend
+    try {
+      const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_path: 'uploaded.csv',
+          discrete_columns: discreteColumns,
+          continuous_columns: continuousColumns,
+          selected_columns: selectedForUnivariate,
+          target_variable: targetVariable,
+          univariate_results: '',
+          finebin_results: '',
+          crosstab_results: ''
+        })
+      });
+      const saved = await resp.json().catch(() => ({} as any));
+      const newRecordId = saved?.id;
+      navigate('/selected-columns', {
+        state: {
+          selectedColumns: selectedForUnivariate,
+          discreteColumns,
+          continuousColumns,
+          targetVariable,
+          recordId: newRecordId || undefined,
+        }
+      });
+      return;
+    } catch (e) {
+      // Non-blocking: allow navigation even if save fails
+      console.error('Failed to upsert record:', e);
     }
     navigate('/selected-columns', {
       state: {
@@ -151,8 +183,8 @@ function App() {
         setCrossTabResults(crossTabData);
       }
 
-      // Save record
-      await fetch('http://localhost:5000/api/save-record', {
+  // Upsert single record (create first time, update thereafter)
+  await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

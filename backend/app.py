@@ -6,6 +6,34 @@ import numpy as np
 import os
 import datetime
 from math import ceil
+import json
+
+# ----------- Get Uploaded CSV Columns -----------
+
+app = Flask(__name__)
+CORS(app, origins=["http://localhost:5173"])
+
+@app.route('/api/uploaded-csv-columns', methods=['GET'])
+def get_uploaded_csv_columns():
+    """
+    Returns the column headers from the uploaded.csv file.
+    """
+    import pandas as pd
+    try:
+        df = pd.read_csv('uploaded.csv', nrows=0)
+        return jsonify({"columns": df.columns.tolist()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- All imports at the top ---
+from flask import Flask, request, jsonify
+import sqlite3
+from flask_cors import CORS
+import pandas as pd
+import numpy as np
+import os
+import datetime
+from math import ceil
 
 
 app = Flask(__name__)
@@ -13,11 +41,18 @@ CORS(app, origins=["http://localhost:5173"])
 @app.route('/api/record/<int:record_id>', methods=['DELETE'])
 def delete_record(record_id):
     """
-    Delete a specific analysis record by ID.
+    Delete a specific analysis record by ID, and remove any related finebin_details rows.
     """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # First remove finebin_details for this record
+        try:
+            cur.execute("DELETE FROM finebin_details WHERE record_id = ?", (record_id,))
+        except Exception:
+            # If table doesn't exist or other issue, continue to delete record
+            pass
+        # Then remove the record
         cur.execute("DELETE FROM records WHERE id = ?", (record_id,))
         conn.commit()
         conn.close()
@@ -76,6 +111,66 @@ def save_record():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/upsert-single-record', methods=['POST'])
+def upsert_single_record():
+    """
+    Create or update a single record. If no record exists, insert one; otherwise update the latest record.
+    This supports the UX where only one record should exist and be updated across actions.
+    """
+    try:
+        data = request.get_json()
+        dataset_path = data.get('dataset_path', '')
+        discrete_columns = ','.join(data.get('discrete_columns', []))
+        continuous_columns = ','.join(data.get('continuous_columns', []))
+        selected_columns = ','.join(data.get('selected_columns', []))
+        target_variable = data.get('target_variable', '')
+        univariate_results = data.get('univariate_results', '')
+        finebin_results = data.get('finebin_results', '')
+        crosstab_results = data.get('crosstab_results', '')
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Check if a record exists
+        cur.execute("SELECT id FROM records ORDER BY created_at DESC LIMIT 1")
+        row = cur.fetchone()
+
+        if row is None:
+            # Insert new record
+            cur.execute(
+                """
+                INSERT INTO records (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results)
+            )
+            conn.commit()
+            record_id = cur.lastrowid
+        else:
+            # Update existing latest record
+            record_id = row['id'] if isinstance(row, sqlite3.Row) else row[0]
+            cur.execute(
+                """
+                UPDATE records
+                SET dataset_path = ?,
+                    discrete_columns = ?,
+                    continuous_columns = ?,
+                    selected_columns = ?,
+                    target_variable = ?,
+                    univariate_results = ?,
+                    finebin_results = ?,
+                    crosstab_results = ?
+                WHERE id = ?
+                """,
+                (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, record_id)
+            )
+            conn.commit()
+
+        conn.close()
+        return jsonify({"success": True, "id": record_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/records', methods=['GET'])
 def get_records():
     """
@@ -89,6 +184,33 @@ def get_records():
         records = [dict(row) for row in rows]
         conn.close()
         return jsonify(records)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ----------- Latest Record Dataset Path -----------
+@app.route('/api/latest-record-dataset-path', methods=['GET'])
+def latest_record_dataset_path():
+    """
+    Returns the dataset_path of the latest record and whether the file exists.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT dataset_path FROM records ORDER BY created_at DESC LIMIT 1")
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"dataset_path": None, "valid": False})
+        dataset_path = row[0] if not isinstance(row, sqlite3.Row) else row['dataset_path']
+        # Resolve relative paths relative to backend directory
+        resolved = dataset_path
+        if dataset_path and not os.path.isabs(dataset_path):
+            resolved = os.path.join(os.path.dirname(__file__), dataset_path)
+        return jsonify({
+            "dataset_path": dataset_path,
+            "resolved_path": resolved,
+            "valid": bool(resolved and os.path.exists(resolved))
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -126,12 +248,16 @@ def upload_csv():
             df = pd.read_csv(file)
             if df.empty:
                 return jsonify({"error": "Uploaded CSV is empty"}), 400
-            df.to_csv("uploaded.csv", index=False)
+            # Save to a known location in backend folder
+            save_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
+            df.to_csv(save_path, index=False)
             return jsonify({
                 "success": True,
                 "columns": df.columns.tolist(),
                 "rowCount": len(df),
-                "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "dataset_path": "uploaded.csv",
+                "resolved_path": save_path
             })
         except Exception as e:
             return jsonify({"error": f"Failed to process CSV: {str(e)}"}), 500
@@ -386,7 +512,17 @@ def cross_tab_api():
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
 
-        df[target] = df[target].fillna(0).astype(int)
+        # Robustly convert target to numeric (0/1). Avoids 500s on text targets.
+        try:
+            # Try to coerce to numeric
+            df[target] = pd.to_numeric(df[target], errors='coerce')
+            # If everything is NaN, we cannot proceed
+            if df[target].isna().all():
+                return jsonify({"error": f"Target column '{target}' contains no numeric values"}), 400
+            # Fill NaNs with 0 and cast to int
+            df[target] = df[target].fillna(0).astype(int)
+        except Exception as conv_err:
+            return jsonify({"error": f"Failed to convert target '{target}' to numeric: {str(conv_err)}"}), 400
         results = {}
 
         for var in variables:
@@ -474,6 +610,74 @@ def health():
     A simple health check endpoint.
     """
     return jsonify({"status": "OK", "time": str(datetime.datetime.now())})
+
+# ----------- Finebin Details API -----------
+@app.route('/api/finebin-details', methods=['POST'])
+def save_finebin_details():
+    """
+    Upsert fine binning details for a specific record and column.
+    Expects payload: { record_id, column_name, bin_merges: { <group_id>: [bins], ... } }
+    For simplicity, we delete existing rows for (record_id, column_name) and insert fresh ones per group.
+    """
+    data = request.get_json()
+    record_id = data.get('record_id')
+    column_name = data.get('column_name')
+    bin_merges = data.get('bin_merges')  # dict of group_id -> list of bins
+
+    if not record_id or not column_name or not isinstance(bin_merges, dict):
+        return jsonify({"error": "Missing or invalid fields (record_id, column_name, bin_merges)."}), 400
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Delete previous entries for this record/column
+        cur.execute(
+            "DELETE FROM finebin_details WHERE record_id = ? AND column_name = ?",
+            (record_id, column_name)
+        )
+
+        # Insert new rows per group
+        for group_id, bins in bin_merges.items():
+            cur.execute(
+                """
+                INSERT INTO finebin_details (record_id, column_name, group_id, merged_bins)
+                VALUES (?, ?, ?, ?)
+                """,
+                (record_id, column_name, str(group_id), json.dumps(bins))
+            )
+
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/finebin-details/<int:record_id>/<string:column_name>', methods=['GET'])
+def get_finebin_details(record_id, column_name):
+    """
+    Retrieve fine binning details for a specific record and column.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT group_id, merged_bins FROM finebin_details
+            WHERE record_id = ? AND column_name = ?
+            """,
+            (record_id, column_name)
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        finebin_details = [
+            {"group_id": row[0], "merged_bins": row[1]} for row in rows
+        ]
+        return jsonify(finebin_details)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

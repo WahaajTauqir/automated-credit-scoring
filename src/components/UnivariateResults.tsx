@@ -6,21 +6,24 @@ interface UnivariateResultsProps {
 }
 
 const UnivariateResults = ({ univariateResults, formatToFourDecimals }: UnivariateResultsProps) => {
-  if (Object.keys(univariateResults).length === 0) return null;
+  if (!univariateResults || Object.keys(univariateResults).length === 0) return null;
+
+  const entries = Object.entries(univariateResults).filter(([, result]: any) => result && Array.isArray(result.stats) && result.stats.length > 0);
+  if (entries.length === 0) return null;
 
   return (
     <div style={{ marginTop: '40px', width: '100%' }}>
       <h2 style={{ textAlign: 'center', marginBottom: '10px' }}>
         Coarse Binning Results
       </h2>
-      {Object.entries(univariateResults).map(([col, result]: any, idx) => (
+      {entries.map(([col, result]: any, idx) => (
         <div key={idx} className="column-panel" style={{ marginBottom: '20px' }}>
           <h3>{col} ({result.type})</h3>
           <div className="column-list">
             <table style={{ width: '100%', color: 'white', fontSize: '14px' }}>
               <thead>
                 <tr>
-                  {Object.keys(result.stats[0]).map((key) => (
+                  {Object.keys(result.stats[0] || {}).map((key) => (
                     <th key={key} style={{ padding: '4px', borderBottom: '1px solid gray' }}>
                       {key}
                     </th>

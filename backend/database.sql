@@ -11,3 +11,13 @@ CREATE TABLE IF NOT EXISTS records (
     crosstab_results TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Table to store fine binning details
+CREATE TABLE IF NOT EXISTS finebin_details (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id INTEGER NOT NULL,
+    column_name TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    merged_bins TEXT NOT NULL,
+    FOREIGN KEY (record_id) REFERENCES records (id)
+);
