@@ -1,0 +1,33 @@
+%% Module 05: Coarse Binning
+%% Goal: Reduce noise, prepare for monotonic fine bins, maximize separation early.
+%% Techniques: Quantile-based initial cuts, ChiMerge, Information Value screening.
+%%{init: {"theme": "dark", "flowchart": {"defaultRenderer": "elk", "htmlLabels": false}} }%%
+flowchart TB
+    classDef step fill:#1e293b,stroke:#60a5fa,color:#ffffff;
+    classDef decision fill:#3b2f13,stroke:#fbbf24,color:#ffffff;
+
+    A((From Outliers)):::step
+    S0["Select candidate variables — exclude: constant_drop, id_like, high_missing, leakage_flag"]:::step
+    S1["Initial bins — continuous: quantiles (e.g.,10) ensuring >=5% rows/bin; categorical: group rare (<1%) into 'OTHER'"]:::step
+    S2["Compute Bad Rate & IV per Bin"]:::step
+    S3["ChiMerge Adjacent Bins while p-value > 0.05 AND bins>6"]:::step
+    D1{"Total Bins > 6?"}:::decision
+    S4["Merge lowest information bins until <=6 bins or IV degradation <2%"]:::step
+    S5["Drop variable if IV < 0.02 (very weak)"]:::step
+    S6["Flag for review if 0.02 <= IV < 0.1 (weak)"]:::step
+    S7["Keep if 0.1 <= IV < 0.3 (medium); Strong if 0.3-0.5; Suspect data leak if >0.5"]:::step
+    S8["Persist Coarse Bin Map"]:::step
+    E((To Fine Binning))
+
+    A --> S0 --> S1 --> S2 --> S3 --> D1
+    D1 -->|Yes| S4 --> S2
+    D1 -->|No| S5 --> S6 --> S7 --> S8 --> E
+
+    subgraph OUTPUTS [Artifacts]
+        O1[Bin Edges]
+        O2[Bin Summary Table]
+        O3[Coarse IV Ranking]
+    end
+    style OUTPUTS fill:#111827,stroke:#6b7280,stroke-dasharray: 3 3,color:#ffffff
+
+    click E "./module_06_fine_binning.mmd" "Next: Fine Binning" _self

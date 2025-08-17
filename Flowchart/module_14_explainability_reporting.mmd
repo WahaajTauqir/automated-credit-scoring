@@ -1,0 +1,26 @@
+%% Module 14: Explainability & Reporting
+%% Goal: Provide transparent, regulator-ready evidence of model behavior.
+%%{init: {"theme": "dark", "flowchart": {"defaultRenderer": "elk", "htmlLabels": false}} }%%
+flowchart TB
+    classDef step fill:#374151,stroke:#9ca3af,color:#ffffff;
+    classDef decision fill:#4b5563,stroke:#d1d5db,color:#ffffff;
+
+    A((From Monitoring)):::step
+    S0["Generate Global Explanations: WoE tables, feature importance"]:::step
+    S1["Local Explanations: SHAP for individual applications (top 5 drivers)"]:::step
+    S2["Adverse Action Reason Codes Mapping (points impact ranking)"]:::step
+    S3["Regulatory Pack: data lineage, variable list, rejection policy"]:::step
+    S4["Audit Trail: version, hashes, approvals"]:::step
+    S5["Automated Report Export (PDF/HTML/JSON)"]:::step
+    E((Deployment & Continuous Loop))
+
+    A --> S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> E
+
+    subgraph OUTPUTS [Artifacts]
+        O1[Reason Codes]
+        O2[Global/Local Explain Files]
+        O3[Audit Pack]
+    end
+    style OUTPUTS fill:#111827,stroke:#6b7280,stroke-dasharray: 3 3,color:#ffffff
+
+    click E "./main.mmd" "Return to Overview" _self
