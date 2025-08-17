@@ -14,7 +14,7 @@ const CrossTabResults: React.FC<CrossTabResultsProps> = ({
   onBinToggle
 }) => {
   if (!crossTabResults || Object.keys(crossTabResults).length === 0) {
-    return <div>No cross tabulation results available</div>;
+    return <div></div>;
   }
 
   return (
