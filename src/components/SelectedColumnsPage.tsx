@@ -361,11 +361,16 @@ const SelectedColumnsPage = () => {
                   const mergedValues = Object.values(merges).flat();
                   return !mergedValues.includes(bin[`${activeColumn}_binned`]);
                 })
-                .map((bin, idx) => {
+                .map((bin) => {
                 const binLabelKey = `${activeColumn}_binned`;
                 const group = activeGroup[activeColumn] || 1;
                 const isContinuous = (continuousColumns || []).includes(activeColumn);
 
+                // Use the original bin label (e.g. 'Bin_1') for continuous variables.
+                // For discrete variables (numeric group ids), prefix with 'Bin_' for consistency.
+                const originalLabel = typeof bin[binLabelKey] === 'string'
+                  ? bin[binLabelKey]
+                  : `Bin_${bin[binLabelKey]}`;
                 return (
                   <tr key={bin[binLabelKey]}>
                     <td>
@@ -378,8 +383,8 @@ const SelectedColumnsPage = () => {
                       />
                     </td>
 
-                    {/* Sequential Bin labels */}
-                    <td>{`Bin_${idx + 1}`}</td>
+                    {/* Stable original bin label (no reindexing after merges) */}
+                    <td>{originalLabel}</td>
 
                     <td>{bin.Bad}</td>
                     <td>{bin.Good}</td>

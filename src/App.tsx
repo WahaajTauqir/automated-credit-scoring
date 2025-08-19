@@ -2,13 +2,25 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, Routes, Route } from 'react-router-dom';
 import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
-import ColumnPanels from './components/ColumnsPanel';
-import UnivariateResults from './components/UnivariateResults';
-import FineBinResults from './components/FInebinResults';
-import CrossTabResults from './components/CresstabResults';
 import AdminPanel from './components/Admin/AdminPanel';
 import SelectedColumnsPage from './components/SelectedColumnsPage';
+import ColumnSelectionPage from './components/ColumnSelectionPage';
 import './App.css';
+import './components/Admin/AdminPanel.css';
+
+// Reuse the analysis record type from Admin panel locally for inline table
+type AnalysisRecord = {
+  id: number;
+  dataset_path: string;
+  discrete_columns: string;
+  continuous_columns: string;
+  selected_columns: string;
+  target_variable: string;
+  created_at: string;
+  univariate_results?: string;
+  finebin_results?: string;
+  crosstab_results?: string;
+};
 
 function App() {
   const location = useLocation();
@@ -22,16 +34,31 @@ function App() {
   const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
   const [fineBinResults, setFineBinResults] = useState<Record<string, any>>({});
   const [crossTabResults, setCrossTabResults] = useState<Record<string, any>>({});
-  const [loading, setLoading] = useState<boolean>(false);
   const [targetCounts, setTargetCounts] = useState<Record<string, number>>({});
   const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
 
   const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, any[]>>({});
+  const [datasetPath, setDatasetPath] = useState<string>('uploaded.csv');
+
+  // Records (moved from AdminPanel into main page)
+  const [records, setRecords] = useState<AnalysisRecord[]>([]);
+  const [recordsLoading, setRecordsLoading] = useState<boolean>(false);
+
+  // Fetch existing analysis records on mount
+  useEffect(() => {
+    setRecordsLoading(true);
+    fetch('http://localhost:5000/api/records')
+      .then(res => res.json())
+      .then(data => setRecords(Array.isArray(data) ? data : []))
+      .catch(() => {})
+      .finally(() => setRecordsLoading(false));
+  }, []);
 
   // Restore state from navigation (AdminPanel)
   useEffect(() => {
     if (location.state) {
       const s = location.state as any;
+  if (s.columns) setColumns(s.columns || []);
       setDiscreteColumns(s.discreteColumns || []);
       setContinuousColumns(s.continuousColumns || []);
       setSelectedForUnivariate(s.selectedForUnivariate || []);
@@ -74,7 +101,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          dataset_path: 'uploaded.csv',
+          dataset_path: datasetPath,
           discrete_columns: discreteColumns,
           continuous_columns: continuousColumns,
           selected_columns: selectedForUnivariate,
@@ -109,8 +136,9 @@ function App() {
     }
   };
 
-  const handleCSVUploaded = (headers: string[]) => {
+  const handleCSVUploaded = (headers: string[], _rows?: any[], uploadedPath?: string) => {
     setColumns(headers);
+    if (uploadedPath) setDatasetPath(uploadedPath);
     setDiscreteColumns([]);
     setContinuousColumns([]);
     setTargetVariable('');
@@ -120,6 +148,7 @@ function App() {
     setSelectedBinGroups({});
     setCurrentPage(1);
     setTargetCounts({});
+    navigate('/column-selection');
   };
 
   const toggleSelectedForUnivariate = (col: string) => {
@@ -144,70 +173,6 @@ function App() {
     }
   };
 
-  const handleRunUnivariate = async () => {
-    if (!targetVariable) {
-      alert('Please select a target variable.');
-      return;
-    }
-    if (selectedForUnivariate.length === 0) {
-      alert('Please select at least one column to analyze.');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const selectedDiscrete = selectedForUnivariate.filter(col => discreteColumns.includes(col));
-      const selectedContinuous = selectedForUnivariate.filter(col => continuousColumns.includes(col));
-
-      const univariateRes = await fetch('http://localhost:5000/api/univariate-analysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          discrete: selectedDiscrete,
-          continuous: selectedContinuous,
-          target: targetVariable,
-        }),
-      });
-      const univariateData = await univariateRes.json();
-      if (univariateData.error) {
-        alert(univariateData.error);
-        return;
-      }
-      setUnivariateResults(univariateData);
-
-      const crossTabRes = await fetch('http://localhost:5000/api/cross-tab', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          variables: selectedForUnivariate,
-          target: targetVariable,
-        }),
-      });
-      const crossTabData = await crossTabRes.json();
-      if (!crossTabData.error) {
-        setCrossTabResults(crossTabData);
-      }
-
-      await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dataset_path: 'uploaded.csv',
-          discrete_columns: discreteColumns,
-          continuous_columns: continuousColumns,
-          selected_columns: selectedForUnivariate,
-          target_variable: targetVariable,
-          univariate_results: JSON.stringify(univariateData),
-          finebin_results: JSON.stringify(fineBinResults),
-          crosstab_results: JSON.stringify(crossTabData),
-        }),
-      });
-    } catch (err) {
-      alert('Analysis failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const fetchTargetCounts = async (col: string) => {
     try {
@@ -226,7 +191,7 @@ function App() {
   useEffect(() => {
     if (targetVariable) fetchTargetCounts(targetVariable);
   }, [targetVariable]);
-        
+
   const toggleBinSelection = (col: string, binValue: any) => {
     setSelectedBinGroups(prev => {
       const currentBins = prev[col] || [];
@@ -249,6 +214,51 @@ function App() {
     return typeof value === 'number' ? value.toFixed(4) : String(value);
   };
 
+  // View existing record: load its saved state then go to column selection
+  const handleRecordView = async (id: number) => {
+    try {
+      // Fetch record details
+      const recResp = await fetch(`http://localhost:5000/api/record/${id}`);
+      const data: AnalysisRecord & { univariate_results?: string; finebin_results?: string; crosstab_results?: string } = await recResp.json();
+      // Fetch columns from uploaded.csv (backend helper)
+      let csvColumns: string[] = [];
+      try {
+        const csvRes = await fetch('http://localhost:5000/api/uploaded-csv-columns');
+        if (csvRes.ok) {
+          const csvData = await csvRes.json();
+          csvColumns = csvData.columns || [];
+        }
+      } catch { /* silent */ }
+      // Use dataset path stored with record (fallback to existing)
+      if (data.dataset_path) setDatasetPath(data.dataset_path);
+      setColumns(csvColumns);
+      setDiscreteColumns(data.discrete_columns ? data.discrete_columns.split(',').filter(Boolean) : []);
+      setContinuousColumns(data.continuous_columns ? data.continuous_columns.split(',').filter(Boolean) : []);
+      setSelectedForUnivariate(data.selected_columns ? data.selected_columns.split(',').filter(Boolean) : []);
+      setTargetVariable(data.target_variable || '');
+      setUnivariateResults(data.univariate_results ? JSON.parse(data.univariate_results) : {});
+      setFineBinResults(data.finebin_results ? JSON.parse(data.finebin_results) : {});
+      setCrossTabResults(data.crosstab_results ? JSON.parse(data.crosstab_results) : {});
+      // Reset pagination based on loaded columns
+      setCurrentPage(1);
+      navigate('/column-selection');
+    } catch (e) {
+      console.error('Failed to load record', e);
+      alert('Failed to load record');
+    }
+  };
+
+  const handleRecordDelete = (id: number) => {
+    if (!window.confirm('Are you sure you want to delete this record?')) return;
+    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE' })
+      .then(res => {
+        if (res.ok) {
+          setRecords(prev => prev.filter(r => r.id !== id));
+        }
+      })
+      .catch(() => {});
+  };
+
   return (
     <Routes>
       <Route
@@ -257,53 +267,89 @@ function App() {
           <div>
             <Navbar />
             <div className="app-container">
-              {columns.length === 0 ? (
+              {columns.length === 0 && (
                 <div className="upload-wrapper">
                   <CSVReader onCSVUploaded={handleCSVUploaded} />
                 </div>
-              ) : (
-                <>
-                  <ColumnPanels
-                    columns={columns}
-                    paginatedColumns={paginatedColumns}
-                    discreteColumns={discreteColumns}
-                    continuousColumns={continuousColumns}
-                    targetVariable={targetVariable}
-                    targetCounts={targetCounts}
-                    handleTypeChange={handleTypeChange}
-                    setTargetVariable={setTargetVariable}
-                    currentPage={currentPage}
-                    totalPages={totalPages}
-                    onNextPage={handleNextPage}
-                    onPrevPage={handlePrevPage}
-                    assignRemainingToContinuous={assignRemainingToContinuous}
-                    selectedForUnivariate={selectedForUnivariate}
-                    toggleSelectedForUnivariate={toggleSelectedForUnivariate}
-                    handleFineBin={handleFineBin} // async fixed
-                  />
-                  <div style={{ marginTop: '30px', textAlign: 'center' }}>
-                    <button className="file-upload-label" onClick={handleProceedToSelectedColumns}>
-                      Proceed to Selected Columns
-                    </button>
-                  </div>
-                  <UnivariateResults
-                    univariateResults={univariateResults}
-                    formatToFourDecimals={formatToFourDecimals}
-                  />
-                  <FineBinResults
-                    fineBinResults={fineBinResults}
-                    formatToFourDecimals={formatToFourDecimals}
-                  />
-                  <CrossTabResults
-                    crossTabResults={crossTabResults}
-                    formatToFourDecimals={formatToFourDecimals}
-                    selectedBins={selectedBinGroups}
-                    onBinToggle={toggleBinSelection}
-                  />
-                </>
               )}
+              {columns.length > 0 && (
+                <div style={{ textAlign: 'center', width: '100%' }}>
+                  <p>Dataset loaded.</p>
+                  <button className="file-upload-label" onClick={() => navigate('/column-selection')}>Go to Column Selection</button>
+                </div>
+              )}
+
+              {/* Records Table Section */}
+              <div style={{ width: '100%', marginTop: '40px' }}>
+                <h2 style={{ textAlign: 'center', marginBottom: '12px' }}>Records</h2>
+                {recordsLoading ? (
+                  <div className="admin-loading">Loading records...</div>
+                ) : records.length === 0 ? (
+                  <div className="admin-empty">No analyses found.</div>
+                ) : (
+                  <div className="admin-panel-container" style={{ margin: '0 auto', maxWidth: '100%' }}>
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th style={{ textAlign: 'center' }}>ID</th>
+                          <th style={{ textAlign: 'center' }}>Dataset</th>
+                          <th style={{ textAlign: 'center' }}>Selected Columns</th>
+                          <th style={{ textAlign: 'center' }}>Date</th>
+                          <th style={{ textAlign: 'center' }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {records.map(rec => (
+                          <tr key={rec.id}>
+                            <td style={{ textAlign: 'center' }}>{rec.id}</td>
+                            <td style={{ textAlign: 'center' }}>{rec.dataset_path}</td>
+                            <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>{rec.selected_columns}</td>
+                            <td style={{ textAlign: 'center' }}>{rec.created_at}</td>
+                            <td style={{ textAlign: 'center' }}>
+                              <div style={{ display: 'inline-flex', gap: '8px' }}>
+                                <button className="admin-action-btn" title="View" onClick={() => handleRecordView(rec.id)}>View</button>
+                                <button className="admin-action-btn" title="Delete" onClick={() => handleRecordDelete(rec.id)}>Delete</button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
+        }
+      />
+      <Route
+        path="/column-selection"
+        element={
+          <ColumnSelectionPage
+            columns={columns}
+            paginatedColumns={paginatedColumns}
+            discreteColumns={discreteColumns}
+            continuousColumns={continuousColumns}
+            targetVariable={targetVariable}
+            targetCounts={targetCounts}
+            handleTypeChange={handleTypeChange}
+            setTargetVariable={setTargetVariable}
+            currentPage={currentPage}
+            totalPages={totalPages}
+            onNextPage={handleNextPage}
+            onPrevPage={handlePrevPage}
+            assignRemainingToContinuous={assignRemainingToContinuous}
+            selectedForUnivariate={selectedForUnivariate}
+            toggleSelectedForUnivariate={toggleSelectedForUnivariate}
+            handleFineBin={handleFineBin}
+            handleProceedToSelectedColumns={handleProceedToSelectedColumns}
+            univariateResults={univariateResults}
+            fineBinResults={fineBinResults}
+            crossTabResults={crossTabResults}
+            selectedBinGroups={selectedBinGroups}
+            toggleBinSelection={toggleBinSelection}
+            formatToFourDecimals={formatToFourDecimals}
+          />
         }
       />
       <Route path="/admin" element={<AdminPanel />} />

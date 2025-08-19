@@ -78,19 +78,24 @@ const UnivariateResults = ({
                 </tr>
               </thead>
               <tbody>
-                {result.stats.map((row: any, i: number) => (
-                  <tr key={i}>
-                    {columnOrder.map((key, j) => (
-                      <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
-                        {key === 'Bin'
-                          ? `Bin_${i + 1}` // Show Bin_1, Bin_2, etc.
-                          : key === 'Bad Rate' || key === 'Freq%'
-                          ? formatToFourDecimals(row[key])
-                          : String(row[key] ?? '')}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
+                {result.stats.map((row: any, i: number) => {
+                  // Prefer explicit binned column if present, else fallback to sequential label
+                  const binnedKey = Object.keys(row).find(k => k.endsWith('_binned'));
+                  const binLabel = binnedKey ? row[binnedKey] : `Bin_${i + 1}`;
+                  return (
+                    <tr key={i}>
+                      {columnOrder.map((key, j) => (
+                        <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
+                          {key === 'Bin'
+                            ? binLabel
+                            : key === 'Bad Rate' || key === 'Freq%'
+                            ? formatToFourDecimals(row[key])
+                            : String(row[key] ?? '')}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

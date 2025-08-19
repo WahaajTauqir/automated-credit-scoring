@@ -232,6 +232,55 @@ def get_record(record_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ----------- Load Dataset For Record (ensures uploaded.csv reflects record's dataset) -----------
+@app.route('/api/record/<int:record_id>/load-dataset', methods=['GET'])
+def load_record_dataset(record_id):
+    """
+    Loads the dataset for a specific record (if dataset_path exists) into uploaded.csv
+    and returns its columns. If dataset_path is already 'uploaded.csv', just reads columns.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT dataset_path FROM records WHERE id = ?", (record_id,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"error": "Record not found"}), 404
+        dataset_path = row[0] if not isinstance(row, sqlite3.Row) else row['dataset_path']
+        if not dataset_path:
+            return jsonify({"error": "No dataset path stored for record"}), 400
+
+        # Resolve the path (if relative, relative to backend directory)
+        resolved = dataset_path
+        if not os.path.isabs(resolved):
+            resolved = os.path.join(os.path.dirname(__file__), resolved)
+
+        if not os.path.exists(resolved):
+            return jsonify({"error": f"Dataset file not found at: {resolved}"}), 404
+
+        # If not the canonical uploaded.csv, copy/overwrite
+        canonical = os.path.join(os.path.dirname(__file__), 'uploaded.csv')
+        if os.path.abspath(resolved) != os.path.abspath(canonical):
+            try:
+                import shutil
+                shutil.copyfile(resolved, canonical)
+            except Exception as e:
+                return jsonify({"error": f"Failed copying dataset to working file: {str(e)}"}), 500
+
+        try:
+            df = pd.read_csv(canonical, nrows=0)
+            return jsonify({
+                "success": True,
+                "dataset_path": dataset_path,
+                "resolved_path": resolved,
+                "columns": df.columns.tolist()
+            })
+        except Exception as e:
+            return jsonify({"error": f"Failed reading dataset columns: {str(e)}"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ----------- Upload CSV -----------
 @app.route('/api/upload-csv', methods=['POST'])
 def upload_csv():
