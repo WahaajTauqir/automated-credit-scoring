@@ -226,7 +226,7 @@ function App() {
   useEffect(() => {
     if (targetVariable) fetchTargetCounts(targetVariable);
   }, [targetVariable]);
-
+        
   const toggleBinSelection = (col: string, binValue: any) => {
     setSelectedBinGroups(prev => {
       const currentBins = prev[col] || [];
