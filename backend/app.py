@@ -360,25 +360,61 @@ def coarse_bin_discrete(df, var, target, bad_rate_diff=0.5):
         raise ValueError(f"Coarse binning (discrete) failed for '{var}': {str(e)}")
 
 # ----------- Fine Binning: Continuous (REORDERED) -----------
+def split_into_adjacent_groups(old_bins):
+    """
+    Given a list of bins like ['Bin1','Bin2','Bin9','Bin10'],
+    return groups of adjacent bins:
+    [['Bin1','Bin2'], ['Bin9','Bin10']]
+    """
+    # Convert bin label -> number
+    indexed = [(int(''.join([ch for ch in b if ch.isdigit()])), b) for b in old_bins]
+    indexed.sort()
+
+    groups, current = [], [indexed[0][1]]
+
+    for i in range(1, len(indexed)):
+        prev_num, prev_label = indexed[i-1]
+        curr_num, curr_label = indexed[i]
+
+        if curr_num == prev_num + 1:  # ✅ adjacent
+            current.append(curr_label)
+        else:  # ❌ break → start new group
+            groups.append(current)
+            current = [curr_label]
+
+    groups.append(current)
+    return groups
+
+
 def fine_bin_continuous(df, var, target, bin_merges=None):
-    """
-    Performs fine binning by merging coarse bins for a continuous variable.
-    The output is a dataframe with a specific column order.
-    """
     try:
         binned_col = f'{var}_binned'
         fine_binned_col = f'{var}_fine_binned'
 
-        bin_map = {}
+        if not bin_merges:
+            df[fine_binned_col] = df[binned_col]
+            return None, df[fine_binned_col], {}
+
+        new_bin_map = {}
+        updated_merges = {}
+
         for new_bin, old_bins in bin_merges.items():
-            for old_bin in old_bins:
-                bin_map[old_bin] = new_bin
+            # Split into adjacent groups instead of erroring
+            groups = split_into_adjacent_groups(old_bins)
 
-        df[fine_binned_col] = df[binned_col].map(bin_map)
+            for idx, g in enumerate(groups, start=1):
+                merged_name = f"{'_'.join(g)}"
+                updated_merges[merged_name] = g
+                for b in g:
+                    new_bin_map[b] = merged_name
 
+        # Apply new mapping
+        df[fine_binned_col] = df[binned_col].map(lambda x: new_bin_map.get(x, x))
+
+        # Cross-tab summary
         cross_tab = pd.crosstab(df[fine_binned_col], df[target])
 
-        # Dynamic rename of columns to Good/Bad depending on presence
+        # Rename target columns
         cols = cross_tab.columns.tolist()
         col_map = {}
         if 0 in cols:
@@ -387,7 +423,7 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
             col_map[1] = 'Bad'
         cross_tab = cross_tab.rename(columns=col_map)
 
-        # Add missing columns with 0 if needed
+        # Fill missing
         for col in ['Good', 'Bad']:
             if col not in cross_tab.columns:
                 cross_tab[col] = 0
@@ -397,9 +433,11 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
         cross_tab['Bad Rate'] = (cross_tab['Bad'] / cross_tab['Total']) * 100
         cross_tab = cross_tab.reset_index()
 
-        columns_order = [fine_binned_col, 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%']
+        columns_order = [fine_binned_col, 'Bad', 'Good', 'Total', 'Freq%', 'Bad Rate']
         cross_tab = cross_tab[columns_order]
-        return cross_tab, df[fine_binned_col], bin_merges
+
+        return cross_tab, df[fine_binned_col], updated_merges
+
     except Exception as e:
         raise ValueError(f"Fine binning (continuous) failed for '{var}': {str(e)}")
 
@@ -451,44 +489,54 @@ def fine_bin_discrete(df, var, target, bin_merges=None, bin_mapping=None):
 # ----------- Fine Binning API -----------
 @app.route('/api/fine-bin', methods=['POST'])
 def fine_bin_api():
-    """
-    Performs fine binning (merging of coarse bins) via a REST API endpoint,
-    expects manual bin_merges dict from frontend.
-    """
     try:
         req = request.get_json()
+        print("Received request:", req)
+
         var = req.get('variable')
         target = req.get('target')
         var_type = req.get('type')
-        bin_merges = req.get('bin_merges')
+        bin_merges = req.get('bin_merges', {})
 
-        if not var or not target or not var_type or bin_merges is None:
-            return jsonify({"error": "Missing required fields: variable, target, type, or bin_merges"}), 400
+        if not var or not target or not var_type:
+            return jsonify({"error": "Missing required fields"}), 400
 
         df = pd.read_csv("uploaded.csv")
-        if target not in df.columns or var not in df.columns:
-            return jsonify({"error": f"Column '{target}' or '{var}' not found in dataset"}), 400
-
         df[target] = df[target].fillna(0).astype(int)
 
         if var_type == 'continuous':
-            # You still need to do coarse binning to get the base bins first
             _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
-            tab, _, bin_merges = fine_bin_continuous(df, var, target, bin_merges)
+
+            # Only keep bins that exist
+            existing_bins = set(df[f'{var}_binned'].unique())
+            bin_merges = {
+                k: [b for b in v if b in existing_bins]
+                for k, v in bin_merges.items()
+            }
+            # Remove empty merges
+            bin_merges = {k: v for k, v in bin_merges.items() if v}
+
+            tab, _, adjusted_merges = fine_bin_continuous(df, var, target, bin_merges)
+
         else:
             _, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
-            tab, _, bin_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
+            tab, _, adjusted_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
+
+        if tab is None:
+            return jsonify({"error": "Fine binning returned no results"}), 400
 
         df.to_csv("uploaded.csv", index=False)
+        print("Fine binning done for", var)
 
         return jsonify({
             "success": True,
             "stats": tab.to_dict(orient='records'),
-            "bin_merges": bin_merges
+            "bin_merges": adjusted_merges
         })
+
     except Exception as e:
         import traceback
-        print(traceback.format_exc())  # print full error stack trace in your server console
+        print("ERROR:", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 # ----------- Cross Tab View API -----------

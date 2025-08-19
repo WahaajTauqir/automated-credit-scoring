@@ -17,6 +17,7 @@ interface ColumnPanelsProps {
   assignRemainingToContinuous: () => void;
   selectedForUnivariate: string[];
   toggleSelectedForUnivariate: (col: string) => void;
+  handleFineBin: (column: string) => Promise<void>;
 }
 
 const ColumnPanels = ({

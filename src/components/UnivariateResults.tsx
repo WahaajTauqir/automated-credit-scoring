@@ -1,10 +1,9 @@
-import { useState } from "react";
 import './Results.css';
 
 interface UnivariateResultsProps {
   univariateResults: Record<string, any>;
   formatToFourDecimals: (value: any) => string;
-  onDropColumn?: (col: string) => void; // NEW
+  onDropColumn?: (col: string) => void;
 }
 
 const UnivariateResults = ({
@@ -18,6 +17,9 @@ const UnivariateResults = ({
     ([, result]: any) => result && Array.isArray(result.stats) && result.stats.length > 0
   );
   if (entries.length === 0) return null;
+
+  // Column order
+  const columnOrder = ['Bin', 'Bad', 'Good', 'Total', 'Bad Rate', 'Freq%'];
 
   return (
     <div style={{ marginTop: '40px', width: '100%' }}>
@@ -37,7 +39,6 @@ const UnivariateResults = ({
             paddingTop: '30px'
           }}
         >
-          {/* Drop Button per column */}
           {onDropColumn && (
             <button
               style={{
@@ -69,9 +70,9 @@ const UnivariateResults = ({
             <table style={{ width: '100%', color: 'white', fontSize: '14px' }}>
               <thead>
                 <tr>
-                  {Object.keys(result.stats[0] || {}).map((key) => (
+                  {columnOrder.map(key => (
                     <th key={key} style={{ padding: '4px', borderBottom: '1px solid gray' }}>
-                      {key}
+                      {key === 'Bad Rate' ? 'Bad Rate (%)' : key}
                     </th>
                   ))}
                 </tr>
@@ -79,11 +80,13 @@ const UnivariateResults = ({
               <tbody>
                 {result.stats.map((row: any, i: number) => (
                   <tr key={i}>
-                    {Object.entries(row).map(([key, val], j) => (
+                    {columnOrder.map((key, j) => (
                       <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
-                        {key === 'Freq%' || key === 'Bad Rate'
-                          ? formatToFourDecimals(val)
-                          : String(val)}
+                        {key === 'Bin'
+                          ? `Bin_${i + 1}` // Show Bin_1, Bin_2, etc.
+                          : key === 'Bad Rate' || key === 'Freq%'
+                          ? formatToFourDecimals(row[key])
+                          : String(row[key] ?? '')}
                       </td>
                     ))}
                   </tr>

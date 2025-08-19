@@ -14,7 +14,7 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  // State definitions with explicit typing
+  // State definitions
   const [columns, setColumns] = useState<string[]>([]);
   const [discreteColumns, setDiscreteColumns] = useState<string[]>([]);
   const [continuousColumns, setContinuousColumns] = useState<string[]>([]);
@@ -26,7 +26,6 @@ function App() {
   const [targetCounts, setTargetCounts] = useState<Record<string, number>>({});
   const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
 
-  // For bin selection in CrossTab
   const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, any[]>>({});
 
   // Restore state from navigation (AdminPanel)
@@ -52,12 +51,24 @@ function App() {
     currentPage * columnsPerPage
   );
 
+  // Async handleFineBin
+  const handleFineBin = async (column: string): Promise<void> => {
+    try {
+      console.log("Fine bin clicked for column:", column);
+      // Example API call (replace with your endpoint)
+      // const res = await fetch('http://localhost:5000/api/fine-bin', { ... });
+      // const data = await res.json();
+    } catch (err) {
+      console.error("Error in fine binning:", err);
+    }
+  };
+
   const handleProceedToSelectedColumns = async () => {
     if (selectedForUnivariate.length === 0) {
       alert('Please select at least one column.');
       return;
     }
-    // Save the current selection to the backend
+
     try {
       const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
@@ -75,6 +86,7 @@ function App() {
       });
       const saved = await resp.json().catch(() => ({} as any));
       const newRecordId = saved?.id;
+
       navigate('/selected-columns', {
         state: {
           selectedColumns: selectedForUnivariate,
@@ -84,19 +96,17 @@ function App() {
           recordId: newRecordId || undefined,
         }
       });
-      return;
     } catch (e) {
-      // Non-blocking: allow navigation even if save fails
       console.error('Failed to upsert record:', e);
+      navigate('/selected-columns', {
+        state: {
+          selectedColumns: selectedForUnivariate,
+          discreteColumns,
+          continuousColumns,
+          targetVariable
+        }
+      });
     }
-    navigate('/selected-columns', {
-      state: {
-        selectedColumns: selectedForUnivariate,
-        discreteColumns,
-        continuousColumns,
-        targetVariable
-      }
-    });
   };
 
   const handleCSVUploaded = (headers: string[]) => {
@@ -120,9 +130,7 @@ function App() {
 
   const assignRemainingToContinuous = () => {
     const selectedDiscrete = new Set(discreteColumns);
-    const remaining = columns.filter(
-      col => !selectedDiscrete.has(col) && col !== targetVariable
-    );
+    const remaining = columns.filter(col => !selectedDiscrete.has(col) && col !== targetVariable);
     setContinuousColumns(remaining);
   };
 
@@ -148,11 +156,9 @@ function App() {
 
     setLoading(true);
     try {
-      // Split into discrete/continuous
       const selectedDiscrete = selectedForUnivariate.filter(col => discreteColumns.includes(col));
       const selectedContinuous = selectedForUnivariate.filter(col => continuousColumns.includes(col));
 
-      // Univariate analysis
       const univariateRes = await fetch('http://localhost:5000/api/univariate-analysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -169,7 +175,6 @@ function App() {
       }
       setUnivariateResults(univariateData);
 
-      // Cross-tabulation
       const crossTabRes = await fetch('http://localhost:5000/api/cross-tab', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -183,8 +188,7 @@ function App() {
         setCrossTabResults(crossTabData);
       }
 
-  // Upsert single record (create first time, update thereafter)
-  await fetch('http://localhost:5000/api/upsert-single-record', {
+      await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -213,18 +217,14 @@ function App() {
         body: JSON.stringify({ column: col }),
       });
       const data = await res.json();
-      if (!data.error) {
-        setTargetCounts(data);
-      }
+      if (!data.error) setTargetCounts(data);
     } catch (err) {
       console.error('Failed to fetch target counts:', err);
     }
   };
 
   useEffect(() => {
-    if (targetVariable) {
-      fetchTargetCounts(targetVariable);
-    }
+    if (targetVariable) fetchTargetCounts(targetVariable);
   }, [targetVariable]);
 
   const toggleBinSelection = (col: string, binValue: any) => {
@@ -279,6 +279,7 @@ function App() {
                     assignRemainingToContinuous={assignRemainingToContinuous}
                     selectedForUnivariate={selectedForUnivariate}
                     toggleSelectedForUnivariate={toggleSelectedForUnivariate}
+                    handleFineBin={handleFineBin} // async fixed
                   />
                   <div style={{ marginTop: '30px', textAlign: 'center' }}>
                     <button className="file-upload-label" onClick={handleProceedToSelectedColumns}>
@@ -296,8 +297,8 @@ function App() {
                   <CrossTabResults
                     crossTabResults={crossTabResults}
                     formatToFourDecimals={formatToFourDecimals}
-                    selectedBins={selectedBinGroups} // renamed to match component
-                    onBinToggle={toggleBinSelection} // renamed to match component
+                    selectedBins={selectedBinGroups}
+                    onBinToggle={toggleBinSelection}
                   />
                 </>
               )}

@@ -1,8 +1,6 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import UnivariateResults from './UnivariateResults';
-import FineBinResults from './FInebinResults';
-import CrossTabResults from './CresstabResults';
 import './SelectedColumnsPage.css';
 
 const SelectedColumnsPage = () => {
@@ -11,84 +9,31 @@ const SelectedColumnsPage = () => {
     selectedColumns: navSelectedColumns,
     discreteColumns,
     continuousColumns,
-    targetVariable,
-    fineBinResults: navFineBinResults,
-    finebin_results: navFinebinResultsRaw
+    targetVariable
   } = state || {};
 
-  interface BinStats {
-    [key: string]: any;
-  }
-  interface Bin {
-    [key: string]: any;
-  }
+  interface BinStats { [key: string]: any; }
+  interface Bin { [key: string]: any; }
 
-  // ===== Local list of visible columns (so we can drop/remove) =====
-  const [visibleColumns, setVisibleColumns] = useState<string[]>(() => navSelectedColumns || []);
+  const [activeColumn, setActiveColumn] = useState<string>(navSelectedColumns?.[0] || '');
   const navigate = useNavigate();
-  const handleGoHome = () => {
-    navigate('/');
-  };
-  // ===== Analysis States =====
+  const handleGoHome = () => navigate('/');
+
   const [loading, setLoading] = useState(false);
   const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
   const [coarseBinResults, setCoarseBinResults] = useState<Record<string, BinStats[]>>({});
   const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, Record<number, any[]>>>({});
   const [activeGroup, setActiveGroup] = useState<Record<string, number>>({});
   const [fineBinResults, setFineBinResults] = useState<Record<string, BinStats[]>>({});
-  const [crossTabResults, setCrossTabResults] = useState<Record<string, any>>({});
-  const [fineBinDetails, setFineBinDetails] = useState<Record<string, any>>({});
 
-  // ===== Restore fine binning results and bin merge info from navigation state =====
-  useEffect(() => {
-    if (navFineBinResults && typeof navFineBinResults === 'object') {
-      setFineBinResults(navFineBinResults);
-    }
-    if (navFinebinResultsRaw) {
-      let parsed = navFinebinResultsRaw;
-      if (typeof navFinebinResultsRaw === 'string') {
-        try { parsed = JSON.parse(navFinebinResultsRaw); } catch { }
-      }
-      if (parsed && typeof parsed === 'object') {
-        setSelectedBinGroups(parsed);
-      }
-    }
-  }, [navFineBinResults, navFinebinResultsRaw]);
+  const formatToFourDecimals = (value: any) => (typeof value === 'number' ? value.toFixed(4) : String(value));
 
-  // ===== Fetch saved fine-bin details for currently visible columns =====
-  useEffect(() => {
-    const fetchFineBinDetails = async () => {
-      if (!visibleColumns || visibleColumns.length === 0 || !state?.recordId) return;
-
-      const details: Record<string, any> = {};
-      for (const column of visibleColumns) {
-        try {
-          const response = await fetch(`http://localhost:5000/api/finebin-details/${state.recordId}/${column}`);
-          if (response.ok) {
-            const data = await response.json();
-            details[column] = data;
-          }
-        } catch (error) {
-          console.error(`Failed to fetch fine bin details for column ${column}:`, error);
-        }
-      }
-      setFineBinDetails(details);
-    };
-
-    fetchFineBinDetails();
-  }, [visibleColumns, state?.recordId]);
-
-  const formatToFourDecimals = (value: any) => {
-    if (typeof value === 'number') return value.toFixed(4);
-    return String(value);
-  };
-
-  // ===== Handle Column Click -> Fetch Univariate + Coarse Bins and restore merges =====
+  // Fetch univariate & coarse bins
   const handleColumnClick = async (col: string) => {
+    setActiveColumn(col);
     setLoading(true);
     try {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-
       const res = await fetch('http://localhost:5000/api/univariate-analysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -98,55 +43,13 @@ const SelectedColumnsPage = () => {
           target: targetVariable
         }),
       });
-
       const data = await res.json();
-
       setUnivariateResults(prev => ({ ...prev, [col]: data[col] || data }));
       setCoarseBinResults(prev => ({ ...prev, [col]: (data[col]?.stats || []) as BinStats[] }));
-      setSelectedBinGroups(prev => ({ ...prev, [col]: {} }));
+
+      setSelectedBinGroups(prev => ({ ...prev, [col]: prev[col] || {} }));
       setActiveGroup(prev => ({ ...prev, [col]: 1 }));
-
-      // Restore previously saved fine-bin merges if present, then recompute stats
-      try {
-        const resFine = await fetch(`http://localhost:5000/api/finebin-details/${state?.recordId || ''}/${col}`);
-        if (resFine.ok) {
-          const merges = await resFine.json();
-          if (Array.isArray(merges) && merges.length > 0) {
-            const restoredGroups: Record<string, any[]> = {};
-            for (const row of merges) {
-              const g = String(row.group_id);
-              const bins = typeof row.merged_bins === 'string' ? JSON.parse(row.merged_bins) : row.merged_bins;
-              restoredGroups[g] = bins;
-            }
-            setSelectedBinGroups(prev => ({ ...prev, [col]: restoredGroups }));
-
-            const resReFine = await fetch('http://localhost:5000/api/fine-bin', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                variable: col,
-                target: targetVariable,
-                type: varType,
-                bin_merges: restoredGroups,
-              }),
-            });
-            const refined = await resReFine.json();
-            if (!refined.error && Array.isArray(refined.stats)) {
-              setFineBinResults(prev => ({ ...prev, [col]: refined.stats }));
-            }
-
-            const mergedBinsFlat = Object.values(restoredGroups).flat();
-            setCoarseBinResults(prev => {
-              const prevBins = prev[col] || [];
-              const binLabelKey = `${col}_binned`;
-              const remainingBins = prevBins.filter((bin: Bin) => !mergedBinsFlat.includes(bin[binLabelKey]));
-              return { ...prev, [col]: remainingBins };
-            });
-          }
-        }
-      } catch (e) {
-        console.warn('No saved fine-bin merges to restore for', col);
-      }
+      setFineBinResults(prev => ({ ...prev, [col]: prev[col] || [] }));
     } catch {
       alert('Error fetching coarse bin results');
     } finally {
@@ -154,340 +57,254 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  // ===== Toggle coarse-bin selection per group =====
-  const toggleBinSelection = (col: string, binValue: any, group: number) => {
+  const toggleBinSelection = (col: string, binValue: any, group?: number) => {
+    const isContinuous = (continuousColumns || []).includes(col);
     setSelectedBinGroups(prev => {
       const colGroups = prev[col] || {};
-      const currentGroupBins = colGroups[group] || [];
-      const updatedBins = currentGroupBins.includes(binValue)
-        ? currentGroupBins.filter(v => v !== binValue)
-        : [...currentGroupBins, binValue];
-
-      return {
-        ...prev,
-        [col]: {
-          ...colGroups,
-          [group]: updatedBins
-        }
-      };
+      if (isContinuous) {
+        const selectedBins = colGroups[1] || [];
+        const updatedBins = selectedBins.includes(binValue)
+          ? selectedBins.filter(v => v !== binValue)
+          : [...selectedBins, binValue];
+        return { ...prev, [col]: { 1: updatedBins } };
+      } else {
+        const currentGroupBins = colGroups[group!] || [];
+        const updatedBins = currentGroupBins.includes(binValue)
+          ? currentGroupBins.filter(v => v !== binValue)
+          : [...currentGroupBins, binValue];
+        return { ...prev, [col]: { ...colGroups, [group!]: updatedBins } };
+      }
     });
   };
 
-  // ===== Fine-binning action =====
   const runFineBinning = async (col: string) => {
     const colGroupsSnapshot = selectedBinGroups[col];
     if (!colGroupsSnapshot || Object.keys(colGroupsSnapshot).length === 0) {
       alert("Select at least one bin to merge");
       return;
     }
+
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
     setLoading(true);
     try {
-      const res = await fetch('http://localhost:5000/api/fine-bin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ variable: col, target: targetVariable, type: varType, bin_merges: colGroupsSnapshot }),
-      });
-      const fineBinData = await res.json();
-      if (!fineBinData.error) {
-        setFineBinResults(prev => {
-          const prevFineBins = prev[col] || [];
-          const sampleBin: Bin = fineBinData.stats?.[0] || {};
-          const binLabelKey =
-            Object.keys(sampleBin).find(key => key.endsWith('_fine_binned')) || Object.keys(sampleBin)[0];
+      if (varType === 'continuous') {
+        // Continuous: call backend API for merging
+        let binMerges: Record<string, string[]> = {};
+        const selectedBins = colGroupsSnapshot[1] || [];
+        if (selectedBins.length === 0) {
+          alert("Select at least one bin to merge for continuous variable");
+          setLoading(false);
+          return;
+        }
+        binMerges[selectedBins.join("_")] = selectedBins;
 
-          if (!binLabelKey) {
-            return { ...prev, [col]: fineBinData.stats };
-          }
-
-          const mergedBinsMap: Record<string, Bin> = {};
-          prevFineBins.forEach((bin: Bin) => {
-            mergedBinsMap[bin[binLabelKey]] = bin;
-          });
-          (fineBinData.stats || []).forEach((bin: Bin) => {
-            mergedBinsMap[bin[binLabelKey]] = bin;
-          });
-
-          const mergedBins = Object.values(mergedBinsMap);
-          return { ...prev, [col]: mergedBins };
-        });
-
-        setCoarseBinResults(prev => {
-          const prevBins = prev[col] || [];
-          const mergedBinsFlat = Object.values(colGroupsSnapshot).flat();
-          const binLabelKey = `${col}_binned`;
-          const remainingBins = prevBins.filter((bin: Bin) => !mergedBinsFlat.includes(bin[binLabelKey]));
-          return { ...prev, [col]: remainingBins };
-        });
-
-        setSelectedBinGroups(prev => ({ ...prev, [col]: {} }));
-        setActiveGroup(prev => ({ ...prev, [col]: 1 }));
-
-        const crossTabRes = await fetch('http://localhost:5000/api/cross-tab', {
+        const res = await fetch('http://localhost:5000/api/fine-bin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variables: [col], target: targetVariable }),
+          body: JSON.stringify({ variable: col, target: targetVariable, type: varType, bin_merges: binMerges }),
         });
-        const crossTabData = await crossTabRes.json();
-
-        if (!crossTabData.error) {
-          setCrossTabResults(prev => ({
+        const fineBinData = await res.json();
+        if (!fineBinData.error) {
+          setFineBinResults(prev => ({ ...prev, [col]: fineBinData.stats || [] }));
+          const binsToRemove = Object.values(binMerges).flat();
+          setCoarseBinResults(prev => ({
             ...prev,
-            [col]: crossTabData[col] || crossTabData,
+            [col]: (prev[col] || []).filter(bin => !binsToRemove.includes(bin[col + '_binned']))
           }));
-        }
+          setSelectedBinGroups(prev => ({ ...prev, [col]: {} }));
+        } else alert(fineBinData.error);
 
-        // Persist merges (now using visibleColumns to reflect drops)
-        try {
-          const fineBinMergeInfo: Record<string, any> = {};
-          Object.keys(fineBinResults).forEach(fbCol => {
-            if (visibleColumns.includes(fbCol)) {
-              fineBinMergeInfo[fbCol] = selectedBinGroups[fbCol] || {};
-            }
-          });
+      } else {
+        // Discrete: handle merging locally
+        const allBins = coarseBinResults[col] || [];
+        const mergedBins: BinStats[] = fineBinResults[col] || [];
+        const totalRecords = allBins.reduce((sum, bin) => sum + (bin.Total || 0), 0);
 
-          // Previous merges for this column
-          let previousMerges: Record<string, any[]> = {};
-          try {
-            const prevRes = await fetch(`http://localhost:5000/api/finebin-details/${state?.recordId || ''}/${col}`);
-            if (prevRes.ok) {
-              const prevRows = await prevRes.json();
-              prevRows.forEach((r: any) => {
-                const g = String(r.group_id);
-                const bins = typeof r.merged_bins === 'string' ? JSON.parse(r.merged_bins) : r.merged_bins;
-                previousMerges[g] = bins;
-              });
-            }
-          } catch { }
+        Object.values(colGroupsSnapshot).forEach(groupBins => {
+          if (!groupBins || groupBins.length === 0) return;
+          const mergedStats = allBins
+            .filter(bin => groupBins.includes(bin[col + "_binned"]))
+            .reduce((acc, bin) => {
+              acc.Total += bin.Total || 0;
+              acc.Bad += bin.Bad || 0;
+              acc.Good += bin.Good || 0;
+              return acc;
+            }, { Total: 0, Bad: 0, Good: 0 });
+          mergedStats["Bad Rate"] = mergedStats.Total ? (mergedStats.Bad / mergedStats.Total) * 100 : 0;
+          mergedStats["Freq%"] = totalRecords ? (mergedStats.Total / totalRecords) * 100 : 0;
+          mergedStats[col + "_fine_binned"] = groupBins.join(", ");
+          mergedBins.push(mergedStats);
+        });
 
-          const combined: Record<string, any[]> = { ...previousMerges };
-          Object.entries(colGroupsSnapshot).forEach(([g, bins]) => {
-            const prev = new Set(combined[g] || []);
-            (bins as any[]).forEach(b => prev.add(b));
-            combined[g] = Array.from(prev);
-          });
+        const mergedBinValues = Object.values(colGroupsSnapshot).flat();
+        const remainingBins = allBins
+          .filter(bin => !mergedBinValues.includes(bin[col + "_binned"]))
+          .map(bin => ({
+            ...bin,
+            [col + "_fine_binned"]: bin[col + "_binned"],
+            "Freq%": totalRecords ? ((bin.Total || 0) / totalRecords) * 100 : 0,
+            "Bad Rate": bin.Total ? ((bin.Bad || 0) / bin.Total) * 100 : 0
+          }));
 
-          fineBinMergeInfo[col] = combined;
-
-          const upResp = await fetch('http://localhost:5000/api/upsert-single-record', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              dataset_path: 'uploaded.csv',
-              discrete_columns: discreteColumns,
-              continuous_columns: continuousColumns,
-              selected_columns: visibleColumns, // use visibleColumns (after any drops)
-              target_variable: targetVariable,
-              univariate_results: '',
-              finebin_results: JSON.stringify(fineBinMergeInfo),
-              crosstab_results: ''
-            })
-          });
-          const upJson = await upResp.json().catch(() => ({} as any));
-          const recId = state?.recordId || upJson?.id;
-
-          if (recId) {
-            await fetch('http://localhost:5000/api/finebin-details', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ record_id: recId, column_name: col, bin_merges: combined })
-            });
-          }
-
-          // Hide merged bins from coarse table using combined merges (again)
-          const combinedFlat = Object.values(combined).flat();
-          setCoarseBinResults(prev => {
-            const prevBins = prev[col] || [];
-            const binLabelKey = `${col}_binned`;
-            const remainingBins = prevBins.filter((bin: Bin) => !combinedFlat.includes(bin[binLabelKey]));
-            return { ...prev, [col]: remainingBins };
-          });
-        } catch (e) {
-          console.error('Failed to upsert fine bin merge info:', e);
-        }
+        setFineBinResults(prev => ({ ...prev, [col]: [...remainingBins, ...mergedBins] }));
+        setSelectedBinGroups(prev => ({ ...prev, [col]: {} }));
       }
-    } catch {
+    } catch (err) {
+      console.error(err);
       alert("Error running fine binning");
     } finally {
       setLoading(false);
     }
   };
 
-  // ===== DROP a column everywhere (invoked from UnivariateResults Drop button) =====
   const handleDropColumn = (col: string) => {
-    // 1) Remove from visible list (SelectedColumns grid)
-    setVisibleColumns(prev => prev.filter(c => c !== col));
-
-    // 2) Remove from Univariate results
-    setUnivariateResults(prev => {
-      const { [col]: _omit, ...rest } = prev;
-      return rest;
-    });
-
-    // 3) Remove from Coarse bin selection
-    setCoarseBinResults(prev => {
-      const { [col]: _omit, ...rest } = prev;
-      return rest;
-    });
-
-    // 4) Remove from Fine bin results
-    setFineBinResults(prev => {
-      const { [col]: _omit, ...rest } = prev;
-      return rest;
-    });
-
-    // 5) Remove from Cross-tab results
-    setCrossTabResults(prev => {
-      const { [col]: _omit, ...rest } = prev;
-      return rest;
-    });
-
-    // 6) Remove bin selections and active group for that column
-    setSelectedBinGroups(prev => {
-      const { [col]: _omit, ...rest } = prev;
-      return rest;
-    });
-    setActiveGroup(prev => {
-      const { [col]: _omit, ...rest } = prev;
-      return rest;
-    });
-
-    // 7) Remove fine bin details cache for that column
-    setFineBinDetails(prev => {
-      const { [col]: _omit, ...rest } = prev;
-      return rest;
-    });
-
-    // (Optional) Persist the drop server-side (commented; implement if you have an endpoint)
-    // fetch('http://localhost:5000/api/drop-column', {
-    //   method: 'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify({ record_id: state?.recordId, column_name: col })
-    // }).catch(() => {});
+    if (col === activeColumn) setActiveColumn('');
+    setUnivariateResults(prev => { const { [col]: _, ...rest } = prev; return rest; });
+    setCoarseBinResults(prev => { const { [col]: _, ...rest } = prev; return rest; });
+    setFineBinResults(prev => { const { [col]: _, ...rest } = prev; return rest; });
+    setSelectedBinGroups(prev => { const { [col]: _, ...rest } = prev; return rest; });
+    setActiveGroup(prev => { const { [col]: _, ...rest } = prev; return rest; });
   };
 
   return (
     <div className="page-container">
       <h2 className="page-title">Select a Column to View Results</h2>
 
-      {/* Column cards */}
       <div className="columns-grid">
-        {visibleColumns?.map((col: string) => (
-          <div key={col} className="column-card" onClick={() => handleColumnClick(col)}>
+        {navSelectedColumns?.map((col: string) => (
+          <div
+            key={col}
+            className={`column-card ${col === activeColumn ? 'active' : ''}`}
+            onClick={() => handleColumnClick(col)}
+          >
             <h4>{col}</h4>
             <small>{(discreteColumns || []).includes(col) ? 'Discrete' : 'Continuous'}</small>
           </div>
         ))}
-        {(!visibleColumns || visibleColumns.length === 0) && (
-          <div style={{ opacity: 0.8, fontStyle: 'italic' }}>No columns selected.</div>
-        )}
       </div>
 
       {loading && <p className="loading-text">Loading...</p>}
 
-      {/* Univariate results (with Drop button callback) */}
-      {Object.keys(univariateResults).length > 0 && (
+      {activeColumn && univariateResults[activeColumn] && (
         <div className="results-section">
           <UnivariateResults
-            univariateResults={univariateResults}
+            univariateResults={{ [activeColumn]: univariateResults[activeColumn] }}
             formatToFourDecimals={formatToFourDecimals}
-            onDropColumn={handleDropColumn} // <-- NEW (sync removal)
+            onDropColumn={handleDropColumn}
           />
         </div>
       )}
 
-      {/* Coarse bin selection */}
-      {Object.entries(coarseBinResults).map(([col, bins]) => (
-        <div key={col} className="results-container">
-          <h3>{col} - Select Bins to Merge</h3>
+      {activeColumn && coarseBinResults[activeColumn] && (
+        <div className="results-container">
+          <h3>{activeColumn} - Select Bins to Merge</h3>
 
-          <div style={{ marginBottom: '10px' }}>
-            <label style={{ marginRight: '8px' }}>Select group:</label>
-            <select
-              value={activeGroup[col] || 1}
-              onChange={e => setActiveGroup(prev => ({ ...prev, [col]: Number(e.target.value) }))}
-            >
-              {[1, 2, 3, 4, 5].map(g => (
-                <option key={g} value={g}>
-                  Group {g}
-                </option>
-              ))}
-            </select>
-          </div>
+          {!((continuousColumns || []).includes(activeColumn)) && (
+            <div style={{ marginBottom: '10px' }}>
+              <label style={{ marginRight: '8px' }}>Select group:</label>
+              <select
+                value={activeGroup[activeColumn] || 1}
+                onChange={e => setActiveGroup(prev => ({ ...prev, [activeColumn]: Number(e.target.value) }))}
+              >
+                {[1, 2, 3, 4, 5].map(g => <option key={g} value={g}>Group {g}</option>)}
+              </select>
+            </div>
+          )}
 
           <table className="cross-tab-table">
             <thead>
               <tr>
                 <th>Select</th>
                 <th>Bin</th>
-                <th>Bad Rate (%)</th>
+                <th>Bad</th>
+                <th>Good</th>
                 <th>Total</th>
+                <th>Bad Rate (%)</th>
+                <th>Freq %</th>
               </tr>
             </thead>
             <tbody>
-              {(bins as Bin[]).map((bin: Bin) => {
-                const binLabelKey = `${col}_binned`;
-                const group = activeGroup[col] || 1;
+              {(coarseBinResults[activeColumn] as Bin[]).map((bin, idx) => {
+                const binLabelKey = `${activeColumn}_binned`;
+                const group = activeGroup[activeColumn] || 1;
+                const isContinuous = (continuousColumns || []).includes(activeColumn);
+
                 return (
                   <tr key={bin[binLabelKey]}>
                     <td>
                       <input
                         type="checkbox"
-                        checked={selectedBinGroups[col]?.[group]?.includes(bin[binLabelKey]) || false}
-                        onChange={() => toggleBinSelection(col, bin[binLabelKey], group)}
+                        checked={
+                          selectedBinGroups[activeColumn]?.[isContinuous ? 1 : group]?.includes(bin[binLabelKey]) || false
+                        }
+                        onChange={() => toggleBinSelection(activeColumn, bin[binLabelKey], isContinuous ? 1 : group)}
                       />
                     </td>
-                    <td>{bin[binLabelKey]}</td>
+
+                    {/* Sequential Bin labels */}
+                    <td>{`Bin_${idx + 1}`}</td>
+
+                    <td>{bin.Bad}</td>
+                    <td>{bin.Good}</td>
+                    <td>{bin.Total}</td>
                     <td>{formatToFourDecimals(bin["Bad Rate"])}%</td>
-                    <td>{bin["Total"]}</td>
+                    <td>{formatToFourDecimals(bin["Freq%"])}%</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
 
-          <button onClick={() => runFineBinning(col)}>Fine Binning on Selected</button>
-        </div>
-      ))}
 
-      {/* Fine bin results */}
-      {Object.keys(fineBinResults).length > 0 && (
-        <div className="results-section">
-          <FineBinResults
-            fineBinResults={fineBinResults}
-            formatToFourDecimals={formatToFourDecimals}
-          />
+          <button className="fine-bin-btn" onClick={() => runFineBinning(activeColumn)}>
+            Fine Binning on Selected
+          </button>
         </div>
       )}
 
-      {/* Cross-tab results */}
-      {Object.keys(crossTabResults).length > 0 && (
+      {activeColumn && fineBinResults[activeColumn]?.length > 0 && (
         <div className="results-section">
-          <CrossTabResults
-            crossTabResults={crossTabResults}
-            formatToFourDecimals={formatToFourDecimals}
-            selectedBins={Object.fromEntries(
-              Object.entries(selectedBinGroups).map(([col, groups]) => [col, Object.values(groups).flat()])
-            )}
-            onBinToggle={(col, bin) => toggleBinSelection(col, bin, activeGroup[col] || 1)}
-          />
+          <h3>Fine Binning Results - {activeColumn}</h3>
+          <table className="cross-tab-table">
+            <thead>
+              <tr>
+                <th>Bin</th><th>Bad</th><th>Good</th><th>Total</th><th>Bad Rate (%)</th><th>Freq%</th>
+              </tr>
+            </thead>
+            <tbody>
+              {fineBinResults[activeColumn]
+                .sort((a, b) => {
+                  const labelA = (a[activeColumn + '_fine_binned'] || '').toString();
+                  const labelB = (b[activeColumn + '_fine_binned'] || '').toString();
+                  return labelA.localeCompare(labelB);
+                })
+                .map((bin, idx) => (
+                  <tr
+                    key={idx}
+                    style={{
+                      backgroundColor:
+                        typeof bin[activeColumn + '_fine_binned'] === 'string' &&
+                          bin[activeColumn + '_fine_binned'].indexOf(',') !== -1
+                          ? '#0d1117'
+                          : 'transparent'
+                    }}
+                  >
+                    <td>{bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1']}</td>
+                    <td>{bin.Bad ?? bin['Bad'] ?? 0}</td>
+                    <td>{bin.Good ?? bin['Good'] ?? 0}</td>
+                    <td>{bin.Total ?? bin['Total'] ?? 0}</td>
+                    <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4)}</td>
+                    <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : 0}</td>
+                  </tr>
+                ))}
+            </tbody>
+
+          </table>
         </div>
       )}
-      {/* New Home Button at the bottom */}
-      <div style={{ marginTop: '2rem', textAlign: 'center' }}>
-        <button
-          onClick={handleGoHome}
-          style={{
-            padding: '10px 20px',
-            backgroundColor: '#238636',
-            color: 'white',
-            border: 'none',
-            borderRadius: '5px',
-            cursor: 'pointer'
-          }}
-        >
-          Save
-        </button>
+
+      <div style={{ marginTop: '30px', textAlign: 'center' }}>
+        <button className="file-upload-label" onClick={handleGoHome}>Save</button>
       </div>
     </div>
   );
