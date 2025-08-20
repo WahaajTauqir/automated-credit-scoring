@@ -257,7 +257,17 @@ def load_record_dataset(record_id):
             resolved = os.path.join(os.path.dirname(__file__), resolved)
 
         if not os.path.exists(resolved):
-            return jsonify({"error": f"Dataset file not found at: {resolved}"}), 404
+            # Fallback: search by basename in parent directories
+            base = os.path.basename(dataset_path)
+            backend_dir = os.path.dirname(__file__)
+            search_dirs = [backend_dir, os.path.abspath(os.path.join(backend_dir, '..')), os.path.abspath(os.path.join(backend_dir, '..', '..'))]
+            for d in search_dirs:
+                candidate = os.path.join(d, base)
+                if os.path.exists(candidate):
+                    resolved = candidate
+                    break
+            if not os.path.exists(resolved):
+                return jsonify({"error": f"Dataset file not found (searched: {search_dirs})"}), 404
 
         # If not the canonical uploaded.csv, copy/overwrite
         canonical = os.path.join(os.path.dirname(__file__), 'uploaded.csv')

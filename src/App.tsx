@@ -39,6 +39,8 @@ function App() {
 
   const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, any[]>>({});
   const [datasetPath, setDatasetPath] = useState<string>('uploaded.csv');
+  const [restoring, setRestoring] = useState<boolean>(false);
+  const [expectedColumnsForRecord, setExpectedColumnsForRecord] = useState<string[] | undefined>(undefined);
 
   // Records (moved from AdminPanel into main page)
   const [records, setRecords] = useState<AnalysisRecord[]>([]);
@@ -139,6 +141,7 @@ function App() {
   const handleCSVUploaded = (headers: string[], _rows?: any[], uploadedPath?: string) => {
     setColumns(headers);
     if (uploadedPath) setDatasetPath(uploadedPath);
+  setExpectedColumnsForRecord(undefined);
     setDiscreteColumns([]);
     setContinuousColumns([]);
     setTargetVariable('');
@@ -217,34 +220,80 @@ function App() {
   // View existing record: load its saved state then go to column selection
   const handleRecordView = async (id: number) => {
     try {
-      // Fetch record details
+      setRestoring(true);
+      // Fetch complete record
       const recResp = await fetch(`http://localhost:5000/api/record/${id}`);
       const data: AnalysisRecord & { univariate_results?: string; finebin_results?: string; crosstab_results?: string } = await recResp.json();
-      // Fetch columns from uploaded.csv (backend helper)
-      let csvColumns: string[] = [];
+
+      // Ask backend to load dataset & return columns
+      let loadedColumns: string[] = [];
       try {
-        const csvRes = await fetch('http://localhost:5000/api/uploaded-csv-columns');
-        if (csvRes.ok) {
-          const csvData = await csvRes.json();
-          csvColumns = csvData.columns || [];
+        const loadRes = await fetch(`http://localhost:5000/api/record/${id}/load-dataset`);
+        const loadJson = await loadRes.json();
+        if (loadRes.ok) {
+          if (Array.isArray(loadJson.columns)) loadedColumns = loadJson.columns;
+          if (loadJson.dataset_path) setDatasetPath(loadJson.dataset_path);
         }
-      } catch { /* silent */ }
-      // Use dataset path stored with record (fallback to existing)
-      if (data.dataset_path) setDatasetPath(data.dataset_path);
-      setColumns(csvColumns);
-      setDiscreteColumns(data.discrete_columns ? data.discrete_columns.split(',').filter(Boolean) : []);
-      setContinuousColumns(data.continuous_columns ? data.continuous_columns.split(',').filter(Boolean) : []);
-      setSelectedForUnivariate(data.selected_columns ? data.selected_columns.split(',').filter(Boolean) : []);
+      } catch { /* ignore */ }
+
+      // Fallback: generic columns endpoint
+      if (loadedColumns.length === 0) {
+        try {
+          const colsRes = await fetch('http://localhost:5000/api/uploaded-csv-columns');
+          if (colsRes.ok) {
+            const colsJson = await colsRes.json();
+            if (Array.isArray(colsJson.columns)) loadedColumns = colsJson.columns;
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Fallback: infer from stored column strings
+      if (loadedColumns.length === 0) {
+        const inferred = new Set<string>();
+        (data.discrete_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
+        (data.continuous_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
+        (data.selected_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
+        loadedColumns = Array.from(inferred);
+      }
+
+      // Update state
+  setColumns(loadedColumns);
+      const discreteArr = data.discrete_columns ? data.discrete_columns.split(',').filter(Boolean) : [];
+      const continuousArr = data.continuous_columns ? data.continuous_columns.split(',').filter(Boolean) : [];
+      const selectedArr = data.selected_columns ? data.selected_columns.split(',').filter(Boolean) : [];
+  const expected = loadedColumns.length ? loadedColumns : Array.from(new Set([...discreteArr, ...continuousArr, ...selectedArr]));
+  setExpectedColumnsForRecord(expected);
+      setDiscreteColumns(discreteArr);
+      setContinuousColumns(continuousArr);
+      setSelectedForUnivariate(selectedArr);
       setTargetVariable(data.target_variable || '');
-      setUnivariateResults(data.univariate_results ? JSON.parse(data.univariate_results) : {});
-      setFineBinResults(data.finebin_results ? JSON.parse(data.finebin_results) : {});
-      setCrossTabResults(data.crosstab_results ? JSON.parse(data.crosstab_results) : {});
-      // Reset pagination based on loaded columns
+      const uni = data.univariate_results ? JSON.parse(data.univariate_results) : {};
+      const fine = data.finebin_results ? JSON.parse(data.finebin_results) : {};
+      const cross = data.crosstab_results ? JSON.parse(data.crosstab_results) : {};
+      setUnivariateResults(uni);
+      setFineBinResults(fine);
+      setCrossTabResults(cross);
       setCurrentPage(1);
-      navigate('/column-selection');
+
+      // Navigate passing full state to cover edge cases where local effect didn't fire yet
+  navigate('/column-selection', {
+        state: {
+          columns: loadedColumns,
+          discreteColumns: discreteArr,
+            continuousColumns: continuousArr,
+            selectedForUnivariate: selectedArr,
+            targetVariable: data.target_variable || '',
+            univariateResults: uni,
+            fineBinResults: fine,
+    crossTabResults: cross,
+    expectedColumns: expected
+        }
+      });
     } catch (e) {
       console.error('Failed to load record', e);
       alert('Failed to load record');
+    } finally {
+      setTimeout(() => setRestoring(false), 300);
     }
   };
 
@@ -267,17 +316,9 @@ function App() {
           <div>
             <Navbar />
             <div className="app-container">
-              {columns.length === 0 && (
-                <div className="upload-wrapper">
-                  <CSVReader onCSVUploaded={handleCSVUploaded} />
-                </div>
-              )}
-              {columns.length > 0 && (
-                <div style={{ textAlign: 'center', width: '100%' }}>
-                  <p>Dataset loaded.</p>
-                  <button className="file-upload-label" onClick={() => navigate('/column-selection')}>Go to Column Selection</button>
-                </div>
-              )}
+              <div className="upload-wrapper">
+                <CSVReader onCSVUploaded={handleCSVUploaded} />
+              </div>
 
               {/* Records Table Section */}
               <div style={{ width: '100%', marginTop: '40px' }}>
@@ -349,6 +390,9 @@ function App() {
             selectedBinGroups={selectedBinGroups}
             toggleBinSelection={toggleBinSelection}
             formatToFourDecimals={formatToFourDecimals}
+            restoring={restoring}
+            expectedColumns={expectedColumnsForRecord}
+            onUploadReplacement={(headers, rows, path) => handleCSVUploaded(headers, rows, path)}
           />
         }
       />
