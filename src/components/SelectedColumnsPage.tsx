@@ -1,6 +1,7 @@
 import { useLocation } from 'react-router-dom';
 import { useState } from 'react';
 import UnivariateResults from './UnivariateResults';
+import WoeIvResults from './WoeIvResults';
 import './SelectedColumnsPage.css';
 
 const SelectedColumnsPage = () => {
@@ -9,9 +10,10 @@ const SelectedColumnsPage = () => {
     selectedColumns: navSelectedColumns,
     discreteColumns,
     continuousColumns,
-  targetVariable,
-  recordId: initialRecordId
+    targetVariable,
+    recordId: initialRecordId
   } = state || {};
+  console.log("Page state:", state);
 
   interface BinStats { [key: string]: any; }
   interface Bin { [key: string]: any; }
@@ -27,6 +29,8 @@ const SelectedColumnsPage = () => {
   // Persisted mapping of merges per column (group/bin identifier -> original bins list)
   const [binMergeHistory, setBinMergeHistory] = useState<Record<string, Record<string, any[]>>>({});
   const [recordId, setRecordId] = useState<number | undefined>(initialRecordId);
+  const [woeIvResults, setWoeIvResults] = useState<Record<string, any>>({});
+
 
   const formatToFourDecimals = (value: any) => (typeof value === 'number' ? value.toFixed(4) : String(value));
 
@@ -46,7 +50,7 @@ const SelectedColumnsPage = () => {
         try { bins = JSON.parse(row.merged_bins); } catch { bins = []; }
         if (!bins || bins.length === 0) return;
         if (varType === 'discrete') {
-          const label = bins.sort((a,b)=> (Number(a)||0)-(Number(b)||0)).join(', ');
+          const label = bins.sort((a, b) => (Number(a) || 0) - (Number(b) || 0)).join(', ');
           savedMerges[label] = bins;
         } else {
           savedMerges[row.group_id] = bins;
@@ -79,7 +83,7 @@ const SelectedColumnsPage = () => {
               return acc;
             }, { Total: 0, Bad: 0, Good: 0 });
           mergedStats['Bad Rate'] = mergedStats.Total ? (mergedStats.Bad / mergedStats.Total) * 100 : 0;
-            mergedStats['Freq%'] = totalRecords ? (mergedStats.Total / totalRecords) * 100 : 0;
+          mergedStats['Freq%'] = totalRecords ? (mergedStats.Total / totalRecords) * 100 : 0;
           mergedStats[col + '_fine_binned'] = label;
           mergedBins.push(mergedStats);
         });
@@ -119,10 +123,11 @@ const SelectedColumnsPage = () => {
 
       setSelectedBinGroups(prev => ({ ...prev, [col]: prev[col] || {} }));
       setActiveGroup(prev => ({ ...prev, [col]: 1 }));
-  setFineBinResults(prev => ({ ...prev, [col]: prev[col] || [] }));
+      setFineBinResults(prev => ({ ...prev, [col]: prev[col] || [] }));
 
-  // Attempt to restore existing fine bin state
-  await loadSavedFineBins(col, varType, (data[col]?.stats || []) as BinStats[]);
+      // Attempt to restore existing fine bin state
+      await loadSavedFineBins(col, varType, (data[col]?.stats || []) as BinStats[]);
+      await fetchWoeIv(col);
     } catch {
       alert('Error fetching coarse bin results');
     } finally {
@@ -188,7 +193,7 @@ const SelectedColumnsPage = () => {
         const total = allBins.reduce((s, b) => s + (b.Total || 0), 0);
         const remaining = allBins.filter(b => !mergedValues.includes(b[col + '_binned']))
           .map(b => ({ ...b, [col + '_fine_binned']: b[col + '_binned'], 'Freq%': total ? (b.Total / total) * 100 : 0, 'Bad Rate': b.Total ? (b.Bad / b.Total) * 100 : 0 }));
-  const mergedStats = Object.entries(combined).map(([, bins]) => {
+        const mergedStats = Object.entries(combined).map(([, bins]) => {
           const stat = allBins.filter(b => (bins as any[]).includes(b[col + '_binned'])).reduce((a, b) => { a.Total += b.Total || 0; a.Bad += b.Bad || 0; a.Good += b.Good || 0; return a; }, { Total: 0, Bad: 0, Good: 0 });
           stat['Bad Rate'] = stat.Total ? (stat.Bad / stat.Total) * 100 : 0;
           stat['Freq%'] = total ? (stat.Total / total) * 100 : 0;
@@ -259,7 +264,7 @@ const SelectedColumnsPage = () => {
           dataset_path: 'uploaded.csv',
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
-            selected_columns: navSelectedColumns || [],
+          selected_columns: navSelectedColumns || [],
           target_variable: targetVariable || '',
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
@@ -287,7 +292,7 @@ const SelectedColumnsPage = () => {
         );
         await Promise.all(savePromises);
       }
-  alert('Fine bin results saved and persisted.');
+      alert('Fine bin results saved and persisted.');
     } catch (e) {
       console.error(e);
       alert('Failed to save fine bin results.');
@@ -295,6 +300,20 @@ const SelectedColumnsPage = () => {
       setLoading(false);
     }
   };
+
+  const fetchWoeIv = async (col: string) => {
+  try {
+    const res = await fetch("http://localhost:5000/api/woe-iv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variables: [col], target: targetVariable, record_id: recordId })
+    });
+    const data = await res.json();
+    if (!data.error) setWoeIvResults(prev => ({ ...prev, ...data }));
+  } catch (e) {
+    console.error("WOE/IV fetch failed", e);
+  }
+};
 
   return (
     <div className="page-container">
@@ -362,38 +381,38 @@ const SelectedColumnsPage = () => {
                   return !mergedValues.includes(bin[`${activeColumn}_binned`]);
                 })
                 .map((bin) => {
-                const binLabelKey = `${activeColumn}_binned`;
-                const group = activeGroup[activeColumn] || 1;
-                const isContinuous = (continuousColumns || []).includes(activeColumn);
+                  const binLabelKey = `${activeColumn}_binned`;
+                  const group = activeGroup[activeColumn] || 1;
+                  const isContinuous = (continuousColumns || []).includes(activeColumn);
 
-                // Use the original bin label (e.g. 'Bin_1') for continuous variables.
-                // For discrete variables (numeric group ids), prefix with 'Bin_' for consistency.
-                const originalLabel = typeof bin[binLabelKey] === 'string'
-                  ? bin[binLabelKey]
-                  : `Bin_${bin[binLabelKey]}`;
-                return (
-                  <tr key={bin[binLabelKey]}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={
-                          selectedBinGroups[activeColumn]?.[isContinuous ? 1 : group]?.includes(bin[binLabelKey]) || false
-                        }
-                        onChange={() => toggleBinSelection(activeColumn, bin[binLabelKey], isContinuous ? 1 : group)}
-                      />
-                    </td>
+                  // Use the original bin label (e.g. 'Bin_1') for continuous variables.
+                  // For discrete variables (numeric group ids), prefix with 'Bin_' for consistency.
+                  const originalLabel = typeof bin[binLabelKey] === 'string'
+                    ? bin[binLabelKey]
+                    : `Bin_${bin[binLabelKey]}`;
+                  return (
+                    <tr key={bin[binLabelKey]}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={
+                            selectedBinGroups[activeColumn]?.[isContinuous ? 1 : group]?.includes(bin[binLabelKey]) || false
+                          }
+                          onChange={() => toggleBinSelection(activeColumn, bin[binLabelKey], isContinuous ? 1 : group)}
+                        />
+                      </td>
 
-                    {/* Stable original bin label (no reindexing after merges) */}
-                    <td>{originalLabel}</td>
+                      {/* Stable original bin label (no reindexing after merges) */}
+                      <td>{originalLabel}</td>
 
-                    <td>{bin.Bad}</td>
-                    <td>{bin.Good}</td>
-                    <td>{bin.Total}</td>
-                    <td>{formatToFourDecimals(bin["Bad Rate"])}%</td>
-                    <td>{formatToFourDecimals(bin["Freq%"])}%</td>
-                  </tr>
-                );
-              })}
+                      <td>{bin.Bad}</td>
+                      <td>{bin.Good}</td>
+                      <td>{bin.Total}</td>
+                      <td>{formatToFourDecimals(bin["Bad Rate"])}%</td>
+                      <td>{formatToFourDecimals(bin["Freq%"])}%</td>
+                    </tr>
+                  );
+                })}
             </tbody>
           </table>
 
@@ -444,9 +463,16 @@ const SelectedColumnsPage = () => {
           </table>
         </div>
       )}
-
+      {activeColumn && woeIvResults[activeColumn] && (
+        <div className="results-section">
+          <WoeIvResults
+            woeIvResults={{ [activeColumn]: woeIvResults[activeColumn] }}
+            formatToFourDecimals={formatToFourDecimals}
+          />
+        </div>
+      )}
       <div style={{ marginTop: '30px', textAlign: 'center' }}>
-  <button className="file-upload-label" onClick={handleSave}>Save</button>
+        <button className="file-upload-label" onClick={handleSave}>Save</button>
       </div>
     </div>
   );

@@ -232,65 +232,6 @@ def get_record(record_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ----------- Load Dataset For Record (ensures uploaded.csv reflects record's dataset) -----------
-@app.route('/api/record/<int:record_id>/load-dataset', methods=['GET'])
-def load_record_dataset(record_id):
-    """
-    Loads the dataset for a specific record (if dataset_path exists) into uploaded.csv
-    and returns its columns. If dataset_path is already 'uploaded.csv', just reads columns.
-    """
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT dataset_path FROM records WHERE id = ?", (record_id,))
-        row = cur.fetchone()
-        conn.close()
-        if not row:
-            return jsonify({"error": "Record not found"}), 404
-        dataset_path = row[0] if not isinstance(row, sqlite3.Row) else row['dataset_path']
-        if not dataset_path:
-            return jsonify({"error": "No dataset path stored for record"}), 400
-
-        # Resolve the path (if relative, relative to backend directory)
-        resolved = dataset_path
-        if not os.path.isabs(resolved):
-            resolved = os.path.join(os.path.dirname(__file__), resolved)
-
-        if not os.path.exists(resolved):
-            # Fallback: search by basename in parent directories
-            base = os.path.basename(dataset_path)
-            backend_dir = os.path.dirname(__file__)
-            search_dirs = [backend_dir, os.path.abspath(os.path.join(backend_dir, '..')), os.path.abspath(os.path.join(backend_dir, '..', '..'))]
-            for d in search_dirs:
-                candidate = os.path.join(d, base)
-                if os.path.exists(candidate):
-                    resolved = candidate
-                    break
-            if not os.path.exists(resolved):
-                return jsonify({"error": f"Dataset file not found (searched: {search_dirs})"}), 404
-
-        # If not the canonical uploaded.csv, copy/overwrite
-        canonical = os.path.join(os.path.dirname(__file__), 'uploaded.csv')
-        if os.path.abspath(resolved) != os.path.abspath(canonical):
-            try:
-                import shutil
-                shutil.copyfile(resolved, canonical)
-            except Exception as e:
-                return jsonify({"error": f"Failed copying dataset to working file: {str(e)}"}), 500
-
-        try:
-            df = pd.read_csv(canonical, nrows=0)
-            return jsonify({
-                "success": True,
-                "dataset_path": dataset_path,
-                "resolved_path": resolved,
-                "columns": df.columns.tolist()
-            })
-        except Exception as e:
-            return jsonify({"error": f"Failed reading dataset columns: {str(e)}"}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 # ----------- Upload CSV -----------
 @app.route('/api/upload-csv', methods=['POST'])
 def upload_csv():
@@ -784,6 +725,127 @@ def get_finebin_details(record_id, column_name):
         ]
         return jsonify(finebin_details)
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+import numpy as np
+import pandas as pd
+
+def calculate_woe_iv(df, variable, target, bin_merges=None):
+    # Apply fine bin merges if available
+    if bin_merges:
+        def map_bin(val):
+            for label, bins in bin_merges.items():
+                if val in bins:
+                    return label
+            return str(val)
+        df["final_bin"] = df[f"{variable}_binned"].apply(map_bin)
+    else:
+        if f"{variable}_binned" in df.columns:
+            df["final_bin"] = df[f"{variable}_binned"]
+        else:
+            df["final_bin"] = pd.qcut(df[variable], q=10, duplicates="drop")
+
+    # Aggregate counts
+    grouped = df.groupby("final_bin", observed=True).agg(
+        Total=(target, "count"),
+        Good=(target, lambda x: (x == 0).sum()),  # 0 = Good
+        Bad=(target, lambda x: (x == 1).sum())    # 1 = Bad
+    ).reset_index()
+
+    total_good = grouped["Good"].sum()
+    total_bad = grouped["Bad"].sum()
+    n_bins = len(grouped)
+
+    stats = []
+    iv_total = 0.0
+
+    # Laplace smoothing
+    eps = 0.5
+    adj_total_good = total_good + eps * n_bins
+    adj_total_bad = total_bad + eps * n_bins
+
+    for _, row in grouped.iterrows():
+        # Apply smoothing to numerator and denominator consistently
+        dist_good = (row["Good"] + eps) / adj_total_good
+        dist_bad = (row["Bad"] + eps) / adj_total_bad
+
+        woe = np.log(dist_good / dist_bad)
+        iv = (dist_good - dist_bad) * woe
+        iv_total += iv
+
+        # Clean bin label for frontend
+        bin_label = str(row["final_bin"])
+        if "Interval" in bin_label:  # from pandas qcut
+            bin_label = bin_label.replace("Interval", "").replace("(", "").replace("]", "")
+
+        stats.append({
+            "Bin": bin_label,
+            "Good": int(row["Good"]),
+            "Bad": int(row["Bad"]),
+            "Total": int(row["Total"]),
+            "WOE": round(float(woe), 4),
+            "IV": round(float(iv), 4)
+        })
+
+    return round(float(iv_total), 4), stats
+
+
+
+@app.route("/api/woe-iv", methods=["POST"])
+def woe_iv_api():
+    try:
+        data = request.get_json()
+        variables = data.get("variables", [])
+        target = data.get("target")
+        record_id = data.get("record_id")
+
+        df = pd.read_csv("uploaded.csv")
+        df[target] = df[target].fillna(0).astype(int)
+
+        results = {}
+
+        for var in variables:
+            # 1) Ensure a binned column exists for this var
+            #    Infer type: treat as discrete if non-object numeric with small cardinality OR object/categorical
+            var_series = df[var]
+            if pd.api.types.is_numeric_dtype(var_series):
+                # numeric but could be discrete if few unique levels
+                if var_series.nunique(dropna=True) <= 20:
+                    _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
+                else:
+                    _, df[f"{var}_binned"] = coarse_bin_continuous(df.copy(), var, target)
+            else:
+                # non-numeric => discrete
+                _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
+
+            # 2) Load saved merges (if any) for this var
+            merges = None
+            if record_id:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT group_id, merged_bins FROM finebin_details WHERE record_id = ? AND column_name = ?",
+                    (record_id, var)
+                )
+                rows = cur.fetchall()
+                conn.close()
+                if rows:
+                    merges = {}
+                    for row in rows:
+                        try:
+                            bins = json.loads(row[1])
+                            merges[str(row[0])] = bins
+                        except Exception:
+                            pass
+
+            # 3) Compute WOE/IV on the (possibly) merged final bins
+            iv, stats = calculate_woe_iv(df.copy(), var, target, bin_merges=merges)
+            results[var] = {"iv": iv, "stats": stats}
+
+        return jsonify(results)
+
+    except Exception as e:
+        print("woe_iv_api failed:", str(e))
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
