@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS records (
     univariate_results TEXT NOT NULL,
     finebin_results TEXT NOT NULL,
     crosstab_results TEXT NOT NULL,
+    woe_iv_results TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -25,17 +25,6 @@ def get_uploaded_csv_columns():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- All imports at the top ---
-from flask import Flask, request, jsonify
-import sqlite3
-from flask_cors import CORS
-import pandas as pd
-import numpy as np
-import os
-import datetime
-from math import ceil
-
-
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173"])
 @app.route('/api/record/<int:record_id>', methods=['DELETE'])
@@ -73,10 +62,11 @@ def init_db():
     with open(DB_PATH, 'r') as f:
         sql = f.read()
     conn = get_db_connection()
+    # Drop existing table to ensure schema update (use with caution in production)
+    conn.execute("DROP TABLE IF EXISTS records")
     conn.executescript(sql)
     conn.commit()
     conn.close()
-
 init_db()
 # ----------- Health Check -----------
 @app.route('/api/save-record', methods=['POST'])
@@ -127,6 +117,7 @@ def upsert_single_record():
         univariate_results = data.get('univariate_results', '')
         finebin_results = data.get('finebin_results', '')
         crosstab_results = data.get('crosstab_results', '')
+        woe_iv_results = data.get('woe_iv_results', '')  # Added to handle WOE/IV results
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -139,10 +130,10 @@ def upsert_single_record():
             # Insert new record
             cur.execute(
                 """
-                INSERT INTO records (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO records (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results)
+                (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
             )
             conn.commit()
             record_id = cur.lastrowid
@@ -159,10 +150,11 @@ def upsert_single_record():
                     target_variable = ?,
                     univariate_results = ?,
                     finebin_results = ?,
-                    crosstab_results = ?
+                    crosstab_results = ?,
+                    woe_iv_results = ?
                 WHERE id = ?
                 """,
-                (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, record_id)
+                (dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results, record_id)
             )
             conn.commit()
 
@@ -226,12 +218,18 @@ def get_record(record_id):
         row = cur.fetchone()
         conn.close()
         if row:
-            return jsonify(dict(row))
+            record = dict(row)
+            # Ensure woe_iv_results is parsed if it's a JSON string
+            if record.get('woe_iv_results'):
+                try:
+                    record['woe_iv_results'] = json.loads(record['woe_iv_results'])
+                except json.JSONDecodeError:
+                    record['woe_iv_results'] = {}
+            return jsonify(record)
         else:
             return jsonify({"error": "Record not found"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 # ----------- Upload CSV -----------
 @app.route('/api/upload-csv', methods=['POST'])
 def upload_csv():
@@ -789,8 +787,6 @@ def calculate_woe_iv(df, variable, target, bin_merges=None):
 
     return round(float(iv_total), 4), stats
 
-
-
 @app.route("/api/woe-iv", methods=["POST"])
 def woe_iv_api():
     try:
@@ -841,6 +837,27 @@ def woe_iv_api():
             # 3) Compute WOE/IV on the (possibly) merged final bins
             iv, stats = calculate_woe_iv(df.copy(), var, target, bin_merges=merges)
             results[var] = {"iv": iv, "stats": stats}
+
+        # 4) Save WOE/IV results to the records table
+        if record_id:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT woe_iv_results FROM records WHERE id = ?", (record_id,))
+            row = cur.fetchone()
+            existing_woe_iv = {}
+            if row and row['woe_iv_results']:
+                try:
+                    existing_woe_iv = json.loads(row['woe_iv_results'])
+                except json.JSONDecodeError:
+                    existing_woe_iv = {}
+            # Update with new results
+            existing_woe_iv.update(results)
+            cur.execute(
+                "UPDATE records SET woe_iv_results = ? WHERE id = ?",
+                (json.dumps(existing_woe_iv), record_id)
+            )
+            conn.commit()
+            conn.close()
 
         return jsonify(results)
 

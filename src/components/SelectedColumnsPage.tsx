@@ -1,4 +1,5 @@
 import { useLocation } from 'react-router-dom';
+import { useEffect } from 'react';
 import { useState } from 'react';
 import UnivariateResults from './UnivariateResults';
 import WoeIvResults from './WoeIvResults';
@@ -39,15 +40,11 @@ const SelectedColumnsPage = () => {
 
   const formatToFourDecimals = (value: any) => (typeof value === 'number' ? value.toFixed(4) : String(value));
 
-  // Notification handler
   const showNotification = (message: string) => {
     setNotification(message);
     setTimeout(() => setNotification(null), 3000);
   };
 
- 
-
-  // Existing functions (unchanged)
   const loadSavedFineBins = async (col: string, varType: string, coarseStats: BinStats[]) => {
     if (!recordId) return;
     try {
@@ -73,7 +70,7 @@ const SelectedColumnsPage = () => {
         const res = await fetch('http://localhost:5000/api/fine-bin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variable: col, target: targetVariable, type: varType, bin_merges: savedMerges })
+          body: JSON.stringify({ variable: col, target: targetVariable, type: varType, bin_merges: savedMerges, record_id: recordId })
         });
         const data = await res.json();
         if (!data.error) {
@@ -109,11 +106,32 @@ const SelectedColumnsPage = () => {
         setFineBinResults(prev => ({ ...prev, [col]: [...remaining, ...mergedBins] }));
         setBinMergeHistory(prev => ({ ...prev, [col]: savedMerges }));
       }
+      if (Object.keys(savedMerges).length > 0) {
+        await fetchWoeIv(col);
+        setWoeReadyColumns(prev => new Set(prev).add(col));
+      }
     } catch (e) {
       console.error('Failed to load saved fine bins for', col, e);
     }
   };
+  const loadSavedData = async () => {
+    if (!recordId) return;
+    try {
+      const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
+      const recordData = await recordResp.json();
+      if (recordData.woe_iv_results) {
+        setWoeIvResults(recordData.woe_iv_results);
+        setWoeReadyColumns(new Set(Object.keys(recordData.woe_iv_results)));
+      }
+    } catch (e) {
+      console.error('Failed to load saved record data', e);
+    }
+  };
 
+  // Use useEffect to load saved data when the component mounts
+  useEffect(() => {
+    loadSavedData();
+  }, [recordId]);
   const handleColumnClick = async (col: string) => {
     setActiveColumn(col);
     setLoading(true);
@@ -177,12 +195,23 @@ const SelectedColumnsPage = () => {
       if (varType === 'continuous') {
         const existing = binMergeHistory[col] || {};
         const selectedBins = colGroupsSnapshot[1] || [];
-        if (selectedBins.length === 0) { alert('Select at least one bin to merge for continuous variable'); setLoading(false); return; }
+        if (selectedBins.length === 0) {
+          alert('Select at least one bin to merge for continuous variable');
+          setLoading(false);
+          return;
+        }
         const newKey = selectedBins.join('_');
         const combined = { ...existing, [newKey]: selectedBins };
         const res = await fetch('http://localhost:5000/api/fine-bin', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variable: col, target: targetVariable, type: varType, bin_merges: combined })
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            variable: col,
+            target: targetVariable,
+            type: varType,
+            bin_merges: combined,
+            record_id: recordId
+          })
         });
         const data = await res.json();
         if (!data.error) {
@@ -196,14 +225,26 @@ const SelectedColumnsPage = () => {
         const allBins = coarseBinResults[col] || [];
         const existing = binMergeHistory[col] || {};
         const newEntries: Record<string, any[]> = {};
-        Object.entries(colGroupsSnapshot).forEach(([gid, bins]) => { if (bins && (bins as any[]).length) newEntries[gid] = bins as any[]; });
+        Object.entries(colGroupsSnapshot).forEach(([gid, bins]) => {
+          if (bins && (bins as any[]).length) newEntries[gid] = bins as any[];
+        });
         const combined: Record<string, any[]> = { ...existing, ...newEntries };
         const mergedValues = Object.values(combined).flat();
         const total = allBins.reduce((s, b) => s + (b.Total || 0), 0);
         const remaining = allBins.filter(b => !mergedValues.includes(b[col + '_binned']))
-          .map(b => ({ ...b, [col + '_fine_binned']: b[col + '_binned'], 'Freq%': total ? (b.Total / total) * 100 : 0, 'Bad Rate': b.Total ? (b.Bad / b.Total) * 100 : 0 }));
+          .map(b => ({
+            ...b,
+            [col + '_fine_binned']: b[col + '_binned'],
+            'Freq%': total ? (b.Total / total) * 100 : 0,
+            'Bad Rate': b.Total ? (b.Bad / b.Total) * 100 : 0
+          }));
         const mergedStats = Object.entries(combined).map(([, bins]) => {
-          const stat = allBins.filter(b => (bins as any[]).includes(b[col + '_binned'])).reduce((a, b) => { a.Total += b.Total || 0; a.Bad += b.Bad || 0; a.Good += b.Good || 0; return a; }, { Total: 0, Bad: 0, Good: 0 });
+          const stat = allBins.filter(b => (bins as any[]).includes(b[col + '_binned'])).reduce((a, b) => {
+            a.Total += b.Total || 0;
+            a.Bad += b.Bad || 0;
+            a.Good += b.Good || 0;
+            return a;
+          }, { Total: 0, Bad: 0, Good: 0 });
           stat['Bad Rate'] = stat.Total ? (stat.Bad / stat.Total) * 100 : 0;
           stat['Freq%'] = total ? (stat.Total / total) * 100 : 0;
           stat[col + '_fine_binned'] = (bins as any[]).join(', ');
@@ -229,7 +270,8 @@ const SelectedColumnsPage = () => {
     try {
       let current = recordId;
       const upsertResp = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           dataset_path: 'uploaded.csv',
           discrete_columns: discreteColumns || [],
@@ -238,18 +280,25 @@ const SelectedColumnsPage = () => {
           target_variable: targetVariable || '',
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
-          crosstab_results: ''
-        })
+          crosstab_results: '',
+          woe_iv_results: JSON.stringify(woeIvResults || {}), // Added WOE/IV results
+        }),
       });
       const up = await upsertResp.json();
-      if (!up.error) { current = up.id; setRecordId(up.id); }
+      if (!up.error) {
+        current = up.id;
+        setRecordId(up.id);
+      }
       if (current) {
         await fetch('http://localhost:5000/api/finebin-details', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ record_id: current, column_name: col, bin_merges: merges })
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ record_id: current, column_name: col, bin_merges: merges }),
         });
       }
-    } catch (e) { console.error('Persist column failed', e); }
+    } catch (e) {
+      console.error('Persist column failed', e);
+    }
   };
 
   const handleDropColumn = (col: string) => {
@@ -277,8 +326,9 @@ const SelectedColumnsPage = () => {
           target_variable: targetVariable || '',
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
-          crosstab_results: ''
-        })
+          crosstab_results: '',
+          woe_iv_results: JSON.stringify(woeIvResults || {}), // Added WOE/IV results
+        }),
       });
       const upsertData = await upsertResp.json();
       if (!upsertData.error) {
@@ -294,16 +344,16 @@ const SelectedColumnsPage = () => {
             body: JSON.stringify({
               record_id: currentRecordId,
               column_name: col,
-              bin_merges: merges
-            })
+              bin_merges: merges,
+            }),
           })
         );
         await Promise.all(savePromises);
       }
-      showNotification('Fine bin results saved and persisted.');
+      showNotification('Fine bin and WOE/IV results saved and persisted.');
     } catch (e) {
       console.error(e);
-      showNotification('Failed to save fine bin results.');
+      showNotification('Failed to save results.');
     } finally {
       setLoading(false);
     }
@@ -311,15 +361,28 @@ const SelectedColumnsPage = () => {
 
   const fetchWoeIv = async (col: string) => {
     try {
-      const res = await fetch("http://localhost:5000/api/woe-iv", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ variables: [col], target: targetVariable, record_id: recordId })
+      // Check if WOE/IV results already exist in the record
+      if (recordId) {
+        const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
+        const recordData = await recordResp.json();
+        if (recordData.woe_iv_results && recordData.woe_iv_results[col]) {
+          setWoeIvResults((prev) => ({ ...prev, [col]: recordData.woe_iv_results[col] }));
+          return;
+        }
+      }
+
+      // If not found, compute WOE/IV
+      const res = await fetch('http://localhost:5000/api/woe-iv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ variables: [col], target: targetVariable, record_id: recordId }),
       });
       const data = await res.json();
-      if (!data.error) setWoeIvResults(prev => ({ ...prev, ...data }));
+      if (!data.error) {
+        setWoeIvResults((prev) => ({ ...prev, ...data }));
+      }
     } catch (e) {
-      console.error("WOE/IV fetch failed", e);
+      console.error('WOE/IV fetch failed', e);
     }
   };
 
@@ -388,7 +451,6 @@ const SelectedColumnsPage = () => {
 
   return (
     <div className="page-container">
-      {/* Progress Bar */}
       <div className="progress-bar">
         {['Select Column', 'Binning', 'WOE/IV', 'IV Selection'].map((step, index) => (
           <div
