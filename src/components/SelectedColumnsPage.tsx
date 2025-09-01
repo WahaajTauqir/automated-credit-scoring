@@ -33,8 +33,7 @@ const SelectedColumnsPage = () => {
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
   const [selectedForModeling, setSelectedForModeling] = useState<string[]>([]);
   const [sortDesc, setSortDesc] = useState(true);
-  const [ivThreshold, setIvThreshold] = useState(0.02);
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm] = useState('');
   const [showLegend, setShowLegend] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
 
@@ -114,6 +113,7 @@ const SelectedColumnsPage = () => {
       console.error('Failed to load saved fine bins for', col, e);
     }
   };
+
   const loadSavedData = async () => {
     if (!recordId) return;
     try {
@@ -128,10 +128,10 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  // Use useEffect to load saved data when the component mounts
   useEffect(() => {
     loadSavedData();
   }, [recordId]);
+
   const handleColumnClick = async (col: string) => {
     setActiveColumn(col);
     setLoading(true);
@@ -281,7 +281,7 @@ const SelectedColumnsPage = () => {
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
           crosstab_results: '',
-          woe_iv_results: JSON.stringify(woeIvResults || {}), // Added WOE/IV results
+          woe_iv_results: JSON.stringify(woeIvResults || {}),
         }),
       });
       const up = await upsertResp.json();
@@ -327,7 +327,7 @@ const SelectedColumnsPage = () => {
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
           crosstab_results: '',
-          woe_iv_results: JSON.stringify(woeIvResults || {}), // Added WOE/IV results
+          woe_iv_results: JSON.stringify(woeIvResults || {}),
         }),
       });
       const upsertData = await upsertResp.json();
@@ -361,7 +361,6 @@ const SelectedColumnsPage = () => {
 
   const fetchWoeIv = async (col: string) => {
     try {
-      // Check if WOE/IV results already exist in the record
       if (recordId) {
         const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
         const recordData = await recordResp.json();
@@ -371,7 +370,6 @@ const SelectedColumnsPage = () => {
         }
       }
 
-      // If not found, compute WOE/IV
       const res = await fetch('http://localhost:5000/api/woe-iv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -404,18 +402,27 @@ const SelectedColumnsPage = () => {
     column.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const selectIVThreshold = (threshold: number) => {
-    const filtered = sortedIVResults.filter((v) => v.iv >= threshold).map((v) => v.column);
-    setSelectedForModeling(filtered);
-    showNotification(`Selected ${filtered.length} variables with IV ≥ ${threshold.toFixed(2)}.`);
-  };
-
   const getIvColor = (iv: number) => {
     if (iv < 0.02) return '#ff4d4f';
     if (iv < 0.1) return '#fa8c16';
     if (iv < 0.3) return '#d4af37';
     if (iv < 0.5) return '#52c41a';
     return '#1890ff';
+  };
+
+  const canGoToStep = (step: number) => {
+    switch (step) {
+      case 1:
+        return true;
+      case 2:
+        return !!activeColumn && !!univariateResults[activeColumn];
+      case 3:
+        return !!activeColumn && woeReadyColumns.has(activeColumn);
+      case 4:
+        return true;
+      default:
+        return false;
+    }
   };
 
   let pageTitle = '';
@@ -456,6 +463,8 @@ const SelectedColumnsPage = () => {
           <div
             key={step}
             className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${currentStep > index + 1 ? 'completed' : ''}`}
+            style={{ cursor: canGoToStep(index + 1) ? 'pointer' : 'default', color: canGoToStep(index + 1) ? '#ffffffff' : '#999' }}
+            onClick={() => canGoToStep(index + 1) && setCurrentStep(index + 1)}
           >
             <span className="progress-number">{index + 1}</span>
             <span>{step}</span>

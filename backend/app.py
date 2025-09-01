@@ -25,8 +25,6 @@ def get_uploaded_csv_columns():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173"])
 @app.route('/api/record/<int:record_id>', methods=['DELETE'])
 def delete_record(record_id):
     """

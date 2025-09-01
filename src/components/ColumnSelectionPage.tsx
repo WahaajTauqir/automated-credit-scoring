@@ -1,7 +1,4 @@
 import ColumnPanels from './ColumnsPanel';
-import UnivariateResults from './UnivariateResults';
-import FineBinResults from './FInebinResults';
-import CrossTabResults from './CresstabResults';
 import Navbar from './Navbar';
 
 interface ColumnSelectionPageProps {
@@ -51,12 +48,6 @@ const ColumnSelectionPage = ({
   toggleSelectedForUnivariate,
   handleFineBin,
   handleProceedToSelectedColumns,
-  univariateResults,
-  fineBinResults,
-  crossTabResults,
-  selectedBinGroups,
-  toggleBinSelection,
-  formatToFourDecimals,
   restoring,
   expectedColumns,
   onUploadReplacement
@@ -114,21 +105,6 @@ const ColumnSelectionPage = ({
                 Proceed to Selected Columns
               </button>
             </div>
-
-            <UnivariateResults
-              univariateResults={univariateResults}
-              formatToFourDecimals={formatToFourDecimals}
-            />
-            <FineBinResults
-              fineBinResults={fineBinResults}
-              formatToFourDecimals={formatToFourDecimals}
-            />
-            <CrossTabResults
-              crossTabResults={crossTabResults}
-              formatToFourDecimals={formatToFourDecimals}
-              selectedBins={selectedBinGroups}
-              onBinToggle={toggleBinSelection}
-            />
           </>
         )}
       </div>
