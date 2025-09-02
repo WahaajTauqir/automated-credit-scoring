@@ -16,6 +16,28 @@ const SelectedColumnsPage = () => {
   } = state || {};
   console.log("Page state:", state);
 
+  // Initialize component state from navigation state when present
+  useEffect(() => {
+    if (!state) return;
+    // copy any precomputed results into local state so UI reflects them immediately
+    const anyUnivariate = (state as any).univariateResults;
+    const anyFine = (state as any).fineBinResults;
+    const anyCross = (state as any).crossTabResults || (state as any).crosstab_results;
+    const anyWoe = (state as any).woeIvResults || (state as any).woe_iv_results;
+    if (anyUnivariate) setUnivariateResults(anyUnivariate);
+    if (anyFine) setFineBinResults(anyFine);
+    if (anyCross) setCoarseBinResults(anyCross);
+    if (anyWoe) {
+      setWoeIvResults(anyWoe);
+      setWoeReadyColumns(new Set(Object.keys(anyWoe)));
+    }
+    // ensure active column defaults to first selected column
+    const first = (state as any).selectedColumns?.[0] || navSelectedColumns?.[0];
+    if (first) setActiveColumn(first);
+    // set record id if given
+    if ((state as any).recordId) setRecordId((state as any).recordId);
+  }, [state]);
+
   interface BinStats { [key: string]: any; }
   interface Bin { [key: string]: any; }
 
@@ -106,7 +128,8 @@ const SelectedColumnsPage = () => {
         setBinMergeHistory(prev => ({ ...prev, [col]: savedMerges }));
       }
       if (Object.keys(savedMerges).length > 0) {
-        await fetchWoeIv(col);
+        // pass saved merges so backend computes WOE/IV on updated bins immediately
+        await fetchWoeIv(col, savedMerges);
         setWoeReadyColumns(prev => new Set(prev).add(col));
       }
     } catch (e) {
@@ -131,6 +154,24 @@ const SelectedColumnsPage = () => {
   useEffect(() => {
     loadSavedData();
   }, [recordId]);
+
+  // When user navigates directly to IV Selection, ensure WOE/IV results exist for the selected columns
+  useEffect(() => {
+    const ensureWoeForAll = async () => {
+      if (currentStep !== 4) return;
+      const cols: string[] = navSelectedColumns || [];
+      const missing = cols.filter(c => !woeIvResults[c]);
+      if (missing.length === 0) return;
+      for (const col of missing) {
+        // fetchWoeIv already checks record cache first
+        // sequential fetch keeps load manageable and updates UI progressively
+        // eslint-disable-next-line no-await-in-loop
+        await fetchWoeIv(col);
+      }
+    };
+    ensureWoeForAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
 
   const handleColumnClick = async (col: string) => {
     setActiveColumn(col);
@@ -192,6 +233,7 @@ const SelectedColumnsPage = () => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
     setLoading(true);
     try {
+      let mergesToUse: Record<string, any[]> | undefined;
       if (varType === 'continuous') {
         const existing = binMergeHistory[col] || {};
         const selectedBins = colGroupsSnapshot[1] || [];
@@ -220,6 +262,7 @@ const SelectedColumnsPage = () => {
           setBinMergeHistory(p => ({ ...p, [col]: mergesReturned }));
           setSelectedBinGroups(p => ({ ...p, [col]: {} }));
           await persistFineBinColumn(col, mergesReturned);
+          mergesToUse = mergesReturned;
         } else alert(data.error);
       } else {
         const allBins = coarseBinResults[col] || [];
@@ -254,9 +297,11 @@ const SelectedColumnsPage = () => {
         setBinMergeHistory(p => ({ ...p, [col]: combined }));
         setSelectedBinGroups(p => ({ ...p, [col]: {} }));
         await persistFineBinColumn(col, combined);
+        mergesToUse = combined;
       }
 
-      await fetchWoeIv(col);
+      // ensure WOE/IV are calculated using the latest merges we just persisted
+      await fetchWoeIv(col, mergesToUse || binMergeHistory[col]);
       setWoeReadyColumns(prev => new Set(prev).add(col));
     } catch (err) {
       console.error(err);
@@ -359,9 +404,11 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  const fetchWoeIv = async (col: string) => {
+  // accepts optional merges so backend can compute using freshly created fine bins
+  const fetchWoeIv = async (col: string, merges?: Record<string, any[]>) => {
     try {
-      if (recordId) {
+      // if we have a record cached WOE/IV and no merges forced, use it
+      if (recordId && !merges) {
         const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
         const recordData = await recordResp.json();
         if (recordData.woe_iv_results && recordData.woe_iv_results[col]) {
@@ -370,10 +417,14 @@ const SelectedColumnsPage = () => {
         }
       }
 
+      const body: any = { variables: [col], target: targetVariable };
+      if (recordId) body.record_id = recordId;
+      if (merges) body.bin_merges = merges;
+
       const res = await fetch('http://localhost:5000/api/woe-iv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ variables: [col], target: targetVariable, record_id: recordId }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!data.error) {

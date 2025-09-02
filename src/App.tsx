@@ -123,6 +123,11 @@ function App() {
           continuousColumns,
           targetVariable,
           recordId: newRecordId || undefined,
+          // pass-through analysis results so SelectedColumnsPage can initialize immediately
+          univariateResults,
+          fineBinResults,
+          crossTabResults: crossTabResults,
+          expectedColumns: expectedColumnsForRecord,
         }
       });
     } catch (e) {
