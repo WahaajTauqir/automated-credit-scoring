@@ -41,7 +41,8 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
     IV: parseFloat(row.IV),
     Total: row.Total,
     Good: row.Good,
-    Bad: row.Bad
+    Bad: row.Bad,
+    Range: row.Range
   }));
 
   return (
@@ -65,6 +66,7 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
         <thead>
           <tr>
             <th>Bin</th>
+            <th>Range</th>
             <th>Total</th>
             <th>Good</th>
             <th>Bad</th>
@@ -76,6 +78,7 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
           {colData.stats?.map((row: any, idx: number) => (
             <tr key={idx}>
               <td>{row.Bin || row.temp_bin || row.Range}</td>
+              <td>{row.Range ?? ''}</td>
               <td>{row.Total}</td>
               <td>{row.Good}</td>
               <td>{row.Bad}</td>

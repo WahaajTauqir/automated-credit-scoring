@@ -18,89 +18,95 @@ const UnivariateResults = ({
   );
   if (entries.length === 0) return null;
 
-  // Column order
-  const columnOrder = ['Bin', 'Bad', 'Good', 'Total', 'Bad Rate', 'Freq%'];
-
   return (
     <div style={{ marginTop: '40px', width: '100%' }}>
       <h2 style={{ textAlign: 'center', marginBottom: '10px' }}>
         Coarse Binning Results
       </h2>
 
-      {entries.map(([col, result]: any, idx) => (
-        <div
-          key={idx}
-          className="column-panel"
-          style={{
-            marginBottom: '20px',
-            border: '1px solid gray',
-            borderRadius: '5px',
-            position: 'relative',
-            paddingTop: '30px'
-          }}
-        >
-          {onDropColumn && (
-            <button
-              style={{
-                position: 'absolute',
-                top: '5px',
-                right: '5px',
-                padding: '4px 8px',
-                background: 'red',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer'
-              }}
-              onClick={(e) => {
-                e.stopPropagation();
-                onDropColumn(col);
-              }}
-              title="Remove this column from analysis"
-            >
-              Drop
-            </button>
-          )}
+      {entries.map(([col, result]: any, idx) => {
+        // Determine if the column is discrete or continuous
+        const isDiscrete = result.type === 'discrete';
+        const columnOrder = isDiscrete
+          ? [col + '_binned', 'Range', 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%']
+          : [col + '_binned', 'Min', 'Max', 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%'];
 
-          <h3 style={{ padding: '5px 10px' }}>
-            {col} ({result.type})
-          </h3>
+        return (
+          <div
+            key={idx}
+            className="column-panel"
+            style={{
+              marginBottom: '20px',
+              border: '1px solid gray',
+              borderRadius: '5px',
+              position: 'relative',
+              paddingTop: '30px'
+            }}
+          >
+            {onDropColumn && (
+              <button
+                style={{
+                  position: 'absolute',
+                  top: '5px',
+                  right: '5px',
+                  padding: '4px 8px',
+                  background: 'red',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer'
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDropColumn(col);
+                }}
+                title="Remove this column from analysis"
+              >
+                Drop
+              </button>
+            )}
 
-          <div className="column-list">
-            <table style={{ width: '100%', color: 'white', fontSize: '14px' }}>
-              <thead>
-                <tr>
-                  {columnOrder.map(key => (
-                    <th key={key} style={{ padding: '4px', borderBottom: '1px solid gray' }}>
-                      {key === 'Bad Rate' ? 'Bad Rate (%)' : key}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {result.stats.map((row: any, i: number) => {
-                  // Prefer explicit binned column if present, else fallback to sequential label
-                  const binnedKey = Object.keys(row).find(k => k.endsWith('_binned'));
-                  const binLabel = binnedKey ? row[binnedKey] : `Bin_${i + 1}`;
-                  return (
-                    <tr key={i}>
-                      {columnOrder.map((key, j) => (
-                        <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
-                          {key === 'Bin'
-                            ? binLabel
-                            : key === 'Bad Rate' || key === 'Freq%'
-                            ? formatToFourDecimals(row[key])
-                            : String(row[key] ?? '')}
-                        </td>
-                      ))}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <h3 style={{ padding: '5px 10px' }}>
+              {col} ({result.type})
+            </h3>
+
+            <div className="column-list">
+              <table style={{ width: '100%', color: 'white', fontSize: '14px' }}>
+                <thead>
+                  <tr>
+                    {columnOrder.map(key => (
+                      <th key={key} style={{ padding: '4px', borderBottom: '1px solid gray' }}>
+                        {key === 'Bad Rate' ? 'Bad Rate (%)' : key === 'Freq%' ? 'Freq%' : key}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.stats.map((row: any, i: number) => {
+                    const binnedKey = Object.keys(row).find(k => k.endsWith('_binned'));
+                    const binLabel = binnedKey ? row[binnedKey] : `Bin_${i + 1}`;
+                    return (
+                      <tr key={i}>
+                        {columnOrder.map((key, j) => (
+                          <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
+                            {key === col + '_binned'
+                              ? binLabel
+                              : key === 'Bad Rate' || key === 'Freq%'
+                              ? formatToFourDecimals(row[key])
+                              : key === 'Min' || key === 'Max' || key === 'Range'
+                              ? String(row[key] ?? '')
+                              : String(row[key] ?? '')}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 };

@@ -19,7 +19,6 @@ const SelectedColumnsPage = () => {
   // Initialize component state from navigation state when present
   useEffect(() => {
     if (!state) return;
-    // copy any precomputed results into local state so UI reflects them immediately
     const anyUnivariate = (state as any).univariateResults;
     const anyFine = (state as any).fineBinResults;
     const anyCross = (state as any).crossTabResults || (state as any).crosstab_results;
@@ -31,10 +30,8 @@ const SelectedColumnsPage = () => {
       setWoeIvResults(anyWoe);
       setWoeReadyColumns(new Set(Object.keys(anyWoe)));
     }
-    // ensure active column defaults to first selected column
     const first = (state as any).selectedColumns?.[0] || navSelectedColumns?.[0];
     if (first) setActiveColumn(first);
-    // set record id if given
     if ((state as any).recordId) setRecordId((state as any).recordId);
   }, [state]);
 
@@ -76,61 +73,38 @@ const SelectedColumnsPage = () => {
       const savedMerges: Record<string, any[]> = {};
       details.forEach((row: any) => {
         let bins: any[];
-        try { bins = JSON.parse(row.merged_bins); } catch { bins = []; }
-        if (!bins || bins.length === 0) return;
-        if (varType === 'discrete') {
-          const label = bins.sort((a, b) => (Number(a) || 0) - (Number(b) || 0)).join(', ');
-          savedMerges[label] = bins;
-        } else {
+        try {
+          bins = JSON.parse(row.merged_bins);
+        } catch {
+          bins = [];
+        }
+        if (bins && bins.length > 0) {
           savedMerges[row.group_id] = bins;
         }
       });
       if (Object.keys(savedMerges).length === 0) return;
 
-      if (varType === 'continuous') {
-        const res = await fetch('http://localhost:5000/api/fine-bin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variable: col, target: targetVariable, type: varType, bin_merges: savedMerges, record_id: recordId })
-        });
-        const data = await res.json();
-        if (!data.error) {
-          setFineBinResults(prev => ({ ...prev, [col]: data.stats || [] }));
-          setBinMergeHistory(prev => ({ ...prev, [col]: savedMerges }));
-        }
-      } else {
-        const allBins = coarseStats || [];
-        const mergedBins: BinStats[] = [];
-        const totalRecords = allBins.reduce((sum, bin) => sum + (bin.Total || 0), 0);
-        Object.entries(savedMerges).forEach(([label, groupBins]) => {
-          const mergedStats = allBins
-            .filter(bin => groupBins.includes(bin[col + '_binned']))
-            .reduce((acc, bin) => {
-              acc.Total += bin.Total || 0;
-              acc.Bad += bin.Bad || 0;
-              acc.Good += bin.Good || 0;
-              return acc;
-            }, { Total: 0, Bad: 0, Good: 0 });
-          mergedStats['Bad Rate'] = mergedStats.Total ? (mergedStats.Bad / mergedStats.Total) * 100 : 0;
-          mergedStats['Freq%'] = totalRecords ? (mergedStats.Total / totalRecords) * 100 : 0;
-          mergedStats[col + '_fine_binned'] = label;
-          mergedBins.push(mergedStats);
-        });
-        const mergedValues = Object.values(savedMerges).flat();
-        const remaining = allBins.filter(bin => !mergedValues.includes(bin[col + '_binned']))
-          .map(bin => ({
-            ...bin,
-            [col + '_fine_binned']: bin[col + '_binned'],
-            'Freq%': totalRecords ? (bin.Total / totalRecords) * 100 : 0,
-            'Bad Rate': bin.Total ? (bin.Bad / bin.Total) * 100 : 0
-          }));
-        setFineBinResults(prev => ({ ...prev, [col]: [...remaining, ...mergedBins] }));
-        setBinMergeHistory(prev => ({ ...prev, [col]: savedMerges }));
-      }
-      if (Object.keys(savedMerges).length > 0) {
-        // pass saved merges so backend computes WOE/IV on updated bins immediately
-        await fetchWoeIv(col, savedMerges);
+      // Send fine binning request to backend to recompute stats with saved merges
+      const res = await fetch('http://localhost:5000/api/fine-bin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          variable: col,
+          target: targetVariable,
+          type: varType,
+          bin_merges: savedMerges,
+          record_id: recordId
+        })
+      });
+      const data = await res.json();
+      if (data.success && !data.error) {
+        setFineBinResults(prev => ({ ...prev, [col]: data.stats || [] }));
+        setBinMergeHistory(prev => ({ ...prev, [col]: data.bin_merges || savedMerges }));
+        // Trigger WOE/IV calculation with the loaded merges
+        await fetchWoeIv(col, data.bin_merges || savedMerges);
         setWoeReadyColumns(prev => new Set(prev).add(col));
+      } else {
+        console.error('Fine binning failed:', data.error);
       }
     } catch (e) {
       console.error('Failed to load saved fine bins for', col, e);
@@ -155,7 +129,6 @@ const SelectedColumnsPage = () => {
     loadSavedData();
   }, [recordId]);
 
-  // When user navigates directly to IV Selection, ensure WOE/IV results exist for the selected columns
   useEffect(() => {
     const ensureWoeForAll = async () => {
       if (currentStep !== 4) return;
@@ -163,14 +136,10 @@ const SelectedColumnsPage = () => {
       const missing = cols.filter(c => !woeIvResults[c]);
       if (missing.length === 0) return;
       for (const col of missing) {
-        // fetchWoeIv already checks record cache first
-        // sequential fetch keeps load manageable and updates UI progressively
-        // eslint-disable-next-line no-await-in-loop
         await fetchWoeIv(col);
       }
     };
     ensureWoeForAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
 
   const handleColumnClick = async (col: string) => {
@@ -190,11 +159,9 @@ const SelectedColumnsPage = () => {
       const data = await res.json();
       setUnivariateResults(prev => ({ ...prev, [col]: data[col] || data }));
       setCoarseBinResults(prev => ({ ...prev, [col]: (data[col]?.stats || []) as BinStats[] }));
-
       setSelectedBinGroups(prev => ({ ...prev, [col]: prev[col] || {} }));
       setActiveGroup(prev => ({ ...prev, [col]: 1 }));
       setFineBinResults(prev => ({ ...prev, [col]: prev[col] || [] }));
-
       await loadSavedFineBins(col, varType, (data[col]?.stats || []) as BinStats[]);
     } catch {
       alert('Error fetching coarse bin results');
@@ -233,79 +200,44 @@ const SelectedColumnsPage = () => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
     setLoading(true);
     try {
-      let mergesToUse: Record<string, any[]> | undefined;
-      if (varType === 'continuous') {
-        const existing = binMergeHistory[col] || {};
-        const selectedBins = colGroupsSnapshot[1] || [];
-        if (selectedBins.length === 0) {
-          alert('Select at least one bin to merge for continuous variable');
-          setLoading(false);
-          return;
+      const existing = binMergeHistory[col] || {};
+      const newEntries: Record<string, any[]> = {};
+      Object.entries(colGroupsSnapshot).forEach(([gid, bins]) => {
+        if (bins && bins.length > 0) {
+          const sortedBins = [...bins].sort((a, b) => String(a).localeCompare(String(b)));
+          const mergeKey = varType === 'continuous' ? `Merged_${gid}` : sortedBins.join(', ');
+          newEntries[mergeKey] = sortedBins;
         }
-        const newKey = selectedBins.join('_');
-        const combined = { ...existing, [newKey]: selectedBins };
-        const res = await fetch('http://localhost:5000/api/fine-bin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            variable: col,
-            target: targetVariable,
-            type: varType,
-            bin_merges: combined,
-            record_id: recordId
-          })
-        });
-        const data = await res.json();
-        if (!data.error) {
-          setFineBinResults(p => ({ ...p, [col]: data.stats || [] }));
-          const mergesReturned = data.bin_merges || combined;
-          setBinMergeHistory(p => ({ ...p, [col]: mergesReturned }));
-          setSelectedBinGroups(p => ({ ...p, [col]: {} }));
-          await persistFineBinColumn(col, mergesReturned);
-          mergesToUse = mergesReturned;
-        } else alert(data.error);
-      } else {
-        const allBins = coarseBinResults[col] || [];
-        const existing = binMergeHistory[col] || {};
-        const newEntries: Record<string, any[]> = {};
-        Object.entries(colGroupsSnapshot).forEach(([gid, bins]) => {
-          if (bins && (bins as any[]).length) newEntries[gid] = bins as any[];
-        });
-        const combined: Record<string, any[]> = { ...existing, ...newEntries };
-        const mergedValues = Object.values(combined).flat();
-        const total = allBins.reduce((s, b) => s + (b.Total || 0), 0);
-        const remaining = allBins.filter(b => !mergedValues.includes(b[col + '_binned']))
-          .map(b => ({
-            ...b,
-            [col + '_fine_binned']: b[col + '_binned'],
-            'Freq%': total ? (b.Total / total) * 100 : 0,
-            'Bad Rate': b.Total ? (b.Bad / b.Total) * 100 : 0
-          }));
-        const mergedStats = Object.entries(combined).map(([, bins]) => {
-          const stat = allBins.filter(b => (bins as any[]).includes(b[col + '_binned'])).reduce((a, b) => {
-            a.Total += b.Total || 0;
-            a.Bad += b.Bad || 0;
-            a.Good += b.Good || 0;
-            return a;
-          }, { Total: 0, Bad: 0, Good: 0 });
-          stat['Bad Rate'] = stat.Total ? (stat.Bad / stat.Total) * 100 : 0;
-          stat['Freq%'] = total ? (stat.Total / total) * 100 : 0;
-          stat[col + '_fine_binned'] = (bins as any[]).join(', ');
-          return stat;
-        });
-        setFineBinResults(p => ({ ...p, [col]: [...remaining, ...mergedStats] }));
-        setBinMergeHistory(p => ({ ...p, [col]: combined }));
-        setSelectedBinGroups(p => ({ ...p, [col]: {} }));
-        await persistFineBinColumn(col, combined);
-        mergesToUse = combined;
+      });
+      const combined = { ...existing, ...newEntries };
+      console.log(`bin_merges for ${col}:`, combined);
+
+      const res = await fetch('http://localhost:5000/api/fine-bin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          variable: col,
+          target: targetVariable,
+          type: varType,
+          bin_merges: combined,
+          record_id: recordId,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Fine binning failed');
       }
 
-      // ensure WOE/IV are calculated using the latest merges we just persisted
-      await fetchWoeIv(col, mergesToUse || binMergeHistory[col]);
-      setWoeReadyColumns(prev => new Set(prev).add(col));
+      setFineBinResults((p) => ({ ...p, [col]: data.stats || [] }));
+      const mergesReturned = data.bin_merges || combined;
+      setBinMergeHistory((p) => ({ ...p, [col]: mergesReturned }));
+      setSelectedBinGroups((p) => ({ ...p, [col]: {} }));
+      await persistFineBinColumn(col, mergesReturned);
+      await fetchWoeIv(col, mergesReturned);
+      setWoeReadyColumns((prev) => new Set(prev).add(col));
     } catch (err) {
-      console.error(err);
-      alert("Error running fine binning");
+      console.error('Error in runFineBinning:', err);
+      alert('Error running fine binning');
     } finally {
       setLoading(false);
     }
@@ -404,10 +336,8 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  // accepts optional merges so backend can compute using freshly created fine bins
   const fetchWoeIv = async (col: string, merges?: Record<string, any[]>) => {
     try {
-      // if we have a record cached WOE/IV and no merges forced, use it
       if (recordId && !merges) {
         const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
         const recordData = await recordResp.json();
@@ -585,6 +515,14 @@ const SelectedColumnsPage = () => {
                       <tr>
                         <th>Select</th>
                         <th>Bin</th>
+                        {((continuousColumns || []).includes(activeColumn)) ? (
+                          <>
+                            <th>Min</th>
+                            <th>Max</th>
+                          </>
+                        ) : (
+                          <th>Range</th>
+                        )}
                         <th>Bad</th>
                         <th>Good</th>
                         <th>Total</th>
@@ -619,6 +557,14 @@ const SelectedColumnsPage = () => {
                                 />
                               </td>
                               <td>{originalLabel}</td>
+                              {isContinuous ? (
+                                <>
+                                  <td>{bin.Min ?? ''}</td>
+                                  <td>{bin.Max ?? ''}</td>
+                                </>
+                              ) : (
+                                <td>{bin.Range ?? 'N/A'}</td>
+                              )}
                               <td>{bin.Bad}</td>
                               <td>{bin.Good}</td>
                               <td>{bin.Total}</td>
@@ -642,7 +588,20 @@ const SelectedColumnsPage = () => {
                   <table className="cross-tab-table">
                     <thead>
                       <tr>
-                        <th>Bin</th><th>Bad</th><th>Good</th><th>Total</th><th>Bad Rate (%)</th><th>Freq%</th>
+                        <th>Bin</th>
+                        {((continuousColumns || []).includes(activeColumn)) ? (
+                          <>
+                            <th>Min</th>
+                            <th>Max</th>
+                          </>
+                        ) : (
+                          <th>Range</th>
+                        )}
+                        <th>Bad</th>
+                        <th>Good</th>
+                        <th>Total</th>
+                        <th>Bad Rate (%)</th>
+                        <th>Freq%</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -664,11 +623,19 @@ const SelectedColumnsPage = () => {
                             }}
                           >
                             <td>{bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1']}</td>
+                            {((continuousColumns || []).includes(activeColumn)) ? (
+                              <>
+                                <td>{bin.Min ?? 'N/A'}</td>
+                                <td>{bin.Max ?? 'N/A'}</td>
+                              </>
+                            ) : (
+                              <td>{bin.Range ?? 'N/A'}</td>
+                            )}
                             <td>{bin.Bad ?? bin['Bad'] ?? 0}</td>
                             <td>{bin.Good ?? bin['Good'] ?? 0}</td>
                             <td>{bin.Total ?? bin['Total'] ?? 0}</td>
-                            <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4)}</td>
-                            <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : 0}</td>
+                            <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4) ?? '0.0000'}</td>
+                            <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : '0.00'}</td>
                           </tr>
                         ))}
                     </tbody>
