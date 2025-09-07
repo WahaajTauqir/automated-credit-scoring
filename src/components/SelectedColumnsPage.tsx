@@ -2,6 +2,8 @@ import { useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import UnivariateResults from './UnivariateResults';
 import WoeIvResults from './WoeIvResults';
+import LogisticRegressionResults from './LogisticRegressionResults';
+import Navbar from './Navbar';
 import './SelectedColumnsPage.css';
 
 const SelectedColumnsPage = () => {
@@ -17,7 +19,7 @@ const SelectedColumnsPage = () => {
 
   // State declarations
   const [selectedColumns, setSelectedColumns] = useState<string[]>(navSelectedColumns || []); // Local state for selected columns
-  const [activeColumn, setActiveColumn] = useState<string>(navSelectedColumns?.[0] || '');
+  const [activeColumn, setActiveColumn] = useState<string>('');
   const [currentStep, setCurrentStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
@@ -51,8 +53,7 @@ const SelectedColumnsPage = () => {
       setWoeReadyColumns(new Set(Object.keys(anyWoe)));
     }
     if (navSelectedColumns) setSelectedColumns(navSelectedColumns); // Initialize local selectedColumns
-    const first = (state as any).selectedColumns?.[0] || navSelectedColumns?.[0];
-    if (first) setActiveColumn(first);
+  // do not auto-select the first variable to avoid pre-highlighting it
     if ((state as any).recordId) setRecordId((state as any).recordId);
   }, [state]);
 
@@ -100,7 +101,7 @@ const SelectedColumnsPage = () => {
   };
 
   // API calls
-  const loadSavedFineBins = async (col: string, varType: string, coarseStats: any[]) => {
+  const loadSavedFineBins = async (col: string, varType: string) => {
     if (!recordId) return;
     try {
       const resp = await fetch(`http://localhost:5000/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
@@ -183,7 +184,7 @@ const SelectedColumnsPage = () => {
       setSelectedBinGroups((prev) => ({ ...prev, [col]: prev[col] || {} }));
       setActiveGroup((prev) => ({ ...prev, [col]: 1 }));
       setFineBinResults((prev) => ({ ...prev, [col]: prev[col] || [] }));
-      await loadSavedFineBins(col, varType, data[col]?.stats || []);
+  await loadSavedFineBins(col, varType);
     } catch {
       alert('Error fetching coarse bin results');
     } finally {
@@ -297,6 +298,14 @@ const SelectedColumnsPage = () => {
     } catch (e) {
       console.error('Persist column failed', e);
     }
+  };
+
+  // Toggle variable inclusion for modeling
+  const toggleSelectedForModeling = (col: string) => {
+    setSelectedForModeling((prev) => {
+      if (prev.includes(col)) return prev.filter((c) => c !== col);
+      return [...prev, col];
+    });
   };
 
   const handleDropColumn = (col: string) => {
@@ -431,6 +440,8 @@ const SelectedColumnsPage = () => {
         return !!activeColumn && woeReadyColumns.has(activeColumn);
       case 4:
         return true;
+      case 5:
+        return selectedForModeling.length > 0;
       default:
         return false;
     }
@@ -450,6 +461,9 @@ const SelectedColumnsPage = () => {
     case 4:
       pageTitle = 'IV Selection for Modeling';
       break;
+    case 5:
+      pageTitle = 'Logistic Regression Analysis';
+      break;
     default:
       pageTitle = 'Select a Column to View Results';
   }
@@ -462,6 +476,8 @@ const SelectedColumnsPage = () => {
         return woeReadyColumns.has(activeColumn);
       case 3:
         return true;
+      case 4:
+        return selectedForModeling.length > 0;
       default:
         return false;
     }
@@ -473,7 +489,7 @@ const SelectedColumnsPage = () => {
 
   useEffect(() => {
     const ensureWoeForAll = async () => {
-      if (currentStep !== 4) return;
+      if (currentStep !== 4 && currentStep !== 5) return;
       const cols: string[] = selectedColumns; // Use local selectedColumns
       const missing = cols.filter((c) => !woeIvResults[c]);
       if (missing.length === 0) return;
@@ -485,9 +501,11 @@ const SelectedColumnsPage = () => {
   }, [currentStep, selectedColumns, woeIvResults]);
 
   return (
-    <div className="page-container">
+    <div>
+      <Navbar />
+      <div className="page-container">
       <div className="progress-bar">
-        {['Select Column', 'Binning', 'WOE/IV', 'IV Selection'].map((step, index) => (
+        {['Coarse Binning', 'Fine Binning', 'WOE/IV Calculation', 'Important Column Selection', 'Logistic Regression'].map((step, index) => (
           <div
             key={step}
             className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${
@@ -828,7 +846,7 @@ const SelectedColumnsPage = () => {
           </div>
           <button
             className="proceed-btn"
-            onClick={() => console.log('Proceed with:', selectedForModeling)}
+            onClick={() => setCurrentStep(5)}
             disabled={selectedForModeling.length === 0}
           >
             Proceed with Selected
@@ -836,11 +854,23 @@ const SelectedColumnsPage = () => {
         </div>
       )}
 
+      {currentStep === 5 && (
+        <LogisticRegressionResults
+          selectedVariables={selectedForModeling}
+          allSelectedVariables={selectedColumns}
+          targetVariable={targetVariable}
+          woeTransformedData={woeIvResults}
+          onColumnSelect={(column) => setActiveColumn(column)}
+          onToggleSelect={toggleSelectedForModeling}
+          selectedColumn={activeColumn}
+        />
+      )}
+
       <div className="navigation-buttons">
         {currentStep > 1 && (
           <button onClick={() => setCurrentStep((prev) => prev - 1)}>Back</button>
         )}
-        {currentStep < 4 && (
+        {currentStep < 5 && (
           <button disabled={!canGoNext()} onClick={() => setCurrentStep((prev) => prev + 1)}>
             Next
           </button>
@@ -851,6 +881,7 @@ const SelectedColumnsPage = () => {
         <button className="file-upload-label" onClick={handleSave}>
           Save
         </button>
+      </div>
       </div>
     </div>
   );
