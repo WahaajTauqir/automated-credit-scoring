@@ -15,11 +15,6 @@ def init_db():
     with open(DB_PATH, 'r') as f:
         sql = f.read()
     conn = get_db_connection()
-    # Drop existing table to ensure schema update (use with caution in production)
-    conn.execute("DROP TABLE IF EXISTS records")
-    conn.executescript(sql)
-    conn.commit()
-    conn.close()
 
 def save_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, univariate_results, finebin_results, crosstab_results):
     """

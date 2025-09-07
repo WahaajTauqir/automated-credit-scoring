@@ -1,6 +1,5 @@
 import { useLocation } from 'react-router-dom';
-import { useEffect } from 'react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import UnivariateResults from './UnivariateResults';
 import WoeIvResults from './WoeIvResults';
 import './SelectedColumnsPage.css';
@@ -12,11 +11,32 @@ const SelectedColumnsPage = () => {
     discreteColumns,
     continuousColumns,
     targetVariable,
-    recordId: initialRecordId
+    recordId: initialRecordId,
   } = state || {};
-  console.log("Page state:", state);
+  console.log('Page state:', state);
 
-  // Initialize component state from navigation state when present
+  // State declarations
+  const [selectedColumns, setSelectedColumns] = useState<string[]>(navSelectedColumns || []); // Local state for selected columns
+  const [activeColumn, setActiveColumn] = useState<string>(navSelectedColumns?.[0] || '');
+  const [currentStep, setCurrentStep] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
+  const [coarseBinResults, setCoarseBinResults] = useState<Record<string, any[]>>({});
+  const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, Record<number, any[]>>>({});
+  const [activeGroup, setActiveGroup] = useState<Record<string, number>>({});
+  const [fineBinResults, setFineBinResults] = useState<Record<string, any[]>>({});
+  const [binMergeHistory, setBinMergeHistory] = useState<Record<string, Record<string, any[]>>>({});
+  const [recordId, setRecordId] = useState<number | undefined>(initialRecordId);
+  const [woeIvResults, setWoeIvResults] = useState<Record<string, any>>({});
+  const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
+  const [selectedForModeling, setSelectedForModeling] = useState<string[]>([]);
+  const [sortDesc, setSortDesc] = useState(true);
+  const [searchTerm] = useState('');
+  const [showLegend, setShowLegend] = useState(false);
+  const [notification, setNotification] = useState<string | null>(null);
+  const [expandedRanges, setExpandedRanges] = useState<Record<string, boolean>>({});
+
+  // Initialize component state from navigation state
   useEffect(() => {
     if (!state) return;
     const anyUnivariate = (state as any).univariateResults;
@@ -30,32 +50,34 @@ const SelectedColumnsPage = () => {
       setWoeIvResults(anyWoe);
       setWoeReadyColumns(new Set(Object.keys(anyWoe)));
     }
+    if (navSelectedColumns) setSelectedColumns(navSelectedColumns); // Initialize local selectedColumns
     const first = (state as any).selectedColumns?.[0] || navSelectedColumns?.[0];
     if (first) setActiveColumn(first);
     if ((state as any).recordId) setRecordId((state as any).recordId);
   }, [state]);
 
-  interface BinStats { [key: string]: any; }
-  interface Bin { [key: string]: any; }
+  // NEW: useEffect to sync WOE/IV states when selectedColumns changes (e.g., after dropping a column)
+  useEffect(() => {
+    // Remove WOE/IV data for columns no longer in selectedColumns
+    const currentWoeKeys = Object.keys(woeIvResults);
+    const columnsToRemove = currentWoeKeys.filter((col) => !selectedColumns.includes(col));
+    if (columnsToRemove.length > 0) {
+      setWoeIvResults((prev) => {
+        const newResults = { ...prev };
+        columnsToRemove.forEach((col) => delete newResults[col]);
+        return newResults;
+      });
+      setWoeReadyColumns((prev) => {
+        const newSet = new Set(prev);
+        columnsToRemove.forEach((col) => newSet.delete(col));
+        return newSet;
+      });
+      setSelectedForModeling((prev) => prev.filter((col) => selectedColumns.includes(col)));
+      showNotification(`WOE/IV data cleaned for dropped columns: ${columnsToRemove.join(', ')}`);
+    }
+  }, [selectedColumns, woeIvResults]); // Depend on selectedColumns to trigger cleanup
 
-  const [activeColumn, setActiveColumn] = useState<string>(navSelectedColumns?.[0] || '');
-  const [currentStep, setCurrentStep] = useState(1);
-  const [loading, setLoading] = useState(false);
-  const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
-  const [coarseBinResults, setCoarseBinResults] = useState<Record<string, BinStats[]>>({});
-  const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, Record<number, any[]>>>({});
-  const [activeGroup, setActiveGroup] = useState<Record<string, number>>({});
-  const [fineBinResults, setFineBinResults] = useState<Record<string, BinStats[]>>({});
-  const [binMergeHistory, setBinMergeHistory] = useState<Record<string, Record<string, any[]>>>({});
-  const [recordId, setRecordId] = useState<number | undefined>(initialRecordId);
-  const [woeIvResults, setWoeIvResults] = useState<Record<string, any>>({});
-  const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
-  const [selectedForModeling, setSelectedForModeling] = useState<string[]>([]);
-  const [sortDesc, setSortDesc] = useState(true);
-  const [searchTerm] = useState('');
-  const [showLegend, setShowLegend] = useState(false);
-  const [notification, setNotification] = useState<string | null>(null);
-
+  // Utility functions
   const formatToFourDecimals = (value: any) => (typeof value === 'number' ? value.toFixed(4) : String(value));
 
   const showNotification = (message: string) => {
@@ -63,7 +85,22 @@ const SelectedColumnsPage = () => {
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const loadSavedFineBins = async (col: string, varType: string, coarseStats: BinStats[]) => {
+  // Truncate long range strings
+  const truncateRange = (range: string, maxLength: number = 50): string => {
+    if (range.length <= maxLength) return range;
+    return `${range.slice(0, maxLength - 3)}...`;
+  };
+
+  // Toggle expansion of a specific range
+  const toggleRangeExpansion = (key: string) => {
+    setExpandedRanges((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
+
+  // API calls
+  const loadSavedFineBins = async (col: string, varType: string, coarseStats: any[]) => {
     if (!recordId) return;
     try {
       const resp = await fetch(`http://localhost:5000/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
@@ -84,7 +121,6 @@ const SelectedColumnsPage = () => {
       });
       if (Object.keys(savedMerges).length === 0) return;
 
-      // Send fine binning request to backend to recompute stats with saved merges
       const res = await fetch('http://localhost:5000/api/fine-bin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -93,16 +129,15 @@ const SelectedColumnsPage = () => {
           target: targetVariable,
           type: varType,
           bin_merges: savedMerges,
-          record_id: recordId
-        })
+          record_id: recordId,
+        }),
       });
       const data = await res.json();
       if (data.success && !data.error) {
-        setFineBinResults(prev => ({ ...prev, [col]: data.stats || [] }));
-        setBinMergeHistory(prev => ({ ...prev, [col]: data.bin_merges || savedMerges }));
-        // Trigger WOE/IV calculation with the loaded merges
+        setFineBinResults((prev) => ({ ...prev, [col]: data.stats || [] }));
+        setBinMergeHistory((prev) => ({ ...prev, [col]: data.bin_merges || savedMerges }));
         await fetchWoeIv(col, data.bin_merges || savedMerges);
-        setWoeReadyColumns(prev => new Set(prev).add(col));
+        setWoeReadyColumns((prev) => new Set(prev).add(col));
       } else {
         console.error('Fine binning failed:', data.error);
       }
@@ -120,27 +155,13 @@ const SelectedColumnsPage = () => {
         setWoeIvResults(recordData.woe_iv_results);
         setWoeReadyColumns(new Set(Object.keys(recordData.woe_iv_results)));
       }
+      if (recordData.selected_columns) {
+        setSelectedColumns(recordData.selected_columns.split(',')); // Update selectedColumns from backend
+      }
     } catch (e) {
       console.error('Failed to load saved record data', e);
     }
   };
-
-  useEffect(() => {
-    loadSavedData();
-  }, [recordId]);
-
-  useEffect(() => {
-    const ensureWoeForAll = async () => {
-      if (currentStep !== 4) return;
-      const cols: string[] = navSelectedColumns || [];
-      const missing = cols.filter(c => !woeIvResults[c]);
-      if (missing.length === 0) return;
-      for (const col of missing) {
-        await fetchWoeIv(col);
-      }
-    };
-    ensureWoeForAll();
-  }, [currentStep]);
 
   const handleColumnClick = async (col: string) => {
     setActiveColumn(col);
@@ -153,16 +174,16 @@ const SelectedColumnsPage = () => {
         body: JSON.stringify({
           discrete: varType === 'discrete' ? [col] : [],
           continuous: varType === 'continuous' ? [col] : [],
-          target: targetVariable
+          target: targetVariable,
         }),
       });
       const data = await res.json();
-      setUnivariateResults(prev => ({ ...prev, [col]: data[col] || data }));
-      setCoarseBinResults(prev => ({ ...prev, [col]: (data[col]?.stats || []) as BinStats[] }));
-      setSelectedBinGroups(prev => ({ ...prev, [col]: prev[col] || {} }));
-      setActiveGroup(prev => ({ ...prev, [col]: 1 }));
-      setFineBinResults(prev => ({ ...prev, [col]: prev[col] || [] }));
-      await loadSavedFineBins(col, varType, (data[col]?.stats || []) as BinStats[]);
+      setUnivariateResults((prev) => ({ ...prev, [col]: data[col] || data }));
+      setCoarseBinResults((prev) => ({ ...prev, [col]: (data[col]?.stats || []) }));
+      setSelectedBinGroups((prev) => ({ ...prev, [col]: prev[col] || {} }));
+      setActiveGroup((prev) => ({ ...prev, [col]: 1 }));
+      setFineBinResults((prev) => ({ ...prev, [col]: prev[col] || [] }));
+      await loadSavedFineBins(col, varType, data[col]?.stats || []);
     } catch {
       alert('Error fetching coarse bin results');
     } finally {
@@ -172,18 +193,18 @@ const SelectedColumnsPage = () => {
 
   const toggleBinSelection = (col: string, binValue: any, group?: number) => {
     const isContinuous = (continuousColumns || []).includes(col);
-    setSelectedBinGroups(prev => {
+    setSelectedBinGroups((prev) => {
       const colGroups = prev[col] || {};
       if (isContinuous) {
         const selectedBins = colGroups[1] || [];
         const updatedBins = selectedBins.includes(binValue)
-          ? selectedBins.filter(v => v !== binValue)
+          ? selectedBins.filter((v) => v !== binValue)
           : [...selectedBins, binValue];
         return { ...prev, [col]: { 1: updatedBins } };
       } else {
         const currentGroupBins = colGroups[group!] || [];
         const updatedBins = currentGroupBins.includes(binValue)
-          ? currentGroupBins.filter(v => v !== binValue)
+          ? currentGroupBins.filter((v) => v !== binValue)
           : [...currentGroupBins, binValue];
         return { ...prev, [col]: { ...colGroups, [group!]: updatedBins } };
       }
@@ -193,7 +214,7 @@ const SelectedColumnsPage = () => {
   const runFineBinning = async (col: string) => {
     const colGroupsSnapshot = selectedBinGroups[col];
     if (!colGroupsSnapshot || Object.keys(colGroupsSnapshot).length === 0) {
-      alert("Select at least one bin to merge");
+      alert('Select at least one bin to merge');
       return;
     }
 
@@ -228,10 +249,10 @@ const SelectedColumnsPage = () => {
         throw new Error(data.error || 'Fine binning failed');
       }
 
-      setFineBinResults((p) => ({ ...p, [col]: data.stats || [] }));
+      setFineBinResults((prev) => ({ ...prev, [col]: data.stats || [] }));
       const mergesReturned = data.bin_merges || combined;
-      setBinMergeHistory((p) => ({ ...p, [col]: mergesReturned }));
-      setSelectedBinGroups((p) => ({ ...p, [col]: {} }));
+      setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
+      setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
       await persistFineBinColumn(col, mergesReturned);
       await fetchWoeIv(col, mergesReturned);
       setWoeReadyColumns((prev) => new Set(prev).add(col));
@@ -253,7 +274,7 @@ const SelectedColumnsPage = () => {
           dataset_path: 'uploaded.csv',
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
-          selected_columns: navSelectedColumns || [],
+          selected_columns: selectedColumns, // Use local selectedColumns
           target_variable: targetVariable || '',
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
@@ -280,12 +301,21 @@ const SelectedColumnsPage = () => {
 
   const handleDropColumn = (col: string) => {
     if (col === activeColumn) setActiveColumn('');
-    setUnivariateResults(prev => { const { [col]: _, ...rest } = prev; return rest; });
-    setCoarseBinResults(prev => { const { [col]: _, ...rest } = prev; return rest; });
-    setFineBinResults(prev => { const { [col]: _, ...rest } = prev; return rest; });
-    setSelectedBinGroups(prev => { const { [col]: _, ...rest } = prev; return rest; });
-    setActiveGroup(prev => { const { [col]: _, ...rest } = prev; return rest; });
-    setBinMergeHistory(prev => { const { [col]: _, ...rest } = prev; return rest; });
+    setSelectedColumns((prev) => prev.filter((c) => c !== col)); // Remove from selectedColumns
+    setUnivariateResults((prev) => { const { [col]: _, ...rest } = prev; return rest; });
+    setCoarseBinResults((prev) => { const { [col]: _, ...rest } = prev; return rest; });
+    setFineBinResults((prev) => { const { [col]: _, ...rest } = prev; return rest; });
+    setSelectedBinGroups((prev) => { const { [col]: _, ...rest } = prev; return rest; });
+    setActiveGroup((prev) => { const { [col]: _, ...rest } = prev; return rest; });
+    setBinMergeHistory((prev) => { const { [col]: _, ...rest } = prev; return rest; });
+    setWoeIvResults((prev) => { const { [col]: _, ...rest } = prev; return rest; }); // Already removes from WOE/IV here
+    setWoeReadyColumns((prev) => {
+      const newSet = new Set(prev);
+      newSet.delete(col);
+      return newSet;
+    });
+    setSelectedForModeling((prev) => prev.filter((c) => c !== col));
+    showNotification(`Column ${col} dropped.`);
   };
 
   const handleSave = async () => {
@@ -299,7 +329,7 @@ const SelectedColumnsPage = () => {
           dataset_path: 'uploaded.csv',
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
-          selected_columns: navSelectedColumns || [],
+          selected_columns: selectedColumns, // Use local selectedColumns
           target_variable: targetVariable || '',
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
@@ -437,13 +467,32 @@ const SelectedColumnsPage = () => {
     }
   };
 
+  useEffect(() => {
+    loadSavedData();
+  }, [recordId]);
+
+  useEffect(() => {
+    const ensureWoeForAll = async () => {
+      if (currentStep !== 4) return;
+      const cols: string[] = selectedColumns; // Use local selectedColumns
+      const missing = cols.filter((c) => !woeIvResults[c]);
+      if (missing.length === 0) return;
+      for (const col of missing) {
+        await fetchWoeIv(col);
+      }
+    };
+    ensureWoeForAll();
+  }, [currentStep, selectedColumns, woeIvResults]);
+
   return (
     <div className="page-container">
       <div className="progress-bar">
         {['Select Column', 'Binning', 'WOE/IV', 'IV Selection'].map((step, index) => (
           <div
             key={step}
-            className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${currentStep > index + 1 ? 'completed' : ''}`}
+            className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${
+              currentStep > index + 1 ? 'completed' : ''
+            }`}
             style={{ cursor: canGoToStep(index + 1) ? 'pointer' : 'default', color: canGoToStep(index + 1) ? '#ffffffff' : '#999' }}
             onClick={() => canGoToStep(index + 1) && setCurrentStep(index + 1)}
           >
@@ -455,16 +504,14 @@ const SelectedColumnsPage = () => {
 
       <h2 className="page-title">{pageTitle}</h2>
 
-      {notification && (
-        <div className="notification">{notification}</div>
-      )}
+      {notification && <div className="notification">{notification}</div>}
 
       {loading && <p className="loading-text">Loading...</p>}
 
       {currentStep === 1 && (
         <>
           <div className="columns-grid">
-            {navSelectedColumns?.map((col: string) => (
+            {selectedColumns.map((col: string) => ( // Use local selectedColumns
               <div
                 key={col}
                 className={`column-card ${col === activeColumn ? 'active' : ''}`}
@@ -503,9 +550,13 @@ const SelectedColumnsPage = () => {
                       <label style={{ marginRight: '8px' }}>Select group:</label>
                       <select
                         value={activeGroup[activeColumn] || 1}
-                        onChange={e => setActiveGroup(prev => ({ ...prev, [activeColumn]: Number(e.target.value) }))}
+                        onChange={(e) => setActiveGroup((prev) => ({ ...prev, [activeColumn]: Number(e.target.value) }))}
                       >
-                        {[1, 2, 3, 4, 5].map(g => <option key={g} value={g}>Group {g}</option>)}
+                        {[1, 2, 3, 4, 5].map((g) => (
+                          <option key={g} value={g}>
+                            Group {g}
+                          </option>
+                        ))}
                       </select>
                     </div>
                   )}
@@ -515,7 +566,7 @@ const SelectedColumnsPage = () => {
                       <tr>
                         <th>Select</th>
                         <th>Bin</th>
-                        {((continuousColumns || []).includes(activeColumn)) ? (
+                        {(continuousColumns || []).includes(activeColumn) ? (
                           <>
                             <th>Min</th>
                             <th>Max</th>
@@ -531,48 +582,57 @@ const SelectedColumnsPage = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {(coarseBinResults[activeColumn] as Bin[])
-                        .filter(bin => {
-                          const merges = binMergeHistory[activeColumn];
-                          if (!merges) return true;
-                          const mergedValues = Object.values(merges).flat();
-                          return !mergedValues.includes(bin[`${activeColumn}_binned`]);
-                        })
-                        .map((bin) => {
-                          const binLabelKey = `${activeColumn}_binned`;
-                          const group = activeGroup[activeColumn] || 1;
-                          const isContinuous = (continuousColumns || []).includes(activeColumn);
-                          const originalLabel = typeof bin[binLabelKey] === 'string'
-                            ? bin[binLabelKey]
-                            : `Bin_${bin[binLabelKey]}`;
-                          return (
-                            <tr key={bin[binLabelKey]}>
+                      {(coarseBinResults[activeColumn] || []).filter((bin) => {
+                        const merges = binMergeHistory[activeColumn];
+                        if (!merges) return true;
+                        const mergedValues = Object.values(merges).flat();
+                        return !mergedValues.includes(bin[`${activeColumn}_binned`]);
+                      }).map((bin, idx) => {
+                        const binLabelKey = `${activeColumn}_binned`;
+                        const group = activeGroup[activeColumn] || 1;
+                        const isContinuous = (continuousColumns || []).includes(activeColumn);
+                        const originalLabel = typeof bin[binLabelKey] === 'string' ? bin[binLabelKey] : `Bin_${bin[binLabelKey]}`;
+                        const rangeKey = `${activeColumn}_${idx}`;
+                        const rangeValue = String(bin.Range ?? '');
+                        const isTruncated = !isContinuous && rangeValue.length > 50;
+                        const truncatedRange = isTruncated ? truncateRange(rangeValue) : rangeValue;
+
+                        return (
+                          <tr key={bin[binLabelKey]}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={
+                                  selectedBinGroups[activeColumn]?.[isContinuous ? 1 : group]?.includes(bin[binLabelKey]) || false
+                                }
+                                onChange={() => toggleBinSelection(activeColumn, bin[binLabelKey], isContinuous ? 1 : group)}
+                              />
+                            </td>
+                            <td>{originalLabel}</td>
+                            {isContinuous ? (
+                              <>
+                                <td>{bin.Min ?? ''}</td>
+                                <td>{bin.Max ?? ''}</td>
+                              </>
+                            ) : (
                               <td>
-                                <input
-                                  type="checkbox"
-                                  checked={
-                                    selectedBinGroups[activeColumn]?.[isContinuous ? 1 : group]?.includes(bin[binLabelKey]) || false
-                                  }
-                                  onChange={() => toggleBinSelection(activeColumn, bin[binLabelKey], isContinuous ? 1 : group)}
-                                />
+                                <span
+                                  title={rangeValue}
+                                  style={{ cursor: isTruncated ? 'pointer' : 'default' }}
+                                  onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
+                                >
+                                  {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
+                                </span>
                               </td>
-                              <td>{originalLabel}</td>
-                              {isContinuous ? (
-                                <>
-                                  <td>{bin.Min ?? ''}</td>
-                                  <td>{bin.Max ?? ''}</td>
-                                </>
-                              ) : (
-                                <td>{bin.Range ?? 'N/A'}</td>
-                              )}
-                              <td>{bin.Bad}</td>
-                              <td>{bin.Good}</td>
-                              <td>{bin.Total}</td>
-                              <td>{formatToFourDecimals(bin["Bad Rate"])}%</td>
-                              <td>{formatToFourDecimals(bin["Freq%"])}%</td>
-                            </tr>
-                          );
-                        })}
+                            )}
+                            <td>{bin.Bad}</td>
+                            <td>{bin.Good}</td>
+                            <td>{bin.Total}</td>
+                            <td>{formatToFourDecimals(bin['Bad Rate'])}%</td>
+                            <td>{formatToFourDecimals(bin['Freq%'])}%</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
 
@@ -589,7 +649,7 @@ const SelectedColumnsPage = () => {
                     <thead>
                       <tr>
                         <th>Bin</th>
-                        {((continuousColumns || []).includes(activeColumn)) ? (
+                        {(continuousColumns || []).includes(activeColumn) ? (
                           <>
                             <th>Min</th>
                             <th>Max</th>
@@ -611,33 +671,49 @@ const SelectedColumnsPage = () => {
                           const labelB = (b[activeColumn + '_fine_binned'] || '').toString();
                           return labelA.localeCompare(labelB);
                         })
-                        .map((bin, idx) => (
-                          <tr
-                            key={idx}
-                            style={{
-                              backgroundColor:
-                                typeof bin[activeColumn + '_fine_binned'] === 'string' &&
+                        .map((bin, idx) => {
+                          const isContinuous = (continuousColumns || []).includes(activeColumn);
+                          const rangeKey = `${activeColumn}_${idx}`;
+                          const rangeValue = String(bin.Range ?? '');
+                          const isTruncated = !isContinuous && rangeValue.length > 50;
+                          const truncatedRange = isTruncated ? truncateRange(rangeValue) : rangeValue;
+
+                          return (
+                            <tr
+                              key={idx}
+                              style={{
+                                backgroundColor:
+                                  typeof bin[activeColumn + '_fine_binned'] === 'string' &&
                                   bin[activeColumn + '_fine_binned'].indexOf(',') !== -1
-                                  ? '#0d1117'
-                                  : 'transparent'
-                            }}
-                          >
-                            <td>{bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1']}</td>
-                            {((continuousColumns || []).includes(activeColumn)) ? (
-                              <>
-                                <td>{bin.Min ?? 'N/A'}</td>
-                                <td>{bin.Max ?? 'N/A'}</td>
-                              </>
-                            ) : (
-                              <td>{bin.Range ?? 'N/A'}</td>
-                            )}
-                            <td>{bin.Bad ?? bin['Bad'] ?? 0}</td>
-                            <td>{bin.Good ?? bin['Good'] ?? 0}</td>
-                            <td>{bin.Total ?? bin['Total'] ?? 0}</td>
-                            <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4) ?? '0.0000'}</td>
-                            <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : '0.00'}</td>
-                          </tr>
-                        ))}
+                                    ? '#0d1117'
+                                    : 'transparent',
+                              }}
+                            >
+                              <td>{bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1']}</td>
+                              {isContinuous ? (
+                                <>
+                                  <td>{bin.Min ?? 'N/A'}</td>
+                                  <td>{bin.Max ?? 'N/A'}</td>
+                                </>
+                              ) : (
+                                <td>
+                                  <span
+                                    title={rangeValue}
+                                    style={{ cursor: isTruncated ? 'pointer' : 'default' }}
+                                    onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
+                                  >
+                                    {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
+                                  </span>
+                                </td>
+                              )}
+                              <td>{bin.Bad ?? bin['Bad'] ?? 0}</td>
+                              <td>{bin.Good ?? bin['Good'] ?? 0}</td>
+                              <td>{bin.Total ?? bin['Total'] ?? 0}</td>
+                              <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4) ?? '0.0000'}</td>
+                              <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : '0.00'}</td>
+                            </tr>
+                          );
+                        })}
                     </tbody>
                   </table>
                 </div>
@@ -656,6 +732,7 @@ const SelectedColumnsPage = () => {
               <WoeIvResults
                 woeIvResults={{ [activeColumn]: woeIvResults[activeColumn] }}
                 formatToFourDecimals={formatToFourDecimals}
+                discreteColumns={discreteColumns}
               />
             </div>
           )}
@@ -672,16 +749,20 @@ const SelectedColumnsPage = () => {
               </button>
             </div>
             <div className="iv-bulk-actions">
-              <button onClick={() => {
-                setSelectedForModeling(filteredIVResults.map((v) => v.column));
-                showNotification('All visible variables selected.');
-              }}>
+              <button
+                onClick={() => {
+                  setSelectedForModeling(filteredIVResults.map((v) => v.column));
+                  showNotification('All visible variables selected.');
+                }}
+              >
                 Select All
               </button>
-              <button onClick={() => {
-                setSelectedForModeling([]);
-                showNotification('All variables deselected.');
-              }}>
+              <button
+                onClick={() => {
+                  setSelectedForModeling([]);
+                  showNotification('All variables deselected.');
+                }}
+              >
                 Deselect All
               </button>
             </div>
@@ -716,11 +797,21 @@ const SelectedColumnsPage = () => {
             </button>
             {showLegend && (
               <ul>
-                <li><span style={{ color: '#ff4d4f' }}>&lt; 0.02: Useless</span></li>
-                <li><span style={{ color: '#fa8c16' }}>0.02 - 0.1: Weak</span></li>
-                <li><span style={{ color: '#d4af37' }}>0.1 - 0.3: Medium</span></li>
-                <li><span style={{ color: '#52c41a' }}>0.3 - 0.5: Strong</span></li>
-                <li><span style={{ color: '#1890ff' }}>&gt; 0.5: Suspicious (possibly overpredictive)</span></li>
+                <li>
+                  <span style={{ color: '#ff4d4f' }}>&lt; 0.02: Useless</span>
+                </li>
+                <li>
+                  <span style={{ color: '#fa8c16' }}>0.02 - 0.1: Weak</span>
+                </li>
+                <li>
+                  <span style={{ color: '#d4af37' }}>0.1 - 0.3: Medium</span>
+                </li>
+                <li>
+                  <span style={{ color: '#52c41a' }}>0.3 - 0.5: Strong</span>
+                </li>
+                <li>
+                  <span style={{ color: '#1890ff' }}>&gt; 0.5: Suspicious (possibly overpredictive)</span>
+                </li>
               </ul>
             )}
           </div>
@@ -737,7 +828,7 @@ const SelectedColumnsPage = () => {
           </div>
           <button
             className="proceed-btn"
-            onClick={() => console.log("Proceed with:", selectedForModeling)}
+            onClick={() => console.log('Proceed with:', selectedForModeling)}
             disabled={selectedForModeling.length === 0}
           >
             Proceed with Selected
@@ -747,9 +838,7 @@ const SelectedColumnsPage = () => {
 
       <div className="navigation-buttons">
         {currentStep > 1 && (
-          <button onClick={() => setCurrentStep((prev) => prev - 1)}>
-            Back
-          </button>
+          <button onClick={() => setCurrentStep((prev) => prev - 1)}>Back</button>
         )}
         {currentStep < 4 && (
           <button disabled={!canGoNext()} onClick={() => setCurrentStep((prev) => prev + 1)}>
@@ -759,7 +848,9 @@ const SelectedColumnsPage = () => {
       </div>
 
       <div className="save-button">
-        <button className="file-upload-label" onClick={handleSave}>Save</button>
+        <button className="file-upload-label" onClick={handleSave}>
+          Save
+        </button>
       </div>
     </div>
   );
