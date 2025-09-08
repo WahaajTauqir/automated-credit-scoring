@@ -20,6 +20,11 @@ import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
 from db import get_db_connection, init_db, save_record_db, upsert_single_record_db, get_records_db, get_latest_record_dataset_path_db, get_record_db, delete_record_db, save_finebin_details_db, get_finebin_details_db
+import traceback
+import logging
+
+# configure basic logging for debug
+logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173"])
@@ -526,8 +531,11 @@ def univariate_analysis():
 
 # ----------- WOE/IV Calculation -----------
 def calculate_woe_iv(df, variable, target, bin_merges=None):
+    app.logger.debug(f"calculate_woe_iv called for {variable}, bin_merges: {bin_merges is not None}")
+    
     # Apply fine bin merges if available
     if bin_merges:
+        app.logger.debug(f"Applying fine bin merges for {variable}: {list(bin_merges.keys())}")
         def map_bin(val):
             for label, bins in bin_merges.items():
                 if val in bins:
@@ -536,9 +544,26 @@ def calculate_woe_iv(df, variable, target, bin_merges=None):
         df["final_bin"] = df[f"{variable}_binned"].apply(map_bin)
     else:
         if f"{variable}_binned" in df.columns:
+            app.logger.debug(f"Using existing {variable}_binned column")
             df["final_bin"] = df[f"{variable}_binned"]
         else:
-            df["final_bin"] = pd.qcut(df[variable], q=10, duplicates="drop")
+            app.logger.debug(f"No {variable}_binned column found, creating coarse bins")
+            # If no binned column exists, create coarse bins first
+            var_series = df[variable]
+            if pd.api.types.is_numeric_dtype(var_series):
+                if var_series.nunique(dropna=True) <= 20:
+                    # Discrete numeric
+                    _, df[f"{variable}_binned"], _ = coarse_bin_discrete(df.copy(), variable, target)
+                else:
+                    # Continuous numeric
+                    _, df[f"{variable}_binned"] = coarse_bin_continuous(df.copy(), variable, target)
+            else:
+                # Non-numeric => discrete
+                _, df[f"{variable}_binned"], _ = coarse_bin_discrete(df.copy(), variable, target)
+            df["final_bin"] = df[f"{variable}_binned"]
+    
+    unique_final_bins = df["final_bin"].nunique()
+    app.logger.debug(f"{variable} final_bin has {unique_final_bins} unique values")
     
     # Determine if variable is continuous or discrete
     is_continuous = pd.api.types.is_numeric_dtype(df[variable]) and df[variable].nunique(dropna=True) > 20
@@ -607,20 +632,60 @@ def woe_iv_api():
         df = pd.read_csv("uploaded.csv")
         df[target] = df[target].fillna(0).astype(int)
         results = {}
+        
+        # First, check if we have a record with existing univariate results
+        existing_binned_columns = {}
+        if record_id:
+            try:
+                record_data = get_record_db(record_id)
+                if record_data and record_data.get('univariate_results'):
+                    univariate_results = json.loads(record_data['univariate_results'])
+                    app.logger.debug(f"Found existing univariate results for record {record_id}")
+                    
+                    # Re-create the binned columns from univariate results
+                    for var in variables:
+                        if var in univariate_results:
+                            var_data = univariate_results[var]
+                            var_type = var_data.get('type', 'unknown')
+                            app.logger.debug(f"Re-creating {var} binning from saved results (type: {var_type})")
+                            
+                            if var_type == 'discrete':
+                                _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
+                            elif var_type == 'continuous':
+                                _, df[f"{var}_binned"] = coarse_bin_continuous(df.copy(), var, target)
+                            existing_binned_columns[var] = True
+            except Exception as e:
+                app.logger.debug(f"Could not load existing univariate results: {e}")
+        
         for var in variables:
-            # 1) Ensure a binned column exists for this var
-            # Infer type: treat as discrete if non-object numeric with small cardinality OR object/categorical
-            var_series = df[var]
-            if pd.api.types.is_numeric_dtype(var_series):
-                # numeric but could be discrete if few unique levels
-                if var_series.nunique(dropna=True) <= 20:
-                    _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
+            app.logger.debug(f"Processing WOE/IV for variable: {var}")
+            
+            # Only create binned column if we don't already have it
+            if var not in existing_binned_columns:
+                var_series = df[var]
+                
+                # Better logic for determining discrete vs continuous
+                # Check if variable name suggests it's an ID or categorical
+                is_likely_id = any(keyword in var.lower() for keyword in ['id', 'key', 'code', 'no', 'num'])
+                unique_count = var_series.nunique(dropna=True)
+                
+                if pd.api.types.is_numeric_dtype(var_series):
+                    # For numeric data, consider multiple factors
+                    if is_likely_id or unique_count <= 50:  # Increased threshold for IDs
+                        app.logger.debug(f"{var} treated as discrete (nunique={unique_count}, is_likely_id={is_likely_id})")
+                        _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
+                    else:
+                        app.logger.debug(f"{var} treated as continuous (nunique={unique_count})")
+                        _, df[f"{var}_binned"] = coarse_bin_continuous(df.copy(), var, target)
                 else:
-                    _, df[f"{var}_binned"] = coarse_bin_continuous(df.copy(), var, target)
-            else:
-                # non-numeric => discrete
-                _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
-            # 2) Load saved merges (if any) for this var
+                    app.logger.debug(f"{var} treated as discrete (non-numeric)")
+                    _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
+            
+            # Check how many bins were created
+            unique_bins = df[f"{var}_binned"].nunique()
+            app.logger.debug(f"{var} coarse binning has {unique_bins} bins")
+            
+            # Load saved merges (if any) for this var
             merges = None
             if record_id:
                 finebin_details = get_finebin_details_db(record_id, var)
@@ -632,8 +697,11 @@ def woe_iv_api():
                             merges[str(row["group_id"])] = bins
                         except Exception:
                             pass
-            # 3) Compute WOE/IV on the (possibly) merged final bins
+                    app.logger.debug(f"{var} has {len(merges)} fine bin merges")
+            
+            # Compute WOE/IV on the (possibly) merged final bins
             iv, stats = calculate_woe_iv(df.copy(), var, target, bin_merges=merges)
+            app.logger.debug(f"{var} WOE/IV calculation produced {len(stats)} bins (IV={iv})")
             results[var] = {"iv": iv, "stats": stats}
         # 4) Save WOE/IV results to the records table
         if record_id:
@@ -790,7 +858,7 @@ def logistic_regression_analysis():
         for var in selected_variables:
             # Robust WOE mapping + diagnostics
             if var in woe_transformed_data:
-                print(f"LOGISTIC DEBUG: woe_transformed_data for '{var}':", woe_transformed_data.get(var))
+                # print(f"LOGISTIC DEBUG: woe_transformed_data for '{var}':", woe_transformed_data.get(var))
                 # initialize column as NaN so we can detect unmapped rows
                 woe_df[f'{var}_WOE'] = np.nan
                 # woe_transformed_data[var] may be either:
@@ -886,12 +954,12 @@ def logistic_regression_analysis():
             dup_cols = X.columns[dup_mask].tolist()
             sample = X.head(5).to_dict(orient='records')
             y_counts = y.value_counts().to_dict()
-            print("LOGISTIC DEBUG: X shape:", X.shape)
-            print("LOGISTIC DEBUG: feature_cols:", feature_cols)
-            print("LOGISTIC DEBUG: zero-variance cols:", zero_var_cols)
-            print("LOGISTIC DEBUG: duplicated cols:", dup_cols)
-            print("LOGISTIC DEBUG: variances (sample):", {k: variances[k] for k in list(variances)[:10]})
-            print("LOGISTIC DEBUG: y distribution:", y_counts)
+            # print("LOGISTIC DEBUG: X shape:", X.shape)
+            # print("LOGISTIC DEBUG: feature_cols:", feature_cols)
+            # print("LOGISTIC DEBUG: zero-variance cols:", zero_var_cols)
+            # print("LOGISTIC DEBUG: duplicated cols:", dup_cols)
+            # print("LOGISTIC DEBUG: variances (sample):", {k: variances[k] for k in list(variances)[:10]})
+            # print("LOGISTIC DEBUG: y distribution:", y_counts)
             print("LOGISTIC DEBUG: X sample rows:", sample)
         except Exception as _diag:
             print("LOGISTIC DEBUG: diagnostics failed:", str(_diag))
@@ -1004,8 +1072,49 @@ def logistic_regression_analysis():
                     'significance': 'Highly Significant' if p_val < 0.01 else 'Significant' if p_val < 0.05 else 'Not Significant'
                 })
         
-        # ROC Curve data for plotting
-        roc_data = [{'fpr': float(f), 'tpr': float(t)} for f, t in zip(fpr, tpr)]
+        # ROC Curve data for plotting (include thresholds)
+        # Helper to sanitize numeric values for JSON (replace inf/nan with None)
+        def _sanitize_number(x):
+            try:
+                v = float(x)
+                return v if np.isfinite(v) else None
+            except Exception:
+                return None
+
+        # Debug raw thresholds (some sklearn versions include 'inf')
+        try:
+            raw_thresholds = list(thresholds)
+            print('LOGISTIC DEBUG: raw thresholds sample (first 10):', raw_thresholds[:10])
+            nonfinite_idxs = [i for i, t in enumerate(raw_thresholds) if not np.isfinite(t)]
+            if nonfinite_idxs:
+                print('LOGISTIC DEBUG: found non-finite thresholds at indices:', nonfinite_idxs,
+                      'values:', [raw_thresholds[i] for i in nonfinite_idxs])
+        except Exception as _th_err:
+            print('LOGISTIC DEBUG: could not inspect thresholds:', str(_th_err))
+
+        roc_data = [{'fpr': _sanitize_number(f), 'tpr': _sanitize_number(t), 'threshold': _sanitize_number(th)}
+                    for f, t, th in zip(fpr, tpr, thresholds)]
+
+        # KS statistic: max difference between TPR and FPR across thresholds
+        try:
+            diffs = [abs(t - f) for f, t in zip(fpr, tpr)]
+            ks_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
+            ks_stat_raw = diffs[ks_idx] if len(diffs) > 0 else 0.0
+            ks_threshold_raw = thresholds[ks_idx] if len(thresholds) > 0 else 0.0
+            # sanitize
+            ks_stat = float(ks_stat_raw) if np.isfinite(ks_stat_raw) else 0.0
+            ks_threshold = float(ks_threshold_raw) if np.isfinite(ks_threshold_raw) else None
+            ks_curve = []
+            for f, t, th in zip(fpr, tpr, thresholds):
+                ks_curve.append({'threshold': _sanitize_number(th), 'tpr': _sanitize_number(t), 'fpr': _sanitize_number(f), 'diff': _sanitize_number(abs(t - f))})
+
+            if ks_threshold is None:
+                print('LOGISTIC DEBUG: KS threshold was non-finite; sanitized to None')
+        except Exception as _ks_err:
+            print('LOGISTIC DEBUG: KS computation failed:', str(_ks_err))
+            ks_stat = 0.0
+            ks_threshold = None
+            ks_curve = []
         
         # Model summary statistics
         model_stats = {
@@ -1016,7 +1125,19 @@ def logistic_regression_analysis():
             'n_observations': int(result.nobs)
         }
         
-        return jsonify({
+        # Final sanitization and debug logging before JSON response
+        try:
+            # inspect roc_data and ks_curve for non-finite or None values
+            print('LOGISTIC DEBUG: roc_data sample (first 8):', roc_data[:8])
+            if any(item.get('threshold') is None for item in roc_data):
+                print('LOGISTIC DEBUG: some roc_data.threshold entries are None')
+            print('LOGISTIC DEBUG: ks_curve sample (first 8):', ks_curve[:8])
+            if any(item.get('diff') is None for item in ks_curve):
+                print('LOGISTIC DEBUG: some ks_curve.diff entries are None')
+        except Exception as _log_err:
+            print('LOGISTIC DEBUG: pre-return inspection failed:', str(_log_err))
+
+        resp = {
             'success': True,
             'coefficients': coefficients,
             'p_values': p_values,
@@ -1026,13 +1147,19 @@ def logistic_regression_analysis():
             'roc_data': roc_data,
             'model_stats': model_stats,
             # Confusion matrix and classification metrics
-            'confusion_matrix': cm.tolist() if isinstance(cm, (list, np.ndarray)) else None,
+            'confusion_matrix': (cm.tolist() if isinstance(cm, (list, np.ndarray)) else None),
             'confusion_matrix_image': cm_image_data,
             'accuracy': float(accuracy),
             'precision': float(precision),
             'recall': float(recall),
-            'f1': float(f1)
-        })
+            'f1': float(f1),
+            # KS statistic and curve (sanitized)
+            'ks_stat': float(ks_stat) if np.isfinite(ks_stat) else None,
+            'ks_threshold': _sanitize_number(ks_threshold),
+            'ks_curve': ks_curve
+        }
+
+        return jsonify(resp)
         
     except Exception as e:
         return jsonify({"error": f"Failed to perform logistic regression: {str(e)}"}), 500
@@ -1078,6 +1205,338 @@ def get_finebin_details(record_id, column_name):
         return jsonify(finebin_details)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ----------- Debug Binning -----------
+@app.route('/api/debug-binning/<string:variable>', methods=['GET'])
+def debug_binning(variable):
+    """
+    Debug endpoint to see what's happening with binning for a specific variable.
+    """
+    try:
+        df = pd.read_csv("uploaded.csv")
+        
+        if variable not in df.columns:
+            return jsonify({"error": f"Variable {variable} not found"}), 400
+            
+        var_series = df[variable]
+        result = {
+            "variable": variable,
+            "dtype": str(var_series.dtype),
+            "nunique": var_series.nunique(dropna=True),
+            "sample_values": var_series.dropna().head(10).tolist(),
+            "is_numeric": pd.api.types.is_numeric_dtype(var_series)
+        }
+        
+        # Check what our logic would classify it as
+        is_likely_id = any(keyword in variable.lower() for keyword in ['id', 'key', 'code', 'no', 'num'])
+        unique_count = var_series.nunique(dropna=True)
+        
+        if pd.api.types.is_numeric_dtype(var_series):
+            if is_likely_id or unique_count <= 50:
+                result["predicted_type"] = "discrete"
+            else:
+                result["predicted_type"] = "continuous"
+        else:
+            result["predicted_type"] = "discrete"
+            
+        result["is_likely_id"] = is_likely_id
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ----------- Generate Score Card -----------
+@app.route('/api/generate-scorecard', methods=['POST'])
+def generate_scorecard():
+    """
+    Generates a score card using the formula from the image:
+    Score = [β * WOE + α/N] * Factor + Offset/N
+    
+    Where:
+    - β: Logistic Regression coefficient of the variable
+    - α: Logistic Regression Intercept
+    - N: Number of Variables in the Model
+    - Factor: Points to double the odds / Ln(2) = 28.85 (for 20 points)
+    - Offset: Score - { Factor * ln(Odds) } = 28.85 (for base score 600, odds 50:1)
+    """
+    try:
+        data = request.get_json()
+        selected_variables = data.get('selected_variables', [])
+        target = data.get('target')
+        woe_transformed_data = data.get('woe_transformed_data', {})
+        
+        if not selected_variables or not target or not woe_transformed_data:
+            return jsonify({"error": "Missing required data: selected_variables, target, or woe_transformed_data"}), 400
+
+        # Load the dataset
+        df = pd.read_csv("uploaded.csv")
+        app.logger.debug("Loaded dataset 'uploaded.csv' with columns: %s", df.columns.tolist())
+
+        # Prepare WOE-transformed data for modeling
+        modeling_data = {}
+        app.logger.debug("Incoming WOE payload keys: %s", list(woe_transformed_data.keys()))
+        for var in selected_variables:
+            app.logger.debug("Processing variable for WOE mapping: %s", var)
+            if var not in woe_transformed_data:
+                app.logger.debug("Variable '%s' missing in woe_transformed_data", var)
+                continue
+
+            woe_data = woe_transformed_data[var]
+            ranges_list = None
+
+            # Support both 'woe_ranges' and 'stats' structures
+            if isinstance(woe_data, dict) and 'woe_ranges' in woe_data and isinstance(woe_data['woe_ranges'], list):
+                ranges_list = woe_data['woe_ranges']
+                app.logger.debug("Found 'woe_ranges' for %s with %d bins", var, len(ranges_list))
+            elif isinstance(woe_data, dict) and 'stats' in woe_data and isinstance(woe_data['stats'], list):
+                # convert stats entries to uniform ranges_list
+                stats = woe_data['stats']
+                ranges_list = []
+                for row in stats:
+                    ranges_list.append({
+                        'range': row.get('Range') or row.get('Bin') or str(row),
+                        'woe': float(row.get('WOE') or 0)
+                    })
+                app.logger.debug("Converted 'stats' to ranges_list for %s (%d bins)", var, len(ranges_list))
+            else:
+                app.logger.debug("WOE data for %s has unexpected shape or missing keys: %s", var, type(woe_data))
+                continue
+
+            # Build mapping
+            woe_mapping = {}
+            for range_info in ranges_list:
+                try:
+                    bin_range = range_info.get('range') if isinstance(range_info, dict) else None
+                    woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
+                    app.logger.debug("Var %s - bin_range: %s -> woe: %s", var, str(bin_range), str(woe_value))
+
+                    if bin_range is None:
+                        continue
+
+                    # Missing / NaN handling
+                    if isinstance(bin_range, str) and ('Missing' in bin_range or 'NaN' in bin_range):
+                        for idx in df[df[var].isna()].index:
+                            woe_mapping[idx] = woe_value
+                        continue
+
+                    # Numeric range parsing
+                    if isinstance(bin_range, str) and any(ch in bin_range for ch in '(),[]'):
+                        range_str = bin_range.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
+                        parts = [p.strip() for p in range_str.split(',') if p.strip() != '']
+                        if len(parts) == 2:
+                            try:
+                                lower = float(parts[0]) if parts[0].lower() not in ['-inf', 'inf'] else (float('-inf') if parts[0].lower() == '-inf' else float('inf'))
+                                upper = float(parts[1]) if parts[1].lower() not in ['-inf', 'inf'] else (float('-inf') if parts[1].lower() == '-inf' else float('inf'))
+                                if var not in df.columns:
+                                    app.logger.debug("Column '%s' not in dataframe when applying numeric range %s", var, bin_range)
+                                    continue
+                                if lower == float('-inf'):
+                                    mask = df[var] <= upper
+                                elif upper == float('inf'):
+                                    mask = df[var] > lower
+                                else:
+                                    mask = (df[var] > lower) & (df[var] <= upper)
+                                for idx in df[mask].index:
+                                    woe_mapping[idx] = woe_value
+                                continue
+                            except Exception as e:
+                                app.logger.debug("Numeric range parsing failed for %s range=%s: %s", var, bin_range, str(e))
+                                app.logger.debug(traceback.format_exc())
+
+                    # Hyphen-separated ranges like '1 - 2' or '10 - 11'
+                    hyphen_match = None
+                    try:
+                        hyphen_match = re.match(r"^\s*-?\d+(?:\.\d+)?\s*-\s*-?\d+(?:\.\d+)?\s*$", str(bin_range))
+                    except Exception:
+                        hyphen_match = None
+                    if isinstance(bin_range, str) and hyphen_match:
+                        try:
+                            parts = [p.strip() for p in bin_range.split('-')]
+                            if len(parts) >= 2:
+                                lower = float(parts[0])
+                                upper = float(parts[1])
+                                if var not in df.columns:
+                                    app.logger.debug("Column '%s' not in dataframe when applying hyphen range %s", var, bin_range)
+                                else:
+                                    mask = (df[var].astype(float) >= lower) & (df[var].astype(float) <= upper)
+                                    for idx in df[mask].index:
+                                        woe_mapping[idx] = woe_value
+                                    continue
+                        except Exception as e:
+                            app.logger.debug("Hyphen range parsing failed for %s range=%s: %s", var, bin_range, str(e))
+                            app.logger.debug(traceback.format_exc())
+
+                    # Categorical matching fallback
+                    if var in df.columns and isinstance(bin_range, str):
+                        cat_vals = [v.strip() for v in bin_range.split(',')]
+                        for cat_val in cat_vals:
+                            try:
+                                mask = df[var].astype(str) == str(cat_val)
+                                for idx in df[mask].index:
+                                    woe_mapping[idx] = woe_value
+                            except Exception:
+                                app.logger.debug("Categorical matching failed for %s value=%s", var, cat_val)
+                                continue
+                except Exception as e:
+                    app.logger.error("Error processing range_info for var %s: %s", var, str(e))
+                    app.logger.debug(traceback.format_exc())
+
+            if woe_mapping:
+                app.logger.debug("Mapped WOE rows for '%s': %d of %d", var, len(set(woe_mapping.keys())), len(df))
+                woe_column = [woe_mapping.get(i, 0) for i in range(len(df))]
+                modeling_data[var] = woe_column
+            else:
+                app.logger.debug("No WOE mapping produced for variable '%s' (zero mapped rows)", var)
+        
+        # Create DataFrame with WOE-transformed variables
+        model_df = pd.DataFrame(modeling_data)
+        app.logger.debug("Modeling data keys (WOE columns created): %s", list(modeling_data.keys()))
+        app.logger.debug("Model DF columns before adding target: %s", list(model_df.columns))
+        # Attach target
+        if target not in df.columns:
+            app.logger.error("Target column '%s' not present in uploaded dataset columns: %s", target, df.columns.tolist())
+            return jsonify({"error": f"Target column '{target}' not found in dataset."}), 400
+        model_df[target] = df[target]
+        app.logger.debug("Model DF columns after adding target: %s", list(model_df.columns))
+        app.logger.debug("Model DF shape: %s", model_df.shape)
+
+        # Check for any requested selected_variables that are missing from model_df
+        missing_vars = [v for v in selected_variables if v not in model_df.columns]
+        if missing_vars:
+            app.logger.error("Missing variables in model_df: %s", missing_vars)
+            app.logger.debug("Selected variables: %s", selected_variables)
+            app.logger.debug("Available model_df columns: %s", list(model_df.columns))
+            # provide a helpful error message to the client including what is available
+            return jsonify({
+                "error": f"Missing variables in WOE-transformed data: {missing_vars}",
+                "debug": {
+                    "selected_variables": selected_variables,
+                    "available_columns": list(model_df.columns)
+                }
+            }), 400
+        
+        # Remove rows with missing target values
+        model_df = model_df.dropna(subset=[target])
+        
+        # Prepare features and target
+        X = model_df[selected_variables]
+        y = model_df[target]
+        
+        # Add constant for intercept
+        X_with_const = sm.add_constant(X)
+        
+        # Fit logistic regression using statsmodels for detailed statistics
+        logit_model = sm.Logit(y, X_with_const)
+        result = logit_model.fit(disp=0)
+        
+        # Extract coefficients
+        coefficients = {}
+        intercept = result.params['const']
+        for var in selected_variables:
+            coefficients[var] = result.params[var]
+        
+        # Score card parameters based on the formula
+        N = len(selected_variables)  # Number of variables in the model
+        factor = 20 / np.log(2)  # Factor = 28.85 (points to double odds / ln(2))
+        base_odds = 50  # Good/Bad odds of 50:1 for base score of 600
+        base_score = 600
+        offset = base_score - factor * np.log(base_odds)  # Offset calculation
+        
+        # Generate score card for each variable and bin
+        scorecard_bins = []
+        min_scores = []
+        max_scores = []
+        
+        for var in selected_variables:
+            app.logger.debug("Building scorecard for var: %s", var)
+            if var not in coefficients:
+                app.logger.warning("No coefficient available for %s, skipping", var)
+                continue
+            beta = coefficients[var]
+
+            # support both 'woe_ranges' and 'stats'
+            ranges_source = None
+            if var in woe_transformed_data and isinstance(woe_transformed_data[var], dict):
+                if 'woe_ranges' in woe_transformed_data[var]:
+                    ranges_source = woe_transformed_data[var]['woe_ranges']
+                    app.logger.debug("Using 'woe_ranges' for var %s: %d bins", var, len(ranges_source))
+                elif 'stats' in woe_transformed_data[var]:
+                    ranges_source = [{
+                        'range': r.get('Range') or r.get('Bin') or str(r),
+                        'woe': float(r.get('WOE') or 0)
+                    } for r in woe_transformed_data[var]['stats']]
+                    app.logger.debug("Using 'stats' for var %s: %d bins", var, len(ranges_source))
+
+            if not ranges_source:
+                app.logger.debug("No suitable ranges found for var %s; skipping", var)
+                continue
+
+            app.logger.debug("Processing %d ranges for var %s", len(ranges_source), var)
+            
+            # Process each range only once to avoid duplicates
+            processed_ranges = set()
+            
+            for i, range_info in enumerate(ranges_source):
+                try:
+                    woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
+                    bin_range = range_info.get('range') if isinstance(range_info, dict) else str(range_info)
+                    
+                    # Create a unique identifier for this range to avoid duplicates
+                    range_key = f"{var}_{bin_range}_{woe_value}"
+                    if range_key in processed_ranges:
+                        app.logger.debug("Skipping duplicate range for var %s: %s", var, bin_range)
+                        continue
+                    processed_ranges.add(range_key)
+                    
+                    score = (beta * woe_value + intercept / N) * factor + offset / N
+
+                    scorecard_bins.append({
+                        'variable': var,
+                        'bin_range': bin_range,
+                        'woe': woe_value,
+                        'coefficient': beta,
+                        'score': score
+                    })
+                    min_scores.append(score)
+                    max_scores.append(score)
+                    app.logger.debug("Added scorecard bin %d for var %s: range=%s, woe=%f, score=%f", 
+                                   i+1, var, bin_range, woe_value, score)
+                except Exception as e:
+                    app.logger.error("Failed to compute score for var %s range %s: %s", var, range_info, str(e))
+                    app.logger.debug(traceback.format_exc())
+        
+        # Calculate score range
+        min_total_score = sum(min_scores) if min_scores else 0
+        max_total_score = sum(max_scores) if max_scores else 0
+        
+        app.logger.debug("Generated scorecard with %d bins total", len(scorecard_bins))
+        for var in selected_variables:
+            var_bins = [b for b in scorecard_bins if b['variable'] == var]
+            app.logger.debug("Variable %s has %d bins in scorecard", var, len(var_bins))
+        
+        return jsonify({
+            "success": True,
+            "scorecard_bins": scorecard_bins,
+            "score_parameters": {
+                "factor": factor,
+                "offset": offset,
+                "base_score": base_score,
+                "base_odds": base_odds,
+                "intercept": intercept,
+                "n_variables": N,
+                "min_score": round(min_total_score),
+                "max_score": round(max_total_score)
+            },
+            "model_summary": {
+                "coefficients": coefficients,
+                "intercept": intercept,
+                "n_observations": len(model_df),
+                "n_variables": N
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate score card: {str(e)}"}), 500
 
 if __name__ == '__main__':
     init_db()

@@ -130,8 +130,9 @@
 }
 
 .variable-item.selected {
-  background: #238636;
-  border-color: #2ea043;
+  /* keep same appearance as unselected items so no item shows as highlighted */
+  background: var(--card-bg, #161b22);
+  border-color: var(--border-color, #30363d);
 }
 
 .variable-name {
@@ -208,13 +209,11 @@
 }
 
 .coefficients-table,
-.pvalues-table,
 .vif-table {
   width: 100%;
 }
 
 .coefficients-table h4,
-.pvalues-table h4,
 .vif-table h4 {
   margin: 0 0 16px 0;
   color: var(--fg-color, #f0f6fc);
@@ -222,7 +221,6 @@
 }
 
 .coefficients-table table,
-.pvalues-table table,
 .vif-table table {
   width: 100%;
   border-collapse: collapse;
@@ -232,10 +230,8 @@
 }
 
 .coefficients-table th,
-.pvalues-table th,
 .vif-table th,
 .coefficients-table td,
-.pvalues-table td,
 .vif-table td {
   padding: 12px;
   text-align: left;
@@ -243,7 +239,6 @@
 }
 
 .coefficients-table th,
-.pvalues-table th,
 .vif-table th {
   background: var(--card-bg, #0d1117);
   color: var(--fg-color, #f0f6fc);
@@ -252,7 +247,6 @@
 }
 
 .coefficients-table td,
-.pvalues-table td,
 .vif-table td {
   color: var(--fg-color-muted, #8b949e);
   font-size: 13px;
@@ -327,6 +321,22 @@
   font-size: 16px;
 }
 
+/* KS chart: center the chart and make responsive */
+.ks-chart-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.ks-chart-container .roc-svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -354,6 +364,8 @@
   color: var(--fg-color, #f0f6fc);
   font-weight: 500;
 }
+
+/* (generate button now reuses .run-regression-btn for consistent sizing) */
 
 /* Responsive design */
 @media (max-width: 768px) {

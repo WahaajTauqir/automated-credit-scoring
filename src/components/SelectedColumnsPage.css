@@ -359,3 +359,147 @@
     --muted-color: #8b949e;
   }
 }
+
+/* Score Card Styles */
+.scorecard-section {
+  background: var(--card-bg, #161b22);
+  border: 1px solid var(--border-color, #30363d);
+  border-radius: 8px;
+  padding: 20px;
+  color: var(--fg-color, #f0f6fc);
+}
+
+.scorecard-section h3 {
+  margin: 0 0 20px 0;
+  color: var(--fg-color, #f0f6fc);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.scorecard-controls {
+  margin-bottom: 20px;
+}
+
+/* Score card controls reuse .run-regression-btn for consistent size */
+
+.scorecard-results {
+  margin-top: 20px;
+}
+
+.scorecard-results h4 {
+  margin: 0 0 16px 0;
+  color: var(--fg-color, #f0f6fc);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.scorecard-summary {
+  background: var(--neutral-bg, #0d1117);
+  border: 1px solid var(--border-color, #30363d);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.scorecard-summary p {
+  margin: 8px 0;
+  color: var(--fg-color, #f0f6fc);
+  font-size: 14px;
+}
+
+.scorecard-summary p:first-child {
+  margin-top: 0;
+}
+
+.scorecard-summary p:last-child {
+  margin-bottom: 0;
+}
+
+.scorecard-table-container {
+  overflow-x: auto;
+  margin-bottom: 20px;
+}
+
+.scorecard-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--card-bg, #0d1117);
+  border: 1px solid var(--border-color, #21262d);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.scorecard-table th,
+.scorecard-table td {
+  padding: 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color, #21262d);
+  color: var(--fg-color, #f0f6fc);
+}
+
+.scorecard-table th:first-child,
+.scorecard-table td:first-child {
+  width: 64px;
+  text-align: center;
+}
+
+.scorecard-table th {
+  background: var(--card-bg, #161b22);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.scorecard-table td {
+  font-size: 13px;
+}
+
+.scorecard-table tr:last-child td {
+  border-bottom: none;
+}
+
+.scorecard-table tr:nth-child(even) {
+  background: rgba(240, 246, 252, 0.03);
+}
+
+.scorecard-table tr.variable-separator td {
+  background: transparent;
+  padding: 6px 0;
+  border-bottom: 2px solid var(--border-color, #30363d);
+}
+
+.score-parameters {
+  background: var(--card-bg, #0d1117);
+  border: 1px solid var(--border-color, #21262d);
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.score-parameters h5 {
+  margin: 0 0 12px 0;
+  color: var(--fg-color, #f0f6fc);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.parameters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.parameter-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+}
+
+.parameter-item label {
+  font-weight: 500;
+  color: var(--fg-color, #f0f6fc);
+}
+
+.parameter-item span {
+  font-weight: 600;
+  color: #58a6ff;
+}

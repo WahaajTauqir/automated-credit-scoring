@@ -37,6 +37,8 @@ const SelectedColumnsPage = () => {
   const [showLegend, setShowLegend] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
   const [expandedRanges, setExpandedRanges] = useState<Record<string, boolean>>({});
+  const [scoreCardData, setScoreCardData] = useState<any>(null);
+  const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
 
   // Initialize component state from navigation state
   useEffect(() => {
@@ -98,6 +100,58 @@ const SelectedColumnsPage = () => {
       ...prev,
       [key]: !prev[key],
     }));
+  };
+
+  const generateScoreCard = async () => {
+    setGeneratingScoreCard(true);
+    try {
+      const response = await fetch('http://localhost:5000/api/generate-scorecard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          selected_variables: selectedForModeling,
+          target: targetVariable,
+          woe_transformed_data: woeIvResults
+        })
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        setScoreCardData(data);
+        
+        // Validate the number of bins
+        if (data.scorecard_bins) {
+          const totalBins = data.scorecard_bins.length;
+          const variableCounts = selectedForModeling.map(variable => {
+            const variableBins = data.scorecard_bins.filter((bin: any) => bin.variable === variable);
+            return { variable, count: variableBins.length };
+          });
+          
+          console.log(`Scorecard generated with ${totalBins} total bins:`);
+          variableCounts.forEach(({ variable, count }) => {
+            console.log(`  ${variable}: ${count} bins`);
+          });
+          
+          showNotification(`Score card generated with ${totalBins} bins across ${selectedForModeling.length} variables`);
+        } else {
+          showNotification('Score card generated successfully!');
+        }
+      } else {
+        alert(`Error generating score card: ${data.error}`);
+      }
+    } catch (error) {
+      alert(`Error generating score card: ${error}`);
+    } finally {
+      setGeneratingScoreCard(false);
+    }
+  };
+
+  const gotoScoreCardAndGenerate = () => {
+    setCurrentStep(6);
+    // slight delay to ensure UI switches before showing loading state
+    setTimeout(() => {
+      generateScoreCard();
+    }, 50);
   };
 
   // API calls
@@ -442,6 +496,8 @@ const SelectedColumnsPage = () => {
         return true;
       case 5:
         return selectedForModeling.length > 0;
+      case 6:
+        return selectedForModeling.length > 0;
       default:
         return false;
     }
@@ -464,6 +520,9 @@ const SelectedColumnsPage = () => {
     case 5:
       pageTitle = 'Logistic Regression Analysis';
       break;
+    case 6:
+      pageTitle = 'Score Card Generation';
+      break;
     default:
       pageTitle = 'Select a Column to View Results';
   }
@@ -478,6 +537,8 @@ const SelectedColumnsPage = () => {
         return true;
       case 4:
         return selectedForModeling.length > 0;
+      case 5:
+        return true; // Can proceed to Score Card
       default:
         return false;
     }
@@ -489,7 +550,7 @@ const SelectedColumnsPage = () => {
 
   useEffect(() => {
     const ensureWoeForAll = async () => {
-      if (currentStep !== 4 && currentStep !== 5) return;
+      if (currentStep !== 4 && currentStep !== 5 && currentStep !== 6) return;
       const cols: string[] = selectedColumns; // Use local selectedColumns
       const missing = cols.filter((c) => !woeIvResults[c]);
       if (missing.length === 0) return;
@@ -505,7 +566,7 @@ const SelectedColumnsPage = () => {
       <Navbar />
       <div className="page-container">
       <div className="progress-bar">
-        {['Coarse Binning', 'Fine Binning', 'WOE/IV Calculation', 'Important Column Selection', 'Logistic Regression'].map((step, index) => (
+        {['Coarse Binning', 'Fine Binning', 'WOE/IV Calculation', 'Important Column Selection', 'Logistic Regression', 'Score Card'].map((step, index) => (
           <div
             key={step}
             className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${
@@ -863,14 +924,125 @@ const SelectedColumnsPage = () => {
           onColumnSelect={(column) => setActiveColumn(column)}
           onToggleSelect={toggleSelectedForModeling}
           selectedColumn={activeColumn}
+          onGenerateScoreCard={generateScoreCard}
+          generatingScoreCard={generatingScoreCard}
+          onGotoScoreCard={gotoScoreCardAndGenerate}
         />
+      )}
+
+      {currentStep === 6 && (
+        <div className="scorecard-section">
+          <h3>Score Card</h3>
+          <div className="scorecard-controls">
+            <button 
+              className="run-regression-btn"
+              onClick={generateScoreCard}
+              disabled={generatingScoreCard || selectedForModeling.length === 0}
+            >
+              {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
+            </button>
+          </div>
+          
+          {scoreCardData && (
+            <div className="scorecard-results">
+              <h4>Score Card Results</h4>
+              {scoreCardData.scorecard_bins && (
+                <div className="scorecard-summary">
+                  <p><strong>Total Bins:</strong> {scoreCardData.scorecard_bins.length}</p>
+                  {selectedForModeling.map(variable => {
+                    const variableBins = scoreCardData.scorecard_bins.filter((bin: any) => bin.variable === variable);
+                    return (
+                      <p key={variable}><strong>{variable}:</strong> {variableBins.length} bins</p>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="scorecard-table-container">
+                <table className="scorecard-table">
+                  <thead>
+                    <tr>
+                      <th>Bin #</th>
+                      <th>Variable</th>
+                      <th>Bin Range</th>
+                      <th>WOE</th>
+                      <th>Coefficient (β)</th>
+                      <th>Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scoreCardData.scorecard_bins && (() => {
+                      // compute per-variable bin index mapping
+                      const grouped: Record<string, any[]> = {};
+                      scoreCardData.scorecard_bins.forEach((b: any) => {
+                        grouped[b.variable] = grouped[b.variable] || [];
+                        grouped[b.variable].push(b);
+                      });
+
+                      // render rows with bin number per variable
+                      const rows: any[] = [];
+                      Object.keys(grouped).forEach((variable, varIndex) => {
+                        const bins = grouped[variable];
+                        // insert a separator row between variable groups (not before first)
+                        if (varIndex > 0) {
+                          rows.push(
+                            <tr key={`sep-${variable}`} className="variable-separator">
+                              <td colSpan={6} />
+                            </tr>
+                          );
+                        }
+                        for (let i = 0; i < bins.length; i++) {
+                          const bin = bins[i];
+                          rows.push(
+                            <tr key={`${variable}-${i}-${String(bin.bin_range)}`}>
+                              <td>{i + 1}</td>
+                              <td>{bin.variable}</td>
+                              <td>{bin.bin_range}</td>
+                              <td>{formatToFourDecimals(bin.woe)}</td>
+                              <td>{formatToFourDecimals(bin.coefficient)}</td>
+                              <td>{Math.round(bin.score)}</td>
+                            </tr>
+                          );
+                        }
+                      });
+                      return rows;
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+              
+              {scoreCardData.score_parameters && (
+                <div className="score-parameters">
+                  <h5>Score Card Parameters</h5>
+                  <div className="parameters-grid">
+                    <div className="parameter-item">
+                      <label>Factor:</label>
+                      <span>{formatToFourDecimals(scoreCardData.score_parameters.factor)}</span>
+                    </div>
+                    <div className="parameter-item">
+                      <label>Offset:</label>
+                      <span>{formatToFourDecimals(scoreCardData.score_parameters.offset)}</span>
+                    </div>
+                    <div className="parameter-item">
+                      <label>Base Score (600 points):</label>
+                      <span>Good/Bad Odds 50:1</span>
+                    </div>
+                    <div className="parameter-item">
+                      <label>Score Range:</label>
+                      <span>{scoreCardData.score_parameters.min_score} - {scoreCardData.score_parameters.max_score}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       <div className="navigation-buttons">
         {currentStep > 1 && (
           <button onClick={() => setCurrentStep((prev) => prev - 1)}>Back</button>
         )}
-        {currentStep < 5 && (
+        {currentStep < 6 && (
           <button disabled={!canGoNext()} onClick={() => setCurrentStep((prev) => prev + 1)}>
             Next
           </button>

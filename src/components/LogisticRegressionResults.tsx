@@ -9,6 +9,9 @@ interface LogisticRegressionResultsProps {
   onColumnSelect: (column: string) => void;
   selectedColumn: string;
   onToggleSelect?: (column: string) => void;
+  onGenerateScoreCard?: () => void;
+  generatingScoreCard?: boolean;
+  onGotoScoreCard?: () => void;
 }
 
 interface ModelStats {
@@ -41,6 +44,13 @@ interface ROCPoint {
   tpr: number;
 }
 
+interface KSCurvePoint {
+  threshold: number;
+  tpr: number;
+  fpr: number;
+  diff: number;
+}
+
 interface LogisticResults {
   success: boolean;
   coefficients: Coefficient[];
@@ -56,6 +66,9 @@ interface LogisticResults {
   precision?: number;
   recall?: number;
   f1?: number;
+  ks_stat?: number;
+  ks_threshold?: number;
+  ks_curve?: KSCurvePoint[];
 }
 
 const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
@@ -64,14 +77,17 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   targetVariable,
   woeTransformedData,
   onColumnSelect,
-  selectedColumn
-  , onToggleSelect
+  selectedColumn,
+  onToggleSelect,
+  onGenerateScoreCard,
+  generatingScoreCard
+  , onGotoScoreCard
 }) => {
   const [results, setResults] = useState<LogisticResults | null>(null);
   const [loading, setLoading] = useState(false);
   const [showLegend, setShowLegend] = useState(false);
   const [confusionView, setConfusionView] = useState<'counts' | 'percent'>('counts');
-  const [activeTab, setActiveTab] = useState<'coefficients' | 'pvalues' | 'vif' | 'roc' | 'confusion'>('coefficients');
+  const [activeTab, setActiveTab] = useState<'coefficients' | 'vif' | 'roc' | 'confusion' | 'ks'>('coefficients');
 
   const runLogisticRegression = async () => {
     if (selectedVariables.length === 0) {
@@ -385,6 +401,22 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
           >
             {loading ? 'Running...' : 'Run Logistic Regression'}
           </button>
+          
+          {results && onGenerateScoreCard && (
+            <button 
+              className="run-regression-btn"
+              onClick={() => {
+                try {
+                  if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
+                } catch (e) {}
+                onGenerateScoreCard();
+              }}
+              disabled={generatingScoreCard || selectedVariables.length === 0}
+              style={{ marginTop: '10px' }}
+            >
+              {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
+            </button>
+          )}
         </div>
 
   {results && (
@@ -396,17 +428,12 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
               >
                 Coefficients
               </button>
-              <button 
-                className={`tab-btn ${activeTab === 'pvalues' ? 'active' : ''}`}
-                onClick={() => setActiveTab('pvalues')}
-              >
-                P-Values
-              </button>
+              {/* P-Values merged into Coefficients table */}
               <button 
                 className={`tab-btn ${activeTab === 'vif' ? 'active' : ''}`}
                 onClick={() => setActiveTab('vif')}
               >
-                VIF
+                Multicollinearity
               </button>
               <button 
                 className={`tab-btn ${activeTab === 'roc' ? 'active' : ''}`}
@@ -420,6 +447,12 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
               >
                 Confusion Matrix
               </button>
+              <button 
+                className={`tab-btn ${activeTab === 'ks' ? 'active' : ''}`}
+                onClick={() => setActiveTab('ks')}
+              >
+                KS Statistic
+              </button>
             </div>
 
             <div className="tab-content">
@@ -431,6 +464,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                       <tr>
                         <th>Variable</th>
                         <th>Coefficient</th>
+                        <th>P-Value</th>
                         <th>Significance</th>
                       </tr>
                     </thead>
@@ -441,37 +475,18 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                           <tr key={index}>
                             <td>{coef.variable}</td>
                             <td>{formatNumber(coef.coefficient)}</td>
-                            <td style={{ color: getSignificanceColor(coef.significance) }}>
-                              {coef.significance}
+                            {/* find matching p-value entry */}
+                            <td>
+                              {(() => {
+                                const pv = results.p_values.find(p => p.variable === coef.variable);
+                                return pv ? formatNumber(pv.p_value) : 'N/A';
+                              })()}
                             </td>
-                          </tr>
-                        ));
-                      })()}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {activeTab === 'pvalues' && (
-                <div className="pvalues-table">
-                  <h4>P-Values</h4>
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Variable</th>
-                        <th>P-Value</th>
-                        <th>Significance</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(() => {
-                        const filteredP = results.p_values.filter(p => p.variable !== 'Intercept');
-                        return filteredP.map((pval, index) => (
-                          <tr key={index}>
-                            <td>{pval.variable}</td>
-                            <td>{formatNumber(pval.p_value)}</td>
-                            <td style={{ color: getSignificanceColor(pval.significance) }}>
-                              {pval.significance}
+                            <td style={{ color: getSignificanceColor(coef.significance) }}>
+                              {(() => {
+                                const pv = results.p_values.find(p => p.variable === coef.variable);
+                                return pv ? pv.significance : coef.significance;
+                              })()}
                             </td>
                           </tr>
                         ));
@@ -483,7 +498,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
 
               {activeTab === 'vif' && (
                 <div className="vif-table">
-                  <h4>Variance Inflation Factor (VIF)</h4>
+                  <h4>Multicollinearity (VIF)</h4>
                   <table>
                     <thead>
                       <tr>
@@ -509,65 +524,132 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
 
               {activeTab === 'roc' && renderROCCurve()}
               {activeTab === 'confusion' && renderConfusionMatrix()}
+              {activeTab === 'ks' && results.ks_curve && (
+                <div className="ks-panel">
+                  <h4>KS Curve</h4>
+                  <KSChart ks_curve={results.ks_curve} ks_stat={results.ks_stat ?? 0} />
+                </div>
+              )}
             </div>
 
             <div className="model-summary">
               <h4>Model Summary</h4>
               <div className="summary-grid">
-                {/* Intercept shown separately */}
-                {(() => {
-                  const intercept = results.coefficients.find(c => c.variable === 'Intercept');
-                  if (!intercept) return null;
-                  return (
-                    <div className="summary-item">
-                      <label>Intercept:</label>
-                      <span>{formatNumber(intercept.coefficient)}</span>
-                    </div>
-                  );
-                })()}
-                <div className="summary-item">
-                  <label>AIC:</label>
-                  <span>{formatNumber(results.model_stats.aic)}</span>
-                </div>
-                <div className="summary-item">
-                  <label>BIC:</label>
-                  <span>{formatNumber(results.model_stats.bic)}</span>
-                </div>
-                <div className="summary-item">
-                  <label>Log Likelihood:</label>
-                  <span>{formatNumber(results.model_stats.log_likelihood)}</span>
-                </div>
-                <div className="summary-item">
-                  <label>Pseudo R²:</label>
-                  <span>{formatNumber(results.model_stats.pseudo_r_squared)}</span>
-                </div>
-                <div className="summary-item">
-                  <label>Observations:</label>
-                  <span>{results.model_stats.n_observations}</span>
-                </div>
-                <div className="summary-item">
-                  <label>Gini Coefficient:</label>
-                  <span>{formatNumber(results.gini_coefficient)}</span>
-                </div>
-                {/* Classification metrics */}
-                {results.accuracy !== undefined && (
+                {activeTab === 'confusion' ? (
+                  // Only show classification metrics when Confusion Matrix tab is active
+                  results.accuracy !== undefined ? (
+                    <>
+                      <div className="summary-item">
+                        <label>Accuracy:</label>
+                        <span>{formatNumber(results.accuracy)}</span>
+                      </div>
+                      <div className="summary-item">
+                        <label>Precision:</label>
+                        <span>{formatNumber(results.precision ?? 0)}</span>
+                      </div>
+                      <div className="summary-item">
+                        <label>Recall:</label>
+                        <span>{formatNumber(results.recall ?? 0)}</span>
+                      </div>
+                      <div className="summary-item">
+                        <label>F1 Score:</label>
+                        <span>{formatNumber(results.f1 ?? 0)}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ color: '#f0f6fc' }}>No classification metrics available</div>
+                  )
+                ) : activeTab === 'roc' ? (
+                  // When ROC tab is active, show Gini guidance instead of full summary
+                  <div style={{ color: '#f0f6fc', padding: 12 }}>
+                    <h5 style={{ marginTop: 0 }}>Gini Coefficient:</h5>
+                    <div>Ranges from 0 to 1 (higher is better)</div>
+                    <ul style={{ marginTop: 8 }}>
+                      <li>{'> 0.6'}: Excellent model</li>
+                      <li>0.4 - 0.6: Good model</li>
+                      <li>{'< 0.4'}: Poor model</li>
+                    </ul>
+                  </div>
+                ) : activeTab === 'vif' ? (
+                  // When Multicollinearity tab is active, show only AIC and BIC
                   <>
                     <div className="summary-item">
-                      <label>Accuracy:</label>
-                      <span>{formatNumber(results.accuracy)}</span>
+                      <label>AIC:</label>
+                      <span>{formatNumber(results.model_stats.aic)}</span>
                     </div>
                     <div className="summary-item">
-                      <label>Precision:</label>
-                      <span>{formatNumber(results.precision ?? 0)}</span>
+                      <label>BIC:</label>
+                      <span>{formatNumber(results.model_stats.bic)}</span>
+                    </div>
+                  </>
+                ) : activeTab === 'coefficients' ? (
+                  // When Coefficients tab is active, show only Intercept, Log Likelihood, Pseudo R², Observations
+                  <>
+                    {(() => {
+                      const intercept = results.coefficients.find(c => c.variable === 'Intercept');
+                      if (!intercept) return null;
+                      return (
+                        <div className="summary-item">
+                          <label>Intercept:</label>
+                          <span>{formatNumber(intercept.coefficient)}</span>
+                        </div>
+                      );
+                    })()}
+                    <div className="summary-item">
+                      <label>Log Likelihood:</label>
+                      <span>{formatNumber(results.model_stats.log_likelihood)}</span>
                     </div>
                     <div className="summary-item">
-                      <label>Recall:</label>
-                      <span>{formatNumber(results.recall ?? 0)}</span>
+                      <label>Pseudo R²:</label>
+                      <span>{formatNumber(results.model_stats.pseudo_r_squared)}</span>
                     </div>
                     <div className="summary-item">
-                      <label>F1 Score:</label>
-                      <span>{formatNumber(results.f1 ?? 0)}</span>
+                      <label>Observations:</label>
+                      <span>{results.model_stats.n_observations}</span>
                     </div>
+                  </>
+                ) : activeTab === 'ks' ? (
+                  // When KS tab is active, show KS statistic and short guidance
+                  <div style={{ color: '#f0f6fc', padding: 12 }}>
+                    <div><strong>KS statistic:</strong> {results.ks_stat !== undefined ? formatNumber(results.ks_stat) : 'N/A'} at threshold {results.ks_threshold !== undefined && results.ks_threshold !== null ? formatNumber(results.ks_threshold) : 'N/A'}</div>
+                    <div style={{ marginTop: 8, fontSize: 12, color: '#8b949e' }}>Higher KS (closer to 1) indicates better separation; &gt;0.4 excellent, 0.2–0.4 good, &lt;0.2 weak.</div>
+                  </div>
+                ) : (
+                  // Full model summary for other tabs
+                  <>
+                    <div className="summary-item">
+                      <label>AIC:</label>
+                      <span>{formatNumber(results.model_stats.aic)}</span>
+                    </div>
+                    <div className="summary-item">
+                      <label>BIC:</label>
+                      <span>{formatNumber(results.model_stats.bic)}</span>
+                    </div>
+                    <div className="summary-item">
+                      <label>Gini Coefficient:</label>
+                      <span>{formatNumber(results.gini_coefficient)}</span>
+                    </div>
+                    {/* Classification metrics */}
+                    {results.accuracy !== undefined && (
+                      <>
+                        <div className="summary-item">
+                          <label>Accuracy:</label>
+                          <span>{formatNumber(results.accuracy)}</span>
+                        </div>
+                        <div className="summary-item">
+                          <label>Precision:</label>
+                          <span>{formatNumber(results.precision ?? 0)}</span>
+                        </div>
+                        <div className="summary-item">
+                          <label>Recall:</label>
+                          <span>{formatNumber(results.recall ?? 0)}</span>
+                        </div>
+                        <div className="summary-item">
+                          <label>F1 Score:</label>
+                          <span>{formatNumber(results.f1 ?? 0)}</span>
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -575,6 +657,50 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
           </div>
         )}
       </div>
+    </div>
+  );
+};
+
+// Small KS chart component
+const KSChart: React.FC<{ ks_curve: KSCurvePoint[] | undefined; ks_stat: number }> = ({ ks_curve, ks_stat }) => {
+  if (!ks_curve || ks_curve.length === 0) return <div style={{ color: '#f0f6fc' }}>No KS data available</div>;
+
+  const _fmt = (n: number, d = 4) => Number(n).toFixed(d);
+
+  const width = 420;
+  const height = 300;
+  const margin = 40;
+  const plotW = width - margin * 2;
+  const plotH = height - margin * 2;
+
+  // use ks_curve sorted by threshold (they usually come in threshold order)
+  const points = ks_curve.map(p => ({ x: margin + p.threshold * plotW, fpr: margin + (1 - p.fpr) * plotH, tpr: margin + (1 - p.tpr) * plotH, diff: p.diff, threshold: p.threshold }));
+
+  // For markers, find max diff index
+  const ksIndex = ks_curve.reduce((acc, cur, idx) => (cur.diff > (ks_curve[acc]?.diff ?? 0) ? idx : acc), 0);
+  const ksPoint = points[ksIndex];
+
+  const tprPath = ks_curve.map((p, i) => `${i === 0 ? 'M' : 'L'} ${margin + i * (plotW / (ks_curve.length - 1))} ${margin + (1 - p.tpr) * plotH}`).join(' ');
+  const fprPath = ks_curve.map((p, i) => `${i === 0 ? 'M' : 'L'} ${margin + i * (plotW / (ks_curve.length - 1))} ${margin + (1 - p.fpr) * plotH}`).join(' ');
+
+  return (
+    <div className="ks-chart-container">
+      <svg width={width} height={height} className="roc-svg">
+        {/* axes */}
+        <line x1={margin} y1={margin} x2={margin} y2={margin + plotH} stroke="#f0f6fc" />
+        <line x1={margin} y1={margin + plotH} x2={margin + plotW} y2={margin + plotH} stroke="#f0f6fc" />
+        {/* paths */}
+        <path d={tprPath} fill="none" stroke="#52c41a" strokeWidth={2} />
+        <path d={fprPath} fill="none" stroke="#ff4d4f" strokeWidth={2} />
+        {/* KS marker */}
+        {ksPoint && (
+          <g>
+            <line x1={ksPoint.x} y1={margin} x2={ksPoint.x} y2={margin + plotH} stroke="#58a6ff" strokeDasharray="4,4" />
+            <text x={ksPoint.x} y={margin - 8} textAnchor="middle" fill="#58a6ff">KS={_fmt(ks_stat, 4)}</text>
+          </g>
+        )}
+      </svg>
+  <div style={{ marginTop: 8, color: '#f0f6fc' }} />
     </div>
   );
 };
