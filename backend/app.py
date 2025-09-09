@@ -1249,87 +1249,98 @@ def debug_binning(variable):
 @app.route('/api/generate-scorecard', methods=['POST'])
 def generate_scorecard():
     """
-    Generates a score card using the formula from the image:
+    Generates a score card using the formula:
     Score = [β * WOE + α/N] * Factor + Offset/N
     
     Where:
     - β: Logistic Regression coefficient of the variable
     - α: Logistic Regression Intercept
     - N: Number of Variables in the Model
-    - Factor: Points to double the odds / Ln(2) = 28.85 (for 20 points)
-    - Offset: Score - { Factor * ln(Odds) } = 28.85 (for base score 600, odds 50:1)
+    - Factor: Points to double the odds / Ln(2) ≈ 28.85 (for 20 points)
+    - Offset: Score - { Factor * ln(Odds) } ≈ 28.85 (for base score 600, odds 50:1)
+    
+    Returns:
+    - Scorecard bins with variable, bin range, WOE, coefficient, and score
+    - Score parameters (factor, offset, base_score, base_odds, etc.)
+    - Model summary (coefficients, intercept, number of observations)
     """
     try:
+        # Parse request data
         data = request.get_json()
         selected_variables = data.get('selected_variables', [])
         target = data.get('target')
         woe_transformed_data = data.get('woe_transformed_data', {})
-        
+
+        # Input validation
         if not selected_variables or not target or not woe_transformed_data:
             return jsonify({"error": "Missing required data: selected_variables, target, or woe_transformed_data"}), 400
+        if not all(isinstance(var, str) for var in selected_variables):
+            return jsonify({"error": "All selected_variables must be strings"}), 400
+        if not isinstance(woe_transformed_data, dict):
+            return jsonify({"error": "woe_transformed_data must be a dictionary"}), 400
 
-        # Load the dataset
+        # Load dataset
         df = pd.read_csv("uploaded.csv")
-        app.logger.debug("Loaded dataset 'uploaded.csv' with columns: %s", df.columns.tolist())
 
-        # Prepare WOE-transformed data for modeling
+        # Validate columns
+        if target not in df.columns:
+            return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
+        missing_vars = [var for var in selected_variables if var not in df.columns]
+        if missing_vars:
+            return jsonify({"error": f"Variables not found in dataset: {missing_vars}"}), 400
+        missing_woe = [var for var in selected_variables if var not in woe_transformed_data]
+        if missing_woe:
+            return jsonify({"error": f"Missing WOE data for variables: {missing_woe}"}), 400
+
+        # Validate target is binary
+        df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
+        if set(df[target].unique()) - {0, 1}:
+            return jsonify({"error": "Target variable must be binary (0/1)"}), 400
+
+        # Prepare WOE-transformed data
         modeling_data = {}
-        app.logger.debug("Incoming WOE payload keys: %s", list(woe_transformed_data.keys()))
         for var in selected_variables:
-            app.logger.debug("Processing variable for WOE mapping: %s", var)
-            if var not in woe_transformed_data:
-                app.logger.debug("Variable '%s' missing in woe_transformed_data", var)
-                continue
-
             woe_data = woe_transformed_data[var]
             ranges_list = None
 
             # Support both 'woe_ranges' and 'stats' structures
             if isinstance(woe_data, dict) and 'woe_ranges' in woe_data and isinstance(woe_data['woe_ranges'], list):
                 ranges_list = woe_data['woe_ranges']
-                app.logger.debug("Found 'woe_ranges' for %s with %d bins", var, len(ranges_list))
             elif isinstance(woe_data, dict) and 'stats' in woe_data and isinstance(woe_data['stats'], list):
-                # convert stats entries to uniform ranges_list
-                stats = woe_data['stats']
-                ranges_list = []
-                for row in stats:
-                    ranges_list.append({
-                        'range': row.get('Range') or row.get('Bin') or str(row),
-                        'woe': float(row.get('WOE') or 0)
-                    })
-                app.logger.debug("Converted 'stats' to ranges_list for %s (%d bins)", var, len(ranges_list))
+                ranges_list = [{
+                    'range': r.get('Range') or r.get('Bin') or str(r),
+                    'woe': float(r.get('WOE') or 0)
+                } for r in woe_data['stats']]
             else:
-                app.logger.debug("WOE data for %s has unexpected shape or missing keys: %s", var, type(woe_data))
                 continue
 
-            # Build mapping
+            if not ranges_list:
+                continue
+
+            # Build WOE mapping
             woe_mapping = {}
             for range_info in ranges_list:
                 try:
-                    bin_range = range_info.get('range') if isinstance(range_info, dict) else None
+                    bin_range = range_info.get('range') if isinstance(range_info, dict) else str(range_info)
                     woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
-                    app.logger.debug("Var %s - bin_range: %s -> woe: %s", var, str(bin_range), str(woe_value))
-
                     if bin_range is None:
                         continue
 
-                    # Missing / NaN handling
+                    # Handle Missing/NaN
                     if isinstance(bin_range, str) and ('Missing' in bin_range or 'NaN' in bin_range):
-                        for idx in df[df[var].isna()].index:
+                        mask = df[var].isna()
+                        for idx in df[mask].index:
                             woe_mapping[idx] = woe_value
                         continue
 
-                    # Numeric range parsing
+                    # Numeric range parsing (e.g., "(a, b]", "[a, b]")
                     if isinstance(bin_range, str) and any(ch in bin_range for ch in '(),[]'):
                         range_str = bin_range.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
-                        parts = [p.strip() for p in range_str.split(',') if p.strip() != '']
+                        parts = [p.strip() for p in range_str.split(',') if p.strip()]
                         if len(parts) == 2:
                             try:
                                 lower = float(parts[0]) if parts[0].lower() not in ['-inf', 'inf'] else (float('-inf') if parts[0].lower() == '-inf' else float('inf'))
                                 upper = float(parts[1]) if parts[1].lower() not in ['-inf', 'inf'] else (float('-inf') if parts[1].lower() == '-inf' else float('inf'))
-                                if var not in df.columns:
-                                    app.logger.debug("Column '%s' not in dataframe when applying numeric range %s", var, bin_range)
-                                    continue
                                 if lower == float('-inf'):
                                     mask = df[var] <= upper
                                 elif upper == float('inf'):
@@ -1339,74 +1350,48 @@ def generate_scorecard():
                                 for idx in df[mask].index:
                                     woe_mapping[idx] = woe_value
                                 continue
-                            except Exception as e:
-                                app.logger.debug("Numeric range parsing failed for %s range=%s: %s", var, bin_range, str(e))
-                                app.logger.debug(traceback.format_exc())
+                            except (ValueError, TypeError):
+                                pass
 
-                    # Hyphen-separated ranges like '1 - 2' or '10 - 11'
-                    hyphen_match = None
-                    try:
-                        hyphen_match = re.match(r"^\s*-?\d+(?:\.\d+)?\s*-\s*-?\d+(?:\.\d+)?\s*$", str(bin_range))
-                    except Exception:
-                        hyphen_match = None
+                    # Hyphen-separated ranges (e.g., "1 - 2")
+                    hyphen_match = re.match(r'^\s*-?\d+(?:\.\d+)?\s*-\s*-?\d+(?:\.\d+)?\s*$', str(bin_range))
                     if isinstance(bin_range, str) and hyphen_match:
                         try:
                             parts = [p.strip() for p in bin_range.split('-')]
-                            if len(parts) >= 2:
-                                lower = float(parts[0])
-                                upper = float(parts[1])
-                                if var not in df.columns:
-                                    app.logger.debug("Column '%s' not in dataframe when applying hyphen range %s", var, bin_range)
-                                else:
-                                    mask = (df[var].astype(float) >= lower) & (df[var].astype(float) <= upper)
-                                    for idx in df[mask].index:
-                                        woe_mapping[idx] = woe_value
-                                    continue
-                        except Exception as e:
-                            app.logger.debug("Hyphen range parsing failed for %s range=%s: %s", var, bin_range, str(e))
-                            app.logger.debug(traceback.format_exc())
+                            lower, upper = float(parts[0]), float(parts[1])
+                            mask = (df[var].astype(float) >= lower) & (df[var].astype(float) <= upper)
+                            for idx in df[mask].index:
+                                woe_mapping[idx] = woe_value
+                            continue
+                        except (ValueError, TypeError):
+                            pass
 
-                    # Categorical matching fallback
-                    if var in df.columns and isinstance(bin_range, str):
-                        cat_vals = [v.strip() for v in bin_range.split(',')]
+                    # Categorical values (comma-separated or single)
+                    if isinstance(bin_range, str):
+                        cat_vals = [v.strip() for v in bin_range.split(',') if v.strip()]
                         for cat_val in cat_vals:
                             try:
                                 mask = df[var].astype(str) == str(cat_val)
                                 for idx in df[mask].index:
                                     woe_mapping[idx] = woe_value
                             except Exception:
-                                app.logger.debug("Categorical matching failed for %s value=%s", var, cat_val)
                                 continue
-                except Exception as e:
-                    app.logger.error("Error processing range_info for var %s: %s", var, str(e))
-                    app.logger.debug(traceback.format_exc())
+                except Exception:
+                    pass
 
             if woe_mapping:
-                app.logger.debug("Mapped WOE rows for '%s': %d of %d", var, len(set(woe_mapping.keys())), len(df))
                 woe_column = [woe_mapping.get(i, 0) for i in range(len(df))]
                 modeling_data[var] = woe_column
             else:
-                app.logger.debug("No WOE mapping produced for variable '%s' (zero mapped rows)", var)
-        
+                modeling_data[var] = [0] * len(df)
+
         # Create DataFrame with WOE-transformed variables
         model_df = pd.DataFrame(modeling_data)
-        app.logger.debug("Modeling data keys (WOE columns created): %s", list(modeling_data.keys()))
-        app.logger.debug("Model DF columns before adding target: %s", list(model_df.columns))
-        # Attach target
-        if target not in df.columns:
-            app.logger.error("Target column '%s' not present in uploaded dataset columns: %s", target, df.columns.tolist())
-            return jsonify({"error": f"Target column '{target}' not found in dataset."}), 400
         model_df[target] = df[target]
-        app.logger.debug("Model DF columns after adding target: %s", list(model_df.columns))
-        app.logger.debug("Model DF shape: %s", model_df.shape)
 
-        # Check for any requested selected_variables that are missing from model_df
+        # Check for missing variables
         missing_vars = [v for v in selected_variables if v not in model_df.columns]
         if missing_vars:
-            app.logger.error("Missing variables in model_df: %s", missing_vars)
-            app.logger.debug("Selected variables: %s", selected_variables)
-            app.logger.debug("Available model_df columns: %s", list(model_df.columns))
-            # provide a helpful error message to the client including what is available
             return jsonify({
                 "error": f"Missing variables in WOE-transformed data: {missing_vars}",
                 "debug": {
@@ -1414,130 +1399,127 @@ def generate_scorecard():
                     "available_columns": list(model_df.columns)
                 }
             }), 400
-        
+
         # Remove rows with missing target values
         model_df = model_df.dropna(subset=[target])
-        
+        if model_df.empty:
+            return jsonify({"error": "No valid data after removing missing target values"}), 400
+
         # Prepare features and target
         X = model_df[selected_variables]
         y = model_df[target]
-        
-        # Add constant for intercept
+
+        # Validate feature matrix
+        nunique = X.nunique()
+        zero_var_cols = nunique[nunique <= 1].index.tolist()
+        if zero_var_cols:
+            return jsonify({"error": f"Features with zero variance: {zero_var_cols}"}), 400
+        dup_cols = X.columns[X.T.duplicated()].tolist()
+        if dup_cols:
+            return jsonify({"error": f"Duplicated features: {dup_cols}"}), 400
+
+        # Fit logistic regression
         X_with_const = sm.add_constant(X)
-        
-        # Fit logistic regression using statsmodels for detailed statistics
         logit_model = sm.Logit(y, X_with_const)
-        result = logit_model.fit(disp=0)
-        
+        try:
+            result = logit_model.fit(disp=0, maxiter=1000)
+        except np.linalg.LinAlgError:
+            return jsonify({"error": "Model failed due to singular matrix"}), 500
+        except Exception as fit_err:
+            return jsonify({"error": f"Model fitting failed: {str(fit_err)}"}), 500
+
         # Extract coefficients
         coefficients = {}
         intercept = result.params['const']
         for var in selected_variables:
             coefficients[var] = result.params[var]
-        
-        # Score card parameters based on the formula
-        N = len(selected_variables)  # Number of variables in the model
-        factor = 20 / np.log(2)  # Factor = 28.85 (points to double odds / ln(2))
-        base_odds = 50  # Good/Bad odds of 50:1 for base score of 600
+
+        # Score card parameters
+        N = len(selected_variables)
+        factor = 20 / np.log(2)  # ≈ 28.8539
+        base_odds = 50
         base_score = 600
-        offset = base_score - factor * np.log(base_odds)  # Offset calculation
-        
-        # Generate score card for each variable and bin
+        offset = base_score - factor * np.log(base_odds)  # ≈ 427.432
+
+        # Generate score card and calculate score ranges
         scorecard_bins = []
-        min_scores = []
-        max_scores = []
-        
+        var_score_ranges = {var: [] for var in selected_variables}
+        processed_ranges = set()
+
         for var in selected_variables:
-            app.logger.debug("Building scorecard for var: %s", var)
             if var not in coefficients:
-                app.logger.warning("No coefficient available for %s, skipping", var)
                 continue
             beta = coefficients[var]
-
-            # support both 'woe_ranges' and 'stats'
             ranges_source = None
             if var in woe_transformed_data and isinstance(woe_transformed_data[var], dict):
                 if 'woe_ranges' in woe_transformed_data[var]:
                     ranges_source = woe_transformed_data[var]['woe_ranges']
-                    app.logger.debug("Using 'woe_ranges' for var %s: %d bins", var, len(ranges_source))
                 elif 'stats' in woe_transformed_data[var]:
                     ranges_source = [{
                         'range': r.get('Range') or r.get('Bin') or str(r),
                         'woe': float(r.get('WOE') or 0)
                     } for r in woe_transformed_data[var]['stats']]
-                    app.logger.debug("Using 'stats' for var %s: %d bins", var, len(ranges_source))
 
             if not ranges_source:
-                app.logger.debug("No suitable ranges found for var %s; skipping", var)
                 continue
 
-            app.logger.debug("Processing %d ranges for var %s", len(ranges_source), var)
-            
-            # Process each range only once to avoid duplicates
-            processed_ranges = set()
-            
             for i, range_info in enumerate(ranges_source):
                 try:
-                    woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
                     bin_range = range_info.get('range') if isinstance(range_info, dict) else str(range_info)
-                    
-                    # Create a unique identifier for this range to avoid duplicates
+                    woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
                     range_key = f"{var}_{bin_range}_{woe_value}"
                     if range_key in processed_ranges:
-                        app.logger.debug("Skipping duplicate range for var %s: %s", var, bin_range)
                         continue
                     processed_ranges.add(range_key)
-                    
-                    score = (beta * woe_value + intercept / N) * factor + offset / N
 
+                    score = (beta * woe_value + intercept / N) * factor + offset / N
                     scorecard_bins.append({
                         'variable': var,
                         'bin_range': bin_range,
                         'woe': woe_value,
                         'coefficient': beta,
-                        'score': score
+                        'score': round(float(score), 2)
                     })
-                    min_scores.append(score)
-                    max_scores.append(score)
-                    app.logger.debug("Added scorecard bin %d for var %s: range=%s, woe=%f, score=%f", 
-                                   i+1, var, bin_range, woe_value, score)
-                except Exception as e:
-                    app.logger.error("Failed to compute score for var %s range %s: %s", var, range_info, str(e))
-                    app.logger.debug(traceback.format_exc())
-        
-        # Calculate score range
-        min_total_score = sum(min_scores) if min_scores else 0
-        max_total_score = sum(max_scores) if max_scores else 0
-        
-        app.logger.debug("Generated scorecard with %d bins total", len(scorecard_bins))
+                    var_score_ranges[var].append(score)
+                except (ValueError, TypeError):
+                    pass
+
+        # Calculate score range per variable
+        min_total_score = 0
+        max_total_score = 0
         for var in selected_variables:
-            var_bins = [b for b in scorecard_bins if b['variable'] == var]
-            app.logger.debug("Variable %s has %d bins in scorecard", var, len(var_bins))
-        
+            scores = var_score_ranges.get(var, [])
+            if scores:
+                min_total_score += min(scores)
+                max_total_score += max(scores)
+            else:
+                pass
+        min_total_score = round(float(min_total_score), 2) if min_total_score else 0
+        max_total_score = round(float(max_total_score), 2) if max_total_score else 0
+
         return jsonify({
             "success": True,
             "scorecard_bins": scorecard_bins,
             "score_parameters": {
-                "factor": factor,
-                "offset": offset,
+                "factor": round(float(factor), 4),
+                "offset": round(float(offset), 4),
                 "base_score": base_score,
                 "base_odds": base_odds,
-                "intercept": intercept,
+                "intercept": round(float(intercept), 4),
                 "n_variables": N,
-                "min_score": round(min_total_score),
-                "max_score": round(max_total_score)
+                "min_score": min_total_score,
+                "max_score": max_total_score
             },
             "model_summary": {
-                "coefficients": coefficients,
-                "intercept": intercept,
+                "coefficients": {k: round(float(v), 4) for k, v in coefficients.items()},
+                "intercept": round(float(intercept), 4),
                 "n_observations": len(model_df),
                 "n_variables": N
             }
         })
-        
-    except Exception as e:
-        return jsonify({"error": f"Failed to generate score card: {str(e)}"}), 500
 
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate score card ({type(e).__name__}): {str(e)}"}), 500
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5000))
