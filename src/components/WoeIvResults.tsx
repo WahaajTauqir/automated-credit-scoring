@@ -16,7 +16,7 @@ import './Results.css';
 interface WoeIvResultsProps {
   woeIvResults: Record<string, any>;
   formatToFourDecimals: (val: any) => string;
-  discreteColumns?: string[]; // Prop to identify discrete variables
+  discreteColumns?: string[];
 }
 
 const interpretIV = (iv: number): string => {
@@ -77,49 +77,56 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
       </p>
 
       {/* WOE Table */}
-      <table className="cross-tab-table">
-        <thead>
-          <tr>
-            <th>Bin</th>
-            {isDiscrete && <th>Range</th>}
-            <th>Total</th>
-            <th>Good</th>
-            <th>Bad</th>
-            <th>WOE</th>
-            <th>IV</th>
-          </tr>
-        </thead>
-        <tbody>
-          {colData.stats?.map((row: any, idx: number) => {
-            const rangeKey = `${colName}_${idx}`; // Unique key for each row's range
-            const rangeValue = String(row.Range ?? '');
-            const isTruncated = rangeValue.length > 50;
-            const truncatedRange = truncateRange(rangeValue);
+      <div className="table-container">
+        <table className="cross-tab-table" aria-label={`WOE and IV results for ${colName}`}>
+          <thead>
+            <tr>
+              <th>Bin</th>
+              {isDiscrete && <th>Range</th>}
+              <th>Total</th>
+              <th>Good</th>
+              <th>Bad</th>
+              <th>Bad Rate (%)</th>
+              <th>WOE</th>
+              <th>IV</th>
+            </tr>
+          </thead>
+          <tbody>
+            {colData.stats?.map((row: any, idx: number) => {
+              const rangeKey = `${colName}_${idx}`;
+              const rangeValue = String(row.Range ?? '');
+              const isTruncated = rangeValue.length > 50;
+              const truncatedRange = truncateRange(rangeValue);
+              const badRate = row.Total > 0 ? (row.Bad / row.Total * 100) : 0;
 
-            return (
-              <tr key={idx}>
-                <td>{row.Bin || row.temp_bin || row.Range}</td>
-                {isDiscrete && (
-                  <td>
-                    <span
-                      title={rangeValue} // Tooltip with full range
-                      style={{ cursor: isTruncated ? 'pointer' : 'default' }}
-                      onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                    >
-                      {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
-                    </span>
-                  </td>
-                )}
-                <td>{row.Total}</td>
-                <td>{row.Good}</td>
-                <td>{row.Bad}</td>
-                <td>{formatToFourDecimals(row.WOE)}</td>
-                <td>{formatToFourDecimals(row.IV)}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+              return (
+                <tr key={idx}>
+                  <td>{row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`}</td>
+                  {isDiscrete && (
+                    <td>
+                      <button
+                        type="button"
+                        title={rangeValue}
+                        style={{ cursor: isTruncated ? 'pointer' : 'default', background: 'none', border: 'none', color: 'inherit' }}
+                        onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
+                        aria-label={isTruncated ? `Expand range for bin ${row.Bin || row.temp_bin || row.Range}` : undefined}
+                      >
+                        {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
+                      </button>
+                    </td>
+                  )}
+                  <td>{row.Total}</td>
+                  <td>{row.Good}</td>
+                  <td>{row.Bad}</td>
+                  <td>{formatToFourDecimals(badRate)}</td>
+                  <td>{formatToFourDecimals(row.WOE)}</td>
+                  <td>{formatToFourDecimals(row.IV)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
 
       {/* WOE Bar Chart */}
       <h4 style={{ marginTop: '20px' }}>WOE by Bin</h4>

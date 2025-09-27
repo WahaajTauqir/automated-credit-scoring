@@ -37,3 +37,37 @@
 .results-container th {
   border-bottom: 1px solid gray;
 }
+
+.table-container {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.cross-tab-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--merged-bin-bg, #21262d);
+  color: var(--fg-color, #f0f6fc);
+  border: 1px solid var(--border-color, #30363d);
+  border-radius: 6px;
+}
+
+.cross-tab-table th,
+.cross-tab-table td {
+  padding: 0.75rem;
+  text-align: left;
+  font-size: 0.875rem;
+  border: 1px solid var(--border-color, #30363d);
+}
+
+.cross-tab-table th {
+  background: var(--card-bg, #161b22);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  font-weight: 600;
+}
+
+.cross-tab-table tr:hover {
+  background: var(--card-bg, #161b22);
+}
