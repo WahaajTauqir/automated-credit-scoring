@@ -67,18 +67,26 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
   };
 
   return (
-    <div className="woe-iv-container">
-      <h3>WOE & IV Results - {colName}</h3>
-      <p>
-        <strong>IV:</strong> {formatToFourDecimals(colData.iv)}{' '}
-        <span style={{ marginLeft: '10px', fontStyle: 'italic', color: '#888' }}>
-          ({interpretIV(colData.iv)})
-        </span>
-      </p>
+    <div className="woe-iv-container results-container">
+      <article className="results-card" aria-label={`WOE and IV analysis for ${colName}`}>
+        <div className="results-card-header">
+          <div className="results-card-title">
+            <h3>WOE & IV Results - {colName}</h3>
+            <span className="results-card-badge">{isDiscrete ? 'Discrete' : 'Continuous'}</span>
+          </div>
+        </div>
 
-      {/* WOE Table */}
-      <div className="table-container">
-        <table className="cross-tab-table" aria-label={`WOE and IV results for ${colName}`}>
+        <div className="results-card-body">
+          <p style={{ margin: 0 }}>
+            <strong>IV:</strong> {formatToFourDecimals(colData.iv)}{' '}
+            <span style={{ marginLeft: '10px', fontStyle: 'italic', color: '#888' }}>
+              ({interpretIV(colData.iv)})
+            </span>
+          </p>
+
+          {/* WOE Table */}
+          <div className="results-table-container">
+            <table className="results-table" aria-label={`WOE and IV results for ${colName}`}>
           <thead>
             <tr>
               <th>Bin</th>
@@ -106,12 +114,16 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
                     <td>
                       <button
                         type="button"
+                        className={`range-toggle-btn${isTruncated ? '' : ' is-static'}`}
                         title={rangeValue}
-                        style={{ cursor: isTruncated ? 'pointer' : 'default', background: 'none', border: 'none', color: 'inherit' }}
                         onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                        aria-label={isTruncated ? `Expand range for bin ${row.Bin || row.temp_bin || row.Range}` : undefined}
+                        aria-label={
+                          isTruncated
+                            ? `Toggle full range for bin ${row.Bin || row.temp_bin || row.Range}`
+                            : undefined
+                        }
                       >
-                        {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
+                        {expandedRanges[rangeKey] || !isTruncated ? rangeValue : truncatedRange}
                       </button>
                     </td>
                   )}
@@ -126,32 +138,34 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
             })}
           </tbody>
         </table>
-      </div>
+          </div>
 
-      {/* WOE Bar Chart */}
-      <h4 style={{ marginTop: '20px' }}>WOE by Bin</h4>
-      <ResponsiveContainer width="100%" height={300}>
-        <BarChart data={chartData} margin={{ top: 20, right: 30, bottom: 40, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-          <YAxis />
-          <Tooltip />
-          <Bar dataKey="WOE" fill="#8884d8" />
-        </BarChart>
-      </ResponsiveContainer>
+          {/* WOE Bar Chart */}
+          <h4 style={{ marginTop: '20px' }}>WOE by Bin</h4>
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={chartData} margin={{ top: 20, right: 30, bottom: 40, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+              <YAxis />
+              <Tooltip />
+              <Bar dataKey="WOE" fill="#8884d8" />
+            </BarChart>
+          </ResponsiveContainer>
 
-      {/* IV Contribution Line Chart */}
-      <h4 style={{ marginTop: '20px' }}>IV Contribution by Bin</h4>
-      <ResponsiveContainer width="100%" height={300}>
-        <LineChart data={chartData} margin={{ top: 20, right: 30, bottom: 40, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-          <YAxis />
-          <Tooltip />
-          <Legend />
-          <Line type="monotone" dataKey="IV" stroke="#82ca9d" strokeWidth={2} />
-        </LineChart>
-      </ResponsiveContainer>
+          {/* IV Contribution Line Chart */}
+          <h4 style={{ marginTop: '20px' }}>IV Contribution by Bin</h4>
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={chartData} margin={{ top: 20, right: 30, bottom: 40, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              <Line type="monotone" dataKey="IV" stroke="#82ca9d" strokeWidth={2} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </article>
     </div>
   );
 };

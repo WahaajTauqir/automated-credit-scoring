@@ -1,73 +1,167 @@
 .results-container {
-  margin-top: 40px;
   width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md, 1.5rem);
+  margin-top: var(--spacing-md, 1.5rem);
 }
 
-.results-container h2 {
-  text-align: center;
-  color: white;
-  margin-bottom: 10px;
-}
-
-.results-container .column-panel {
-  background-color: #2d333b;
-  padding: 20px;
-  border-radius: 8px;
-  margin-bottom: 20px;
-}
-
-.results-container h3 {
-  color: white;
-  margin-bottom: 10px;
-}
-
-.results-container table {
-  width: 100%;
-  color: white;
-  font-size: 14px;
-  border-collapse: collapse;
-}
-
-.results-container th,
-.results-container td {
-  padding: 4px;
-  text-align: center;
-}
-
-.results-container th {
-  border-bottom: 1px solid gray;
-}
-
-.table-container {
-  overflow-x: auto;
-  max-width: 100%;
-}
-
-.cross-tab-table {
-  width: 100%;
-  border-collapse: collapse;
-  background: var(--merged-bin-bg, #21262d);
-  color: var(--fg-color, #f0f6fc);
-  border: 1px solid var(--border-color, #30363d);
-  border-radius: 6px;
-}
-
-.cross-tab-table th,
-.cross-tab-table td {
-  padding: 0.75rem;
-  text-align: left;
-  font-size: 0.875rem;
-  border: 1px solid var(--border-color, #30363d);
-}
-
-.cross-tab-table th {
-  background: var(--card-bg, #161b22);
-  position: sticky;
-  top: 0;
-  z-index: 10;
+.results-container > h2,
+.results-container > h3 {
+  margin: 0;
+  color: var(--fg-primary, #f6f8fa);
   font-weight: 600;
 }
 
-.cross-tab-table tr:hover {
-  background: var(--card-bg, #161b22);
+.results-card {
+  width: 100%;
+  background: var(--bg-primary, #010409);
+  border: 1px solid var(--border-primary, #30363d);
+  border-radius: var(--radius-medium, 8px);
+  padding: var(--spacing-md, 1rem);
+  box-shadow: var(--shadow-modern, 0 8px 24px rgba(0, 0, 0, 0.2));
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm, 0.75rem);
+}
+
+.results-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--spacing-sm, 0.75rem);
+  flex-wrap: wrap;
+}
+
+.results-card-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-xs, 0.5rem);
+}
+
+.results-card-title h3,
+.results-card-title h4 {
+  margin: 0;
+  color: var(--fg-primary, #f6f8fa);
+  font-weight: 600;
+}
+
+.results-card-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-small, 6px);
+  border: 1px solid var(--border-secondary, #21262d);
+  background: var(--bg-quaternary, #1c2528);
+  color: var(--fg-secondary, #d1d5db);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.results-card-body {
+  width: 100%;
+}
+
+.results-card .drop-btn {
+  margin-left: auto;
+}
+
+.results-table-container {
+  width: 100%;
+  overflow-x: auto;
+  margin: 0 0 1rem 0;
+  background: var(--bg-primary, #010409);
+  border: 1px solid var(--border-primary, #30363d);
+  border-radius: var(--radius-medium, 8px);
+  box-shadow: var(--shadow-modern, 0 8px 24px rgba(0, 0, 0, 0.2));
+}
+
+.results-table,
+.cross-tab-table,
+.scorecard-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  color: var(--fg-secondary, #d1d5db);
+  table-layout: fixed;
+}
+
+.results-table caption {
+  caption-side: top;
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  font-weight: 600;
+  color: var(--fg-primary, #f6f8fa);
+}
+
+.results-table th,
+.results-table td,
+.cross-tab-table th,
+.cross-tab-table td,
+.scorecard-table th,
+.scorecard-table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-secondary, #21262d);
+}
+
+.results-table thead th,
+.cross-tab-table thead th,
+.scorecard-table thead th {
+  background: var(--bg-quaternary, #1c2528);
+  color: var(--fg-primary, #f6f8fa);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.results-table tbody tr:last-of-type td,
+.cross-tab-table tbody tr:last-of-type td,
+.scorecard-table tbody tr:last-of-type td {
+  border-bottom: none;
+}
+
+.results-table tbody tr:hover,
+.cross-tab-table tbody tr:hover,
+.scorecard-table tbody tr:hover {
+  background: rgba(46, 160, 67, 0.05);
+}
+
+.range-toggle-btn {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.range-toggle-btn.is-static {
+  cursor: default;
+}
+
+.range-toggle-btn:hover:not(.is-static),
+.range-toggle-btn:focus-visible {
+  text-decoration: underline;
+  outline: none;
+}
+
+.coarse-binning-results {
+  gap: var(--spacing-md, 1.5rem);
+}
+
+@media (max-width: 720px) {
+  .results-table,
+  .cross-tab-table,
+  .scorecard-table {
+    min-width: 100%;
+    table-layout: auto;
+  }
 }

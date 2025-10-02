@@ -37,116 +37,106 @@ const UnivariateResults = ({
   };
 
   return (
-    <div style={{ marginTop: '40px', width: '100%' }}>
-      <h2 style={{ textAlign: 'center', marginBottom: '10px' }}>
-        Coarse Binning Results
-      </h2>
+    <div className="results-container coarse-binning-results" aria-label="Coarse binning results summary">
+      <h2>Coarse Binning Results</h2>
 
-      {entries.map(([col, result]: any, idx) => {
+      {entries.map(([col, result]: any) => {
         const isDiscrete = result.type === 'discrete';
-        const columnOrder = isDiscrete
-          ? [col + '_binned', 'Range', 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%']
-          : [col + '_binned', 'Min', 'Max', 'Bad Rate', 'Bad', 'Good', 'Total', 'Freq%'];
+        const binHeaderLabel = isDiscrete ? 'Range' : 'Min / Max';
 
         return (
-          <div
-            key={idx}
-            className="column-panel"
-            style={{
-              marginBottom: '20px',
-              border: '1px solid gray',
-              borderRadius: '5px',
-              position: 'relative',
-              paddingTop: '30px',
-            }}
-          >
-            {onDropColumn && (
-              <button
-                style={{
-                  position: 'absolute',
-                  top: '5px',
-                  right: '5px',
-                  padding: '4px 8px',
-                  background: 'red',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDropColumn(col);
-                }}
-                title="Remove this column from analysis"
-              >
-                Drop
-              </button>
-            )}
+          <article key={col} className="results-card coarse-result-card" aria-label={`Coarse binning table for ${col}`}>
+            <div className="results-card-header">
+              <div className="results-card-title">
+                <h3>{col}</h3>
+                <span className="results-card-badge">{isDiscrete ? 'Discrete' : 'Continuous'}</span>
+              </div>
+              {onDropColumn && (
+                <button
+                  type="button"
+                  className="drop-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDropColumn(col);
+                  }}
+                  title={`Remove ${col} from analysis`}
+                >
+                  Drop
+                </button>
+              )}
+            </div>
 
-            <h3 style={{ padding: '5px 10px' }}>
-              {col} ({result.type})
-            </h3>
-
-            <div className="column-list">
-              <table style={{ width: '100%', color: 'white', fontSize: '14px' }}>
+            <div className="results-table-container">
+              <table className="results-table cross-tab-table" aria-label={`Coarse binning distribution for ${col}`}>
                 <thead>
                   <tr>
-                    {columnOrder.map((key) => (
-                      <th key={key} style={{ padding: '4px', borderBottom: '1px solid gray' }}>
-                        {key === 'Bad Rate' ? 'Bad Rate (%)' : key === 'Freq%' ? 'Freq%' : key}
-                      </th>
-                    ))}
+                    <th>Bin</th>
+                    {isDiscrete ? (
+                      <th>{binHeaderLabel}</th>
+                    ) : (
+                      <>
+                        <th>Min</th>
+                        <th>Max</th>
+                      </>
+                    )}
+                    <th>Bad</th>
+                    <th>Good</th>
+                    <th>Total</th>
+                    <th>Bad Rate (%)</th>
+                    <th>Freq %</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.stats.map((row: any, i: number) => {
-                    const binnedKey = Object.keys(row).find((k) => k.endsWith('_binned'));
-                    const binLabel = binnedKey ? row[binnedKey] : `Bin_${i + 1}`;
-                    const rangeKey = `${col}_${i}`; // Unique key for each row's range
+                  {result.stats.map((row: any, index: number) => {
+                    const binnedKey = Object.keys(row).find((key: string) => key.endsWith('_binned'));
+                    const binLabel = binnedKey ? row[binnedKey] : `Bin_${index + 1}`;
+                    const rangeKey = `${col}_${index}`;
+                    const rangeValue = String(row.Range ?? '');
+                    const isTruncated = rangeValue.length > 50;
+                    const truncatedRange = truncateRange(rangeValue);
+                    const canToggleRange = isTruncated;
+                    const displayRange = canToggleRange && expandedRanges[rangeKey]
+                      ? rangeValue
+                      : truncatedRange;
+                    const badRateValue =
+                      row['Bad Rate'] ?? row['Bad Rate (%)'] ?? row.bad_rate ?? row.BadRate ?? 0;
+                    const freqValue = row['Freq%'] ?? row.freq ?? row.Freq ?? 0;
 
                     return (
-                      <tr key={i}>
-                        {columnOrder.map((key, j) => {
-                          // Handle Range column for discrete variables
-                          if (key === 'Range' && isDiscrete) {
-                            const rangeValue = String(row[key] ?? '');
-                            const isExpanded = expandedRanges[rangeKey];
-                            const truncatedRange = truncateRange(rangeValue);
-                            const isTruncated = rangeValue.length > truncatedRange.length;
-
-                            return (
-                              <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
-                                <span
-                                  title={rangeValue} // Tooltip with full range
-                                  style={{ cursor: isTruncated ? 'pointer' : 'default' }}
-                                  onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                                >
-                                  {isExpanded ? rangeValue : truncatedRange}
-                                </span>
-                              </td>
-                            );
-                          }
-
-                          // Handle other columns
-                          return (
-                            <td key={j} style={{ padding: '4px', textAlign: 'center' }}>
-                              {key === col + '_binned'
-                                ? binLabel
-                                : key === 'Bad Rate' || key === 'Freq%'
-                                ? formatToFourDecimals(row[key])
-                                : key === 'Min' || key === 'Max'
-                                ? String(row[key] ?? '')
-                                : String(row[key] ?? '')}
-                            </td>
-                          );
-                        })}
+                      <tr key={`${col}-${index}`}>
+                        <td>{binLabel}</td>
+                        {isDiscrete ? (
+                          <td>
+                            <button
+                              type="button"
+                              className={`range-toggle-btn${canToggleRange ? '' : ' is-static'}`}
+                              title={rangeValue}
+                              onClick={canToggleRange ? () => toggleRangeExpansion(rangeKey) : undefined}
+                              aria-label={
+                                canToggleRange ? `Toggle full range for ${binLabel}` : undefined
+                              }
+                            >
+                              {canToggleRange ? displayRange : rangeValue}
+                            </button>
+                          </td>
+                        ) : (
+                          <>
+                            <td>{String(row.Min ?? '')}</td>
+                            <td>{String(row.Max ?? '')}</td>
+                          </>
+                        )}
+                        <td>{row.Bad ?? 0}</td>
+                        <td>{row.Good ?? 0}</td>
+                        <td>{row.Total ?? 0}</td>
+                        <td>{formatToFourDecimals(badRateValue)}</td>
+                        <td>{formatToFourDecimals(freqValue)}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
-          </div>
+          </article>
         );
       })}
     </div>

@@ -22,7 +22,6 @@ const SelectedColumnsPage = () => {
   const [activeColumn, setActiveColumn] = useState<string>('');
   const [compareColumn, setCompareColumn] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState(1);
-  const [loading, setLoading] = useState(false);
   const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
   const [coarseBinResults, setCoarseBinResults] = useState<Record<string, any[]>>({});
   const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, Record<number, any[]>>>({});
@@ -71,7 +70,6 @@ const SelectedColumnsPage = () => {
 
   // Recommend top columns
   const recommendTopColumns = async (topN: number = 5) => {
-    setLoading(true);
     try {
       const missing = selectedColumns.filter(col => !woeIvResults[col]);
       for (const col of missing) {
@@ -83,8 +81,6 @@ const SelectedColumnsPage = () => {
       showNotification(`Recommended and selected top ${topN} columns by IV.`);
     } catch (e) {
       console.error('Recommendation failed', e);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -316,7 +312,6 @@ const SelectedColumnsPage = () => {
   const handleColumnClick = async (col: string) => {
     if (col === activeColumn) return; // Prevent re-fetching if already active
     setActiveColumn(col);
-    setLoading(true);
     try {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
       const res = await fetch('http://localhost:5000/api/univariate-analysis', {
@@ -337,8 +332,6 @@ const SelectedColumnsPage = () => {
       await loadSavedFineBins(col, varType);
     } catch {
       alert('Error fetching coarse bin results');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -364,7 +357,6 @@ const SelectedColumnsPage = () => {
 
   const runBinning = async (col: string) => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-    setLoading(true);
     try {
       // Backup for undo
       setBinMergeStack((prev) => ({
@@ -439,8 +431,6 @@ const SelectedColumnsPage = () => {
     } catch (err) {
       console.error('Error in runBinning:', err);
       alert('Error running binning');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -464,7 +454,6 @@ const SelectedColumnsPage = () => {
   };
 
   const resetFineBinning = async (col: string) => {
-    setLoading(true);
     try {
       // Reset fine binning results and history
       setFineBinResults((prev) => ({ ...prev, [col]: [] }));
@@ -504,8 +493,6 @@ const SelectedColumnsPage = () => {
     } catch (err) {
       console.error('Error resetting binning:', err);
       alert('Error resetting binning');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -600,24 +587,6 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  let pageTitle = '';
-  switch (currentStep) {
-    case 1:
-      pageTitle = 'Column Selection & Binning';
-      break;
-    case 2:
-      pageTitle = `WOE/IV Results${compareColumn ? ' Comparison' : ''}`;
-      break;
-    case 3:
-      pageTitle = 'Logistic Regression Analysis';
-      break;
-    case 4:
-      pageTitle = 'Score Card Generation';
-      break;
-    default:
-      pageTitle = 'Column Selection & Binning';
-  }
-
   const canGoNext = () => {
     switch (currentStep) {
       case 1:
@@ -634,7 +603,6 @@ const SelectedColumnsPage = () => {
   const handleSave = async () => {
     if (!window.confirm('Are you sure you want to save the current analysis?')) return;
     try {
-      setLoading(true);
       const response = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -662,8 +630,6 @@ const SelectedColumnsPage = () => {
     } catch (error) {
       console.error('Save failed:', error);
       alert(`Error saving analysis: ${error}`);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -706,16 +672,7 @@ const SelectedColumnsPage = () => {
           ))}
         </div>
 
-        <h2 className="page-title">{pageTitle}</h2>
-
         {notification && <div className="notification" role="alert">{notification}</div>}
-
-        {loading && (
-          <div className="loading-container" role="status">
-            <span className="loading-spinner"></span>
-            <span className="loading-text">Loading...</span>
-          </div>
-        )}
 
         <div className="main-content-wrapper" style={{ display: 'flex', gap: '20px' }}>
           {(currentStep !== 3 && currentStep !== 4) && (
@@ -766,10 +723,10 @@ const SelectedColumnsPage = () => {
                         id={`checkbox-${col}`}
                         aria-label={`Include ${col} in modeling`}
                       />
-                      <label htmlFor={`checkbox-${col}`}>
-                        <h4>{col}</h4>
+                      <div className="column-info">
+                        <h4 className="column-name">{col}</h4>
                         <small>{(discreteColumns || []).includes(col) ? 'Discrete' : 'Continuous'}</small>
-                      </label>
+                      </div>
                       {woeIvResults[col] && (
                         <span className={`iv-badge ${getIVBadgeClass(woeIvResults[col].iv)}`}>
                           IV: {formatToFourDecimals(woeIvResults[col].iv)}
@@ -795,21 +752,10 @@ const SelectedColumnsPage = () => {
           >
             {currentStep === 1 && activeColumn && (
               <div className="binning-section" aria-label="Binning controls and results">
-                {activeColumn && univariateResults[activeColumn] && (
-                  <div className="univariate-results-section">
-                    <h3>Univariate Analysis - {activeColumn}</h3>
-                    <UnivariateResults
-                      univariateResults={{ [activeColumn]: univariateResults[activeColumn] }}
-                      formatToFourDecimals={formatToFourDecimals}
-                      onDropColumn={handleDropColumn}
-                    />
-                  </div>
-                )}
-
-                <h3>Binning - {activeColumn}</h3>
 
                 {coarseBinResults[activeColumn] && (
                   <div className="results-container">
+                    <h3>Binning - {activeColumn}</h3>
                     <h4>Merge Adjacent Bins For Fine Binning</h4>
 
                     {!((continuousColumns || []).includes(activeColumn)) && (
@@ -923,6 +869,16 @@ const SelectedColumnsPage = () => {
                         Undo Merge
                       </button>
                     </div>
+                  </div>
+                )}
+
+                {activeColumn && univariateResults[activeColumn] && (
+                  <div className="univariate-results-section">
+                    <UnivariateResults
+                      univariateResults={{ [activeColumn]: univariateResults[activeColumn] }}
+                      formatToFourDecimals={formatToFourDecimals}
+                      onDropColumn={handleDropColumn}
+                    />
                   </div>
                 )}
 

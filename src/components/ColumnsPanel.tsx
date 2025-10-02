@@ -58,6 +58,16 @@ const ColumnPanels = ({
                   />
                   Discrete
                 </label>
+                <label>
+                  <input
+                    type="radio"
+                    name={`type-${col}`}
+                    value="continuous"
+                    checked={continuousColumns.includes(col)}
+                    onChange={() => handleTypeChange(col, 'continuous')}
+                  />
+                  Continuous
+                </label>
               </div>
             </div>
           ))}

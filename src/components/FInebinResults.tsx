@@ -36,55 +36,70 @@ const FineBinResults = ({ fineBinResults, formatToFourDecimals, discreteColumns 
   };
 
   return (
-    <div className="results-container">
-      <h3>Fine Binning Results</h3>
+    <div className="results-container" aria-label="Fine binning results summary">
+      <h2>Fine Binning Results</h2>
       {Object.entries(fineBinResults).map(([col, bins]) => {
         const isDiscrete = discreteColumns.includes(col);
-        return (
-          <div key={col} className="result-section">
-            <h4>{col}</h4>
-            <table className="results-table">
-              <thead>
-                <tr>
-                  <th>Bin</th>
-                  {isDiscrete && <th>Range</th>}
-                  <th>Count</th>
-                  <th>Bad</th>
-                  <th>Good</th>
-                  <th>Bad Rate</th>
-                </tr>
-              </thead>
-              <tbody>
-                {bins.map((bin, idx) => {
-                  const rangeKey = `${col}_${idx}`; // Unique key for each row's range
-                  const rangeValue = String(bin.Range ?? '');
-                  const isTruncated = rangeValue.length > 50;
-                  const truncatedRange = truncateRange(rangeValue);
 
-                  return (
-                    <tr key={idx}>
-                      <td>{bin.Bin}</td>
-                      {isDiscrete && (
-                        <td>
-                          <span
-                            title={rangeValue} // Tooltip with full range
-                            style={{ cursor: isTruncated ? 'pointer' : 'default' }}
-                            onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                          >
-                            {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
-                          </span>
-                        </td>
-                      )}
-                      <td>{bin.Count}</td>
-                      <td>{bin.Bad}</td>
-                      <td>{bin.Good}</td>
-                      <td>{formatToFourDecimals(bin.BadRate)}</td>
+        return (
+          <article key={col} className="results-card" aria-label={`Fine binning table for ${col}`}>
+            <div className="results-card-header">
+              <div className="results-card-title">
+                <h3>{col}</h3>
+                <span className="results-card-badge">{isDiscrete ? 'Discrete' : 'Continuous'}</span>
+              </div>
+            </div>
+
+            <div className="results-card-body">
+              <div className="results-table-container">
+                <table className="results-table" aria-label={`Fine bin distribution for ${col}`}>
+                  <thead>
+                    <tr>
+                      <th>Bin</th>
+                      {isDiscrete && <th>Range</th>}
+                      <th>Count</th>
+                      <th>Bad</th>
+                      <th>Good</th>
+                      <th>Bad Rate</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                  <tbody>
+                    {bins.map((bin, idx) => {
+                      const rangeKey = `${col}_${idx}`; // Unique key for each row's range
+                      const rangeValue = String(bin.Range ?? '');
+                      const isTruncated = rangeValue.length > 50;
+                      const truncatedRange = truncateRange(rangeValue);
+
+                      return (
+                        <tr key={idx}>
+                          <td>{bin.Bin}</td>
+                          {isDiscrete && (
+                            <td>
+                              <button
+                                type="button"
+                                className={`range-toggle-btn${isTruncated ? '' : ' is-static'}`}
+                                title={rangeValue}
+                                onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
+                                aria-label={
+                                  isTruncated ? `Toggle full range for ${bin.Bin}` : undefined
+                                }
+                              >
+                                {expandedRanges[rangeKey] || !isTruncated ? rangeValue : truncatedRange}
+                              </button>
+                            </td>
+                          )}
+                          <td>{bin.Count}</td>
+                          <td>{bin.Bad}</td>
+                          <td>{bin.Good}</td>
+                          <td>{formatToFourDecimals(bin.BadRate)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </article>
         );
       })}
     </div>
