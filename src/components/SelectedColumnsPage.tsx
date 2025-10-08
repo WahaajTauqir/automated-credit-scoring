@@ -1,10 +1,22 @@
 import { useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import UnivariateResults from './UnivariateResults';
-import WoeIvResults from './WoeIvResults';
 import LogisticRegressionResults from './LogisticRegressionResults';
 import Navbar from './Navbar';
+// import WoeIvResults from './WoeIvResults';
 import './SelectedColumnsPage.css';
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  Legend,
+} from 'recharts';
 
 const SelectedColumnsPage = () => {
   const { state } = useLocation();
@@ -94,7 +106,7 @@ const SelectedColumnsPage = () => {
     if (anyUnivariate) setUnivariateResults(anyUnivariate);
     if (anyFine) setFineBinResults(anyFine);
     if (anyCross) setCoarseBinResults(anyCross);
-    if (anyWoe) {
+    if (anyWoe) { 
       setWoeIvResults(anyWoe);
       setWoeReadyColumns(new Set(Object.keys(anyWoe)));
       setSelectedForModeling(Object.keys(anyWoe)); // Auto-select all WOE-ready columns
@@ -236,7 +248,7 @@ const SelectedColumnsPage = () => {
   };
 
   const gotoScoreCardAndGenerate = () => {
-    setCurrentStep(4);
+    setCurrentStep(3);
     setTimeout(() => {
       generateScoreCard();
     }, 50);
@@ -453,6 +465,132 @@ const SelectedColumnsPage = () => {
     }
   };
 
+  // Unmerge a specific merged fine bin for a column and refresh results
+  const unmergeFineBin = async (col: string, mergedLabelRaw: any) => {
+    try {
+      const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+      const history = binMergeHistory[col] || {};
+      const mergedLabel = String(mergedLabelRaw || '');
+
+      if (!history || Object.keys(history).length === 0) {
+        showNotification(`No merges to unmerge for ${col}.`);
+        return;
+      }
+
+      // Helper to compare label against history keys regardless of spacing
+      const normalizeParts = (s: string) => s.split(',').map(p => p.trim()).filter(Boolean).sort();
+
+      let keyToRemove: string | null = null;
+      if (varType === 'continuous') {
+        // For continuous merges we used keys like 'Merged_1', 'Merged_2', ...
+        if (history[mergedLabel]) {
+          keyToRemove = mergedLabel;
+        } else {
+          // fallback: find any key that startsWith 'Merged_' and whose value array contains the label's parts (unlikely)
+          keyToRemove = Object.keys(history).find(k => k === mergedLabel) || null;
+        }
+      } else {
+        // Discrete: keys are a sorted joined list like 'A, B, C'
+        const targetParts = normalizeParts(mergedLabel);
+        keyToRemove = Object.keys(history).find(k => {
+          const kParts = normalizeParts(k);
+          if (kParts.length !== targetParts.length) return false;
+          for (let i = 0; i < kParts.length; i++) {
+            if (kParts[i] !== targetParts[i]) return false;
+          }
+          return true;
+        }) || null;
+        // Also try direct match when label matches key exactly
+        if (!keyToRemove && history[mergedLabel]) keyToRemove = mergedLabel;
+      }
+
+      if (!keyToRemove) {
+        showNotification(`Could not find a matching merge for '${mergedLabel}'.`);
+        return;
+      }
+
+      const newHistory = { ...history } as Record<string, any[]>;
+      delete newHistory[keyToRemove];
+
+      // For continuous: ensure merges reference existing coarse bins only
+      if (varType === 'continuous') {
+        const coarseRows = (coarseBinResults[col] || []) as any[];
+        const binLabelKey = `${col}_binned`;
+        const existingBins = new Set(
+          coarseRows.map((r) => String(r[binLabelKey])).filter((v) => v !== undefined)
+        );
+        // filter each merge's old_bins values
+        Object.keys(newHistory).forEach((k) => {
+          newHistory[k] = (newHistory[k] || []).map(String).filter((b) => existingBins.has(String(b)));
+          if (!newHistory[k] || newHistory[k].length === 0) {
+            delete newHistory[k];
+          }
+        });
+      }
+
+      // If continuous and no merges remain, revert to coarse bins (avoid fine-bin 400)
+      if (varType === 'continuous' && Object.keys(newHistory).length === 0) {
+        const coarseRes = await fetch('http://localhost:5000/api/univariate-analysis', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            discrete: [],
+            continuous: [col],
+            target: targetVariable,
+          }),
+        });
+        const coarseData = await coarseRes.json();
+        setCoarseBinResults((prev) => ({ ...prev, [col]: (coarseData[col]?.stats || []) }));
+        setUnivariateResults((prev) => ({ ...prev, [col]: coarseData[col] || coarseData }));
+          // Ensure bin names are present in fineBinResults
+          const coarseStats = coarseData[col]?.stats || [];
+          const binLabelKey = `${col}_binned`;
+          const fineBinsWithNames = coarseStats.map((row: any) => ({
+            ...row,
+            Bin: row.Bin ?? row[binLabelKey] ?? '',
+          }));
+          setFineBinResults((prev) => ({ ...prev, [col]: fineBinsWithNames }));
+        setBinMergeHistory((prev) => ({ ...prev, [col]: {} }));
+        setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
+        await persistFineBinColumn(col, {});
+        await fetchWoeIv(col);
+        setWoeReadyColumns((prev) => new Set(prev).add(col));
+        setSelectedForModeling((prev) => [...new Set([...prev, col])]);
+      } else {
+        // Re-run fine binning with updated merges
+        const res = await fetch('http://localhost:5000/api/fine-bin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            variable: col,
+            target: targetVariable,
+            type: varType,
+            bin_merges: newHistory,
+            record_id: recordId,
+          }),
+        });
+        const data = await res.json();
+        if (!data.success) {
+          throw new Error(data.error || 'Fine binning failed during unmerge');
+        }
+
+        setFineBinResults((prev) => ({ ...prev, [col]: data.stats || [] }));
+        const mergesReturned = data.bin_merges || newHistory;
+        setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
+        setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
+        await persistFineBinColumn(col, mergesReturned);
+        await fetchWoeIv(col, mergesReturned);
+        setWoeReadyColumns((prev) => new Set(prev).add(col));
+        setSelectedForModeling((prev) => [...new Set([...prev, col])]);
+      }
+
+      showNotification(`Unmerged '${mergedLabel}' for ${col}.`);
+    } catch (err) {
+      console.error('Error unmerging fine bin:', err);
+      alert('Error unmerging fine bin');
+    }
+  };
+
   const resetFineBinning = async (col: string) => {
     try {
       // Reset fine binning results and history
@@ -577,10 +715,8 @@ const SelectedColumnsPage = () => {
       case 1:
         return true;
       case 2:
-        return !!activeColumn && woeReadyColumns.has(activeColumn);
-      case 3:
         return woeReadyColumns.size > 0; // Logistic Regression requires at least one WOE-ready column
-      case 4:
+      case 3:
         return woeReadyColumns.size > 0; // Score Card requires at least one WOE-ready column
       default:
         return false;
@@ -590,10 +726,8 @@ const SelectedColumnsPage = () => {
   const canGoNext = () => {
     switch (currentStep) {
       case 1:
-        return !!activeColumn && woeReadyColumns.has(activeColumn);
+        return woeReadyColumns.size > 0; // Need at least one WOE-ready column to proceed
       case 2:
-        return woeReadyColumns.size > 0; // Can proceed to Logistic Regression if WOE-ready columns exist
-      case 3:
         return woeReadyColumns.size > 0; // Can proceed to Score Card if WOE-ready columns exist
       default:
         return false;
@@ -639,7 +773,7 @@ const SelectedColumnsPage = () => {
 
   useEffect(() => {
     const ensureWoeForAll = async () => {
-      if (currentStep !== 3 && currentStep !== 4) return;
+      if (currentStep !== 2 && currentStep !== 3) return;
       const cols: string[] = selectedColumns;
       const missing = cols.filter((c) => !woeIvResults[c]);
       if (missing.length === 0) return;
@@ -654,28 +788,49 @@ const SelectedColumnsPage = () => {
     <div>
       <Navbar />
       <div className="page-container">
-        <div className="progress-bar" role="navigation" aria-label="Analysis steps">
-          {['Column Selection & Binning', 'WOE/IV Calculation', 'Logistic Regression', 'Score Card'].map((step, index) => (
+        <div className="progress-header">
+          <div className="progress-bar" role="navigation" aria-label="Analysis steps">
+            {['Column Selection & Binning', 'Logistic Regression', 'Score Card'].map((step, index) => (
+              <button
+                key={step}
+                className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${
+                  currentStep > index + 1 ? 'completed' : ''
+                }`}
+                disabled={!canGoToStep(index + 1)}
+                onClick={() => canGoToStep(index + 1) && setCurrentStep(index + 1)}
+                aria-current={currentStep === index + 1 ? 'step' : undefined}
+                aria-label={`Go to ${step}`}
+              >
+                <span className="progress-number">{index + 1}</span>
+                <span>{step}</span>
+              </button>
+            ))}
+          </div>
+          <div className="progress-actions">
+            {currentStep < 3 && (
+              <button
+                className="progress-action-btn next-button"
+                disabled={!canGoNext()}
+                onClick={() => setCurrentStep((prev) => prev + 1)}
+                aria-label="Go to next step"
+              >
+                Next
+              </button>
+            )}
             <button
-              key={step}
-              className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${
-                currentStep > index + 1 ? 'completed' : ''
-              }`}
-              disabled={!canGoToStep(index + 1)}
-              onClick={() => canGoToStep(index + 1) && setCurrentStep(index + 1)}
-              aria-current={currentStep === index + 1 ? 'step' : undefined}
-              aria-label={`Go to ${step}`}
+              className="progress-action-btn save-button"
+              onClick={handleSave}
+              aria-label="Save analysis"
             >
-              <span className="progress-number">{index + 1}</span>
-              <span>{step}</span>
+              Save
             </button>
-          ))}
+          </div>
         </div>
 
         {notification && <div className="notification" role="alert">{notification}</div>}
 
         <div className="main-content-wrapper" style={{ display: 'flex', gap: '20px' }}>
-          {(currentStep !== 3 && currentStep !== 4) && (
+          {(currentStep !== 2 && currentStep !== 3) && (
             <aside className="column-selection-section" aria-label="Scrollable column selection panel" style={{ width: '30%', minWidth: '250px' }}>
               <h3>Columns Dashboard</h3>
               <div className="sidebar-controls">
@@ -732,10 +887,8 @@ const SelectedColumnsPage = () => {
                           IV: {formatToFourDecimals(woeIvResults[col].iv)}
                         </span>
                       )}
-                      <button onClick={(e) => { e.stopPropagation(); handleDropColumn(col); }} className="drop-btn">Drop</button>
-                      {currentStep === 2 && col !== activeColumn && (
-                        <button onClick={(e) => { e.stopPropagation(); setCompareColumn(col); }} className="compare-btn">Compare</button>
-                      )}
+                      {/* Drop button removed as requested */}
+                      {/* Compare button removed with WOE/IV section */}
                     </div>
                   </div>
                 ))}
@@ -746,7 +899,7 @@ const SelectedColumnsPage = () => {
           <section
             className="content-section"
             style={{
-              width: (currentStep === 3 || currentStep === 4) ? '100%' : '70%',
+              width: (currentStep === 2 || currentStep === 3) ? '100%' : '70%',
               transition: 'width 0.3s'
             }}
           >
@@ -865,9 +1018,6 @@ const SelectedColumnsPage = () => {
                       <button className="reset-bin-btn" onClick={() => resetFineBinning(activeColumn)} aria-label={`Reset binning for ${activeColumn}`}>
                         Reset Binning
                       </button>
-                      <button className="undo-btn" onClick={() => undoBinMerge(activeColumn)} aria-label={`Undo last merge for ${activeColumn}`}>
-                        Undo Merge
-                      </button>
                     </div>
                   </div>
                 )}
@@ -903,6 +1053,7 @@ const SelectedColumnsPage = () => {
                             <th>Total</th>
                             <th>Bad Rate (%)</th>
                             <th>Freq%</th>
+                            <th>Actions</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -919,18 +1070,26 @@ const SelectedColumnsPage = () => {
                               const isTruncated = !isContinuous && rangeValue.length > 50;
                               const truncatedRange = isTruncated ? truncateRange(rangeValue) : rangeValue;
 
+                              const labelVal = bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1'];
+                              const isMergedLabel = typeof labelVal === 'string' && (
+                                labelVal.includes(',') || (binMergeHistory[activeColumn] && binMergeHistory[activeColumn][labelVal]) ||
+                                labelVal.startsWith('Merged_')
+                              );
+
                               return (
                                 <tr
                                   key={idx}
                                   style={{
                                     backgroundColor:
                                       typeof bin[activeColumn + '_fine_binned'] === 'string' &&
-                                      bin[activeColumn + '_fine_binned'].indexOf(',') !== -1
+                                      (bin[activeColumn + '_fine_binned'].indexOf(',') !== -1 || bin[activeColumn + '_fine_binned'].startsWith('Merged_'))
                                         ? 'var(--merged-bin-bg, #21262d)'
                                         : 'transparent',
                                   }}
                                 >
-                                  <td>{bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1']}</td>
+                                  <td style={{ maxWidth: '120px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', verticalAlign: 'middle' }} title={labelVal}>
+                                    {labelVal}
+                                  </td>
                                   {isContinuous ? (
                                     <>
                                       <td>{bin.Min ?? 'N/A'}</td>
@@ -954,54 +1113,69 @@ const SelectedColumnsPage = () => {
                                   <td>{bin.Total ?? bin['Total'] ?? 0}</td>
                                   <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4) ?? '0.0000'}</td>
                                   <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : '0.00'}</td>
+                                  <td>
+                                    {isMergedLabel ? (
+                                      <button
+                                        className="unmerge-btn compact"
+                                        onClick={() => unmergeFineBin(activeColumn, labelVal)}
+                                        aria-label={`Unmerge ${String(labelVal)}`}
+                                        title="Unmerge"
+                                      >
+                                        <span style={{fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s'}}>Unmerge</span>
+                                      </button>
+                                    ) : null}
+                                  </td>
                                 </tr>
                               );
                             })}
                         </tbody>
                       </table>
                     </div>
+
+                    {woeIvResults[activeColumn] && (
+                      <div className="woe-iv-embedded" style={{ marginTop: '24px' }}>
+                        <h3>WOE by Bin</h3>
+                        <ResponsiveContainer width="100%" height={300}>
+                          <BarChart
+                            data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
+                              Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
+                              WOE: parseFloat(row.WOE),
+                            }))}
+                            margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                            <YAxis />
+                            <Tooltip />
+                            <Bar dataKey="WOE" fill="#8884d8" />
+                          </BarChart>
+                        </ResponsiveContainer>
+
+                        <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
+                        <ResponsiveContainer width="100%" height={300}>
+                          <LineChart
+                            data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
+                              Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
+                              IV: parseFloat(row.IV),
+                            }))}
+                            margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                            <YAxis />
+                            <Tooltip />
+                            <Legend />
+                            <Line type="monotone" dataKey="IV" stroke="#82ca9d" strokeWidth={2} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             )}
 
-           {currentStep === 2 && (
-  <>
-    {!activeColumn || !woeReadyColumns.has(activeColumn) || !woeIvResults[activeColumn] ? (
-      <p>Please select a column from the left and complete binning.</p>
-    ) : (
-      <div className="woe-comparison-grid" style={{ display: 'grid', gridTemplateColumns: compareColumn ? '1fr 1fr' : '1fr', gap: '20px' }}>
-        <div className="results-section">
-          <WoeIvResults
-            woeIvResults={{ [activeColumn]: woeIvResults[activeColumn] }}
-            formatToFourDecimals={formatToFourDecimals}
-            discreteColumns={discreteColumns}
-          />
-        </div>
-        {compareColumn && woeIvResults[compareColumn] && (
-          <div className="results-section">
-            <div className="comparison-header">
-              <button
-                onClick={() => setCompareColumn(null)}
-                className="close-compare-btn"
-                style={{ marginBottom: '10px' }} // Add spacing below the button
-                aria-label="Close comparison"
-              >
-                Close Comparison
-              </button>
-            </div>
-            <WoeIvResults
-              woeIvResults={{ [compareColumn]: woeIvResults[compareColumn] }}
-              formatToFourDecimals={formatToFourDecimals}
-              discreteColumns={discreteColumns}
-            />
-          </div>
-        )}
-      </div>
-    )}
-  </>
-)}
-            {currentStep === 3 && (
+            {currentStep === 2 && (
               <LogisticRegressionResults
                 selectedVariables={selectedForModeling}
                 allSelectedVariables={selectedColumns}
@@ -1016,7 +1190,7 @@ const SelectedColumnsPage = () => {
               />
             )}
 
-            {currentStep === 4 && (
+            {currentStep === 3 && (
               <div className="scorecard-section">
                 <h3>Score Card</h3>
                 <div className="scorecard-controls">
@@ -1030,20 +1204,22 @@ const SelectedColumnsPage = () => {
                   </button>
                 </div>
 
-                {scoreCardData && (
+                {/* Show loading skeleton while generating */}
+                {generatingScoreCard && (
+                  <div className="scorecard-results-loading">
+                    <h4>Score Card Results</h4>
+                    <div className="scorecard-loading-skeleton">
+                      <div className="skeleton-header" />
+                      <div className="skeleton-row" />
+                      <div className="skeleton-row" />
+                      <div className="skeleton-row" />
+                    </div>
+                  </div>
+                )}
+                {/* Only show results when not generating and scoreCardData is loaded */}
+                {scoreCardData && !generatingScoreCard && (
                   <div className="scorecard-results">
                     <h4>Score Card Results</h4>
-                    {scoreCardData.scorecard_bins && (
-                      <div className="scorecard-summary">
-                        <p><strong>Total Bins:</strong> {scoreCardData.scorecard_bins.length}</p>
-                        {selectedForModeling.map(variable => {
-                          const variableBins = scoreCardData.scorecard_bins.filter((bin: any) => bin.variable === variable);
-                          return (
-                            <p key={variable}><strong>{variable}:</strong> {variableBins.length} bins</p>
-                          );
-                        })}
-                      </div>
-                    )}
                     <div className="table-container">
                       <table className="scorecard-table" aria-label="Score card results">
                         <thead>
@@ -1057,39 +1233,41 @@ const SelectedColumnsPage = () => {
                           </tr>
                         </thead>
                         <tbody>
-                          {scoreCardData.scorecard_bins && (() => {
-                            const grouped: Record<string, any[]> = {};
-                            scoreCardData.scorecard_bins.forEach((b: any) => {
-                              grouped[b.variable] = grouped[b.variable] || [];
-                              grouped[b.variable].push(b);
-                            });
+                            {scoreCardData.scorecard_bins && (() => {
+                              const grouped: Record<string, any[]> = {};
+                              scoreCardData.scorecard_bins.forEach((b: any) => {
+                                if (selectedForModeling.includes(b.variable)) {
+                                  grouped[b.variable] = grouped[b.variable] || [];
+                                  grouped[b.variable].push(b);
+                                }
+                              });
 
-                            const rows: any[] = [];
-                            Object.keys(grouped).forEach((variable, varIndex) => {
-                              const bins = grouped[variable];
-                              if (varIndex > 0) {
-                                rows.push(
-                                  <tr key={`sep-${variable}`} className="variable-separator">
-                                    <td colSpan={6} />
-                                  </tr>
-                                );
-                              }
-                              for (let i = 0; i < bins.length; i++) {
-                                const bin = bins[i];
-                                rows.push(
-                                  <tr key={`${variable}-${i}-${String(bin.bin_range)}`}>
-                                    <td>{i + 1}</td>
-                                    <td>{bin.variable}</td>
-                                    <td>{bin.bin_range}</td>
-                                    <td>{formatToFourDecimals(bin.woe)}</td>
-                                    <td>{formatToFourDecimals(bin.coefficient)}</td>
-                                    <td>{Math.round(bin.score)}</td>
-                                  </tr>
-                                );
-                              }
-                            });
-                            return rows;
-                          })()}
+                              const rows: any[] = [];
+                              Object.keys(grouped).forEach((variable, varIndex) => {
+                                const bins = grouped[variable];
+                                if (varIndex > 0) {
+                                  rows.push(
+                                    <tr key={`sep-${variable}`} className="variable-separator">
+                                      <td colSpan={6} />
+                                    </tr>
+                                  );
+                                }
+                                for (let i = 0; i < bins.length; i++) {
+                                  const bin = bins[i];
+                                  rows.push(
+                                    <tr key={`${variable}-${i}-${String(bin.bin_range)}`}>
+                                      <td>{i + 1}</td>
+                                      <td>{bin.variable}</td>
+                                      <td>{bin.bin_range}</td>
+                                      <td>{formatToFourDecimals(bin.woe)}</td>
+                                      <td>{formatToFourDecimals(bin.coefficient)}</td>
+                                      <td>{Math.round(bin.score)}</td>
+                                    </tr>
+                                  );
+                                }
+                              });
+                              return rows;
+                            })()}
                         </tbody>
                       </table>
                     </div>
@@ -1124,21 +1302,7 @@ const SelectedColumnsPage = () => {
           </section>
         </div>
 
-        <div className="navigation-buttons">
-          {currentStep > 1 && (
-            <button onClick={() => setCurrentStep((prev) => prev - 1)} aria-label="Go to previous step">
-              Back
-            </button>
-          )}
-          {currentStep < 4 && (
-            <button disabled={!canGoNext()} onClick={() => setCurrentStep((prev) => prev + 1)} aria-label="Go to next step">
-              Next
-            </button>
-          )}
-          <button className="save-button" onClick={handleSave} aria-label="Save analysis">
-            Save
-          </button>
-        </div>
+        {/* Footer navigation removed per request: Next and Save moved beside progress bar */}
       </div>
     </div>
   );

@@ -17,6 +17,8 @@ interface ColumnSelectionPageProps {
   assignRemainingToContinuous: () => void;
   selectedForUnivariate: string[];
   toggleSelectedForUnivariate: (col: string) => void;
+  toggleSelectAllDiscrete?: (selectAll?: boolean) => void;
+  toggleSelectAllContinuous?: (selectAll?: boolean) => void;
   handleFineBin: (column: string) => Promise<void>;
   handleProceedToSelectedColumns: () => Promise<void> | void;
   univariateResults: Record<string, any>;
@@ -48,6 +50,8 @@ const ColumnSelectionPage = ({
   toggleSelectedForUnivariate,
   handleFineBin,
   handleProceedToSelectedColumns,
+  toggleSelectAllDiscrete,
+  toggleSelectAllContinuous,
   restoring,
   expectedColumns,
   onUploadReplacement
@@ -97,6 +101,8 @@ const ColumnSelectionPage = ({
               assignRemainingToContinuous={assignRemainingToContinuous}
               selectedForUnivariate={selectedForUnivariate}
               toggleSelectedForUnivariate={toggleSelectedForUnivariate}
+              toggleSelectAllDiscrete={toggleSelectAllDiscrete}
+              toggleSelectAllContinuous={toggleSelectAllContinuous}
               handleFineBin={handleFineBin}
             />
 

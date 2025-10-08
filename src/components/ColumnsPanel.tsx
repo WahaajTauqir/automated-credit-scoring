@@ -17,6 +17,8 @@ interface ColumnPanelsProps {
   assignRemainingToContinuous: () => void;
   selectedForUnivariate: string[];
   toggleSelectedForUnivariate: (col: string) => void;
+  toggleSelectAllDiscrete?: (selectAll?: boolean) => void;
+  toggleSelectAllContinuous?: (selectAll?: boolean) => void;
   handleFineBin: (column: string) => Promise<void>;
 }
 
@@ -36,6 +38,8 @@ const ColumnPanels = ({
   assignRemainingToContinuous,
   selectedForUnivariate,
   toggleSelectedForUnivariate,
+  toggleSelectAllDiscrete,
+  toggleSelectAllContinuous,
 }: ColumnPanelsProps) => {
   return (
     <div className="columns-layout">
@@ -117,6 +121,15 @@ const ColumnPanels = ({
       {/* Discrete Columns */}
       <div className="column-panel">
         <h3>Discrete Columns</h3>
+        <div style={{ marginBottom: '8px' }}>
+          <button
+            className="assign-button"
+            onClick={() => toggleSelectAllDiscrete && toggleSelectAllDiscrete()}
+            title="Tick/untick all discrete variables"
+          >
+            Tick all discrete
+          </button>
+        </div>
         <div className="column-list">
           {discreteColumns.length === 0 && (
             <div className="column-box">(None selected)</div>
@@ -139,6 +152,15 @@ const ColumnPanels = ({
       {/* Continuous Columns */}
       <div className="column-panel">
         <h3>Continuous Columns</h3>
+        <div style={{ marginBottom: '8px' }}>
+          <button
+            className="assign-button"
+            onClick={() => toggleSelectAllContinuous && toggleSelectAllContinuous()}
+            title="Tick/untick all continuous variables"
+          >
+            Tick all continuous
+          </button>
+        </div>
         <div className="column-list">
           {continuousColumns.length === 0 && (
             <div className="column-box">(None selected)</div>

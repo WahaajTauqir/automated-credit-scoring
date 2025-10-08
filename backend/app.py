@@ -29,6 +29,30 @@ logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173"])
 
+# Helper function to get the CSV path consistently
+def get_csv_path():
+    """Returns the absolute path to uploaded.csv in the backend directory."""
+    return os.path.join(os.path.dirname(__file__), "uploaded.csv")
+
+# Helper function to safely save CSV with retry logic
+def safe_save_csv(df, max_retries=3):
+    """
+    Safely saves DataFrame to uploaded.csv with retry logic for Windows permission issues.
+    """
+    csv_path = get_csv_path()
+    import time
+    for attempt in range(max_retries):
+        try:
+            df.to_csv(csv_path, index=False)
+            return True
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                time.sleep(0.1)  # Wait 100ms before retry
+            else:
+                raise e  # Re-raise on final attempt
+    return False
+
+
 # ----------- Get Uploaded CSV Columns -----------
 @app.route('/api/uploaded-csv-columns', methods=['GET'])
 def get_uploaded_csv_columns():
@@ -180,7 +204,7 @@ def coarse_bin_discrete(df, var, target, bad_label=1, bad_rate_diff=0.5):
         prev_bad_rate = tab['Bad Rate'].iloc[0] if not tab.empty else 0
 
         for idx, row in tab.iterrows():
-            if abs(row['Bad Rate'] - prev_bad_rate) > bad_rate_diff:
+            if abs(row['Bad Rate'] - prev_bad_rate) > bad_rate_diff:    
                 current_bin += 1
             bin_mapping[idx] = current_bin
             prev_bad_rate = row['Bad Rate']
@@ -403,8 +427,12 @@ def fine_bin_api():
         bin_merges = req.get('bin_merges', {})
         if not var or not target or not var_type:
             return jsonify({"error": "Missing required fields"}), 400
-        df = pd.read_csv("uploaded.csv")
+        
+        # Use absolute path to ensure we're working with the right file
+        csv_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
+        df = pd.read_csv(csv_path)
         df[target] = df[target].fillna(0).astype(int)
+        
         if var_type == 'continuous':
             _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
             # Only keep bins that exist
@@ -419,9 +447,12 @@ def fine_bin_api():
         else:
             _, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
             tab, _, adjusted_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
+        
         if tab is None:
             return jsonify({"error": "Fine binning returned no results"}), 400
-        df.to_csv("uploaded.csv", index=False)
+        
+        # Save with helper function that handles retries
+        safe_save_csv(df)
         print("Fine binning done for", var)
         return jsonify({
             "success": True,
@@ -447,8 +478,10 @@ def cross_tab_api():
         binning_info = req.get('binning', {}) # optional: {var: {type: 'continuous'/'discrete', bin_merges: {...}}}
         if not target or not variables:
             return jsonify({"error": "Missing required fields: variables or target"}), 400
-        # Load dataset
-        df = pd.read_csv("uploaded.csv")
+        
+        # Load dataset with absolute path
+        csv_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
+        df = pd.read_csv(csv_path)
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
         # Robustly convert target to numeric (0/1). Avoids 500s on text targets.
@@ -487,8 +520,10 @@ def cross_tab_api():
                 'stats': cross_tab.to_dict(orient='records'),
                 'bin_merges': final_merges
             }
-        # Save updated dataset with binned columns
-        df.to_csv("uploaded.csv", index=False)
+        
+        # Save updated dataset with binned columns using helper function
+        safe_save_csv(df)
+        
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

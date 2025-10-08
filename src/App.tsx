@@ -165,6 +165,57 @@ function App() {
     );
   };
 
+  // Select/unselect all discrete columns for univariate selection
+  const toggleSelectAllDiscrete = (selectAll?: boolean) => {
+    setSelectedForUnivariate(prev => {
+      const discreteSet = new Set(discreteColumns);
+      const currentSet = new Set(prev);
+      // If selectAll explicitly false, remove all discrete
+      if (selectAll === false) {
+        discreteColumns.forEach(c => currentSet.delete(c));
+        return Array.from(currentSet);
+      }
+
+      // If selectAll explicitly true, add all discrete
+      if (selectAll === true) {
+        discreteColumns.forEach(c => currentSet.add(c));
+        return Array.from(currentSet);
+      }
+
+      // Otherwise toggle: if all discrete are already selected -> remove them, else add them
+      const allSelected = discreteColumns.every(c => currentSet.has(c));
+      if (allSelected) {
+        discreteColumns.forEach(c => currentSet.delete(c));
+      } else {
+        discreteColumns.forEach(c => currentSet.add(c));
+      }
+      return Array.from(currentSet);
+    });
+  };
+
+  // Select/unselect all continuous columns for univariate selection
+  const toggleSelectAllContinuous = (selectAll?: boolean) => {
+    setSelectedForUnivariate(prev => {
+      const continuousSet = new Set(continuousColumns);
+      const currentSet = new Set(prev);
+      if (selectAll === false) {
+        continuousColumns.forEach(c => currentSet.delete(c));
+        return Array.from(currentSet);
+      }
+      if (selectAll === true) {
+        continuousColumns.forEach(c => currentSet.add(c));
+        return Array.from(currentSet);
+      }
+      const allSelected = continuousColumns.every(c => currentSet.has(c));
+      if (allSelected) {
+        continuousColumns.forEach(c => currentSet.delete(c));
+      } else {
+        continuousColumns.forEach(c => currentSet.add(c));
+      }
+      return Array.from(currentSet);
+    });
+  };
+
   const assignRemainingToContinuous = () => {
     const selectedDiscrete = new Set(discreteColumns);
     const remaining = columns.filter(col => !selectedDiscrete.has(col) && col !== targetVariable);
@@ -388,6 +439,8 @@ function App() {
             selectedForUnivariate={selectedForUnivariate}
             toggleSelectedForUnivariate={toggleSelectedForUnivariate}
             handleFineBin={handleFineBin}
+            toggleSelectAllDiscrete={toggleSelectAllDiscrete}
+            toggleSelectAllContinuous={toggleSelectAllContinuous}
             handleProceedToSelectedColumns={handleProceedToSelectedColumns}
             univariateResults={univariateResults}
             fineBinResults={fineBinResults}
