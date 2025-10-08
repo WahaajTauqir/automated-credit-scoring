@@ -1,0 +1,42 @@
+%% Module 01: Data Ingestion & Schema Validation
+%% Focus: Deterministic, reproducible data onboarding with strict contracts.
+%%{init: {"theme": "dark", "flowchart": {"defaultRenderer": "elk", "htmlLabels": false}} }%%
+flowchart TB
+    classDef step fill:#1e293b,stroke:#60a5fa,stroke-width:1px,color:#ffffff;
+    classDef decision fill:#3b2f13,stroke:#fbbf24,stroke-width:1px,color:#ffffff;
+    classDef fail fill:#4b1d1d,stroke:#f87171,color:#ffffff;
+    classDef ok fill:#1f3d18,stroke:#65a30d,color:#ffffff;
+
+    A((Start Ingestion)):::step
+    S1["Load Raw File(s) — CSV/Parquet/S3; Enforce max file size <2GB; Hash contents for lineage"]:::step
+    S2["Schema Check — Column presence (100%); Types castable; Primary keys optional"]:::step
+    D1{"Missing Required Column?"}:::decision
+    D2{"Type Cast Failure >0?"}:::decision
+    S3["Constraint Validation — null ratio vs spec; numeric range sanity; category cardinality"]:::step
+    D3{"Any Constraint Violations?"}:::decision
+    S4["Standardize formats — ISO dates, upper-case categorical, trim"]:::step
+    S5["Persist clean stage table (immutable, timestamped snapshot)"]:::ok
+    E((Ready for Variable Classification)):::ok
+
+    F1["Reject & Log — record reason, sample failing rows"]:::fail
+
+    A --> S1 --> S2 --> D1
+    D1 -->|Yes| F1
+    D1 -->|No| D2
+    D2 -->|Yes| F1
+    D2 -->|No| S3 --> D3
+    D3 -->|Yes| F1
+    D3 -->|No| S4 --> S5 --> E
+
+    %% Metrics captured
+    subgraph METRICS [Captured Metadata]
+        M1[Row Count]
+        M2[Column Completeness %]
+        M3[Per-column Null %]
+        M4[Cardinality / Unique %]
+        M5[Load Timestamp & Hash]
+    end
+    style METRICS fill:#111827,stroke:#6b7280,stroke-dasharray: 3 3,color:#ffffff
+
+    click E "./module_02_variable_classification.mmd" "Next: Variable Classification" _self
+    click F1 "./module_01_data_ingestion.mmd" "Retry Ingestion After Fix" _self

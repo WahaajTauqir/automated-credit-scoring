@@ -1,0 +1,31 @@
+%% Module 10: Score Scaling & Points-to-Odds
+%% Convert logistic output (log-odds) to interpretable score range (e.g., 300-900).
+%% Dark theme & contrast
+%%{init: {"theme": "dark", "flowchart": {"defaultRenderer": "elk", "htmlLabels": false}} }%%
+flowchart TB
+    classDef step fill:#3b1324,stroke:#f472b6,color:#ffffff;
+    classDef decision fill:#3b2f13,stroke:#fbbf24,color:#ffffff;
+
+    A((From Model Training)):::step
+    S0["Define anchor: Points0 at odds0 (e.g., 600 at 50:1); PDO = points to double odds (e.g., 50)"]:::step
+    S1["Compute Factor = PDO / ln(2); Offset = Points0 - Factor * ln(odds0)"]:::step
+    S2["Score = Offset + Factor * log( (1-PD)/PD )"]:::step
+    S3["Cap & Floor Score Range (300-900)"]:::step
+    S4["Map Each Bin Contribution (Partial Scorecard)"]:::step
+    S5["Validate: Monotonic PD vs Score" ]:::step
+    D1{"Monotonic Violations?"}:::decision
+    S6["Adjust bin merges or refit minor coefficients"]:::step
+    S7["Finalize Scorecard Table"]:::step
+    E((To Performance Validation))
+
+    A --> S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> D1
+    D1 -->|Yes| S6 --> S5
+    D1 -->|No| S7 --> E
+
+    subgraph OUTPUTS [Artifacts]
+        O1["Score Scaling Parameters"]
+        O2["Scorecard: Variable | Bin | Points"]
+    end
+    style OUTPUTS fill:#111827,stroke:#6b7280,stroke-dasharray: 3 3,color:#ffffff
+
+    click E "./module_11_performance_validation.mmd" "Next: Performance Validation" _self

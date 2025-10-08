@@ -1,63 +1,64 @@
 .csv-reader-container {
-    margin: 20px 0;
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
+/* Outer box */
 .file-upload-container {
-    padding: 30px;
-    text-align: center;
-    border: 1px solid #AAAAAA;
-    border-radius: 8px;
-    background-color: #AAAAAA;
-    width: 100%;
-    max-width: 400px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
+  width: 100%;
+  max-width: 400px;
+  background-color: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 20px;
+  text-align: center;
+  box-shadow: 0 0 0 1px #21262d;
 }
 
+/* Text */
 .file-upload-container p {
-    margin: 0 0 20px 0;
-    color: #333;
+  margin-bottom: 16px;
+  color: #c9d1d9;
+  font-size: 14px;
 }
 
+/* Button-like label */
 .upload-button {
-    display: inline-block;
-    padding: 10px 20px;
-    background-color: #0066cc;
-    color: white;
-    border-radius: 4px;
-    cursor: pointer;
-    font-weight: bold;
-    transition: background-color 0.3s;
+  display: inline-block;
+  padding: 10px 20px;
+  background-color: #238636;
+  color: white;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s ease-in-out;
+  font-size: 14px;
 }
 
 .upload-button:hover {
-    background-color: #0052a3;
+  background-color: #2ea043;
 }
 
+/* File name */
 .file-name {
-    margin-top: 15px;
-    font-style: italic;
-    color: #444;
-    text-align: center;
-    width: 100%;
+  margin-top: 12px;
+  font-size: 13px;
+  color: #8b949e;
+  font-style: italic;
 }
 
+/* Error message */
 .error-message {
-    color: #d32f2f;
-    margin-top: 10px;
-    text-align: center;
-    width: 100%;
+  color: #d73a49;
+  margin-top: 10px;
+  font-size: 13px;
 }
 
+/* Loading */
 .loading-indicator {
-    margin-top: 15px;
-    color: #0066cc;
-    text-align: center;
-    width: 100%;
+  margin-top: 10px;
+  color: #58a6ff;
+  font-size: 13px;
 }

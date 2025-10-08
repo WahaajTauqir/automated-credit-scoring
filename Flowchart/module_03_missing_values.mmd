@@ -1,0 +1,36 @@
+%% Module 03: Missing Data Handling
+%% Objective: Apply hierarchy of treatments maintaining information value & minimizing bias.
+%% Techniques: Simple Impute, KNN (for continuous), Category 'MISSING', Model-based optional.
+%%{init: {"theme": "dark", "flowchart": {"defaultRenderer": "elk", "htmlLabels": false}} }%%
+flowchart TB
+    classDef step fill:#1e293b,stroke:#60a5fa,color:#ffffff;
+    classDef decision fill:#3b2f13,stroke:#fbbf24,color:#ffffff;
+    classDef warn fill:#4b1d1d,stroke:#f87171,color:#ffffff;
+
+    A((From Classification)):::step
+    S0["Profile missing% per variable — compute missing_rate and conditional_bad_rate"]:::step
+    D0{"Missing Rate > 60%?"}:::decision
+    Sdrop["Candidate DROP (Document Rationale)"]:::warn
+    S1["Numeric <= 5% Missing -> Median Impute"]:::step
+    S2["Numeric 5-30% Missing -> KNN Impute (k=5) if n>5000 else Median"]:::step
+    S3["Numeric >30-60% -> Create Missing Indicator + Median"]:::step
+    S4["Categorical Missing -> New Level 'MISSING' if freq>10 else consolidate"]:::step
+    S5["High Cardinality -> Frequency encode before KNN? (Skip if >10k rows)"]:::step
+    S6["Post-Impute Drift Check: Compare distribution (KS p>0.01) vs original non-missing"]:::step
+    S7["Log Imputation Map (variable, method, value)"]:::step
+    E((To Outlier Treatment))
+
+    A --> S0 --> D0
+    D0 -->|Yes| Sdrop --> S7
+    D0 -->|No| S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> E
+
+    subgraph METHODS [Methods]
+        M1[Median]
+        M2[KNN]
+        M3[Indicator Flag]
+        M4[Category Level]
+        M5[Freq Encoding]
+    end
+    style METHODS fill:#111827,stroke:#6b7280,stroke-dasharray: 3 3,color:#ffffff
+
+    click E "./module_04_outliers.mmd" "Next: Outliers" _self
