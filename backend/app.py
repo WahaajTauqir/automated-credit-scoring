@@ -5,6 +5,7 @@ import numpy as np
 import os
 import datetime
 import json
+import requests
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_curve, auc, classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
@@ -593,6 +594,209 @@ def univariate_analysis():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# ----------- Get CSV Sample Data for AI Classification -----------
+@app.route('/api/csv-samples', methods=['POST'])
+def get_csv_samples():
+    """
+    Get sample values from uploaded CSV for specified columns to help with AI classification.
+    Expects JSON: { columns: [...] }
+    Returns: { column_name: [sample_values...] }
+    """
+    try:
+        payload = request.get_json() or {}
+        columns = payload.get('columns', [])
+        sample_size = payload.get('sample_size', 20)
+        
+        csv_path = get_csv_path()
+        if not os.path.exists(csv_path):
+            return jsonify({"error": "No CSV file uploaded"}), 400
+            
+        df = pd.read_csv(csv_path)
+        
+        samples = {}
+        for col in columns:
+            if col in df.columns:
+                # Get sample values, removing NaN and converting to native Python types
+                col_samples = df[col].dropna().head(sample_size).tolist()
+                # Convert numpy types to native Python types for JSON serialization
+                samples[col] = [x.item() if hasattr(x, 'item') else x for x in col_samples]
+            else:
+                samples[col] = []
+                
+        return jsonify(samples)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/ai-classify-columns', methods=['POST'])
+def ai_classify_columns():
+    """
+    Classify columns as 'discrete' or 'continuous' using GitHub Models inference endpoint.
+    Expects JSON: { columns: [...], sampleData: { col: [samples...] }, model: <optional model name> }
+    """
+    try:
+        payload = request.get_json() or {}
+        columns = payload.get('columns', [])
+        sample_data = payload.get('sampleData', {})
+        model = payload.get('model') or os.getenv('AI_CLASSIFY_MODEL') or 'openai/gpt-5-mini'
+
+        token = os.getenv('GITHUB_TOKEN')
+        if not token:
+            print("ERROR: GITHUB_TOKEN environment variable not found")
+            return jsonify({"error": "Server missing GITHUB_TOKEN environment variable. Set it and restart the backend."}), 401
+        
+        print(f"DEBUG: Using GitHub token (first 10 chars): {token[:10]}...")
+        print(f"DEBUG: Processing {len(columns)} columns")
+
+        # For large datasets, use enhanced heuristics as primary method
+        if len(columns) > 50:
+            print(f"DEBUG: Large dataset detected ({len(columns)} columns), using enhanced heuristics")
+            results = {}
+            for col in columns:
+                results[col] = classify_with_heuristics(col, sample_data.get(col, []))
+            return jsonify(results)
+
+        # Build an enhanced prompt with detailed classification criteria
+        prompt = (
+            "You are a data science expert that classifies dataset columns as 'discrete' or 'continuous'.\n\n"
+            "DISCRETE variables are:\n"
+            "- Categorical (text labels, categories, yes/no, male/female)\n"
+            "- Integer codes or IDs (customer_id, product_code, zip_code)\n"
+            "- Binary/boolean values (0/1, true/false)\n"
+            "- Ordinal scales with few distinct values (rating 1-5, grade A-F)\n"
+            "- Countable items with limited distinct values (number_of_children, education_level)\n\n"
+            "CONTINUOUS variables are:\n"
+            "- Measurements (age, height, weight, temperature, price)\n"
+            "- Financial amounts (salary, revenue, balance)\n"
+            "- Percentages and ratios (interest_rate, conversion_rate)\n"
+            "- Time durations (days, hours, response_time)\n"
+            "- Scientific measurements (pressure, voltage, distance)\n\n"
+            "Analyze the column names and sample values. Return ONLY a valid JSON object.\n"
+            f"Columns to classify: {json.dumps(columns)}\n"
+            f"Sample data: {json.dumps(sample_data)}\n\n"
+            "Response format: {\"column_name\": \"discrete\" or \"continuous\"}\n"
+        )
+
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant that replies with strict JSON."},
+                {"role": "user", "content": prompt}
+            ]
+        }
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        url = "https://models.github.ai/inference/chat/completions"
+        resp = requests.post(url, headers=headers, json=body, timeout=30)
+        
+        print(f"DEBUG: GitHub API response status: {resp.status_code}")
+        if not resp.ok:
+            print(f"DEBUG: GitHub API error response: {resp.text}")
+            error_msg = f"GitHub Models API call failed (status {resp.status_code})"
+            if resp.status_code == 401:
+                error_msg += ". Check if your GitHub token has 'models:read' permission."
+            elif resp.status_code == 403:
+                error_msg += ". Rate limit exceeded or insufficient permissions."
+            return jsonify({"error": error_msg, "details": resp.text}), 502
+
+        data = resp.json()
+        # Expected path: choices[0].message.content
+        text = None
+        try:
+            text = data.get('choices', [])[0].get('message', {}).get('content')
+        except Exception:
+            text = None
+
+        if not text:
+            # fallback: try top-level generated_text
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                text = data[0].get('generated_text')
+
+        if not text:
+            return jsonify({"error": "Model returned unexpected response", "raw": data}), 502
+
+        # Try to extract JSON from the model's text
+        mapping = None
+        try:
+            mapping = json.loads(text.strip())
+        except Exception:
+            # attempt to find JSON substring
+            import re
+            m = re.search(r"\{[\s\S]*\}", text)
+            if m:
+                try:
+                    mapping = json.loads(m.group(0))
+                except Exception:
+                    mapping = None
+
+        if not mapping or not isinstance(mapping, dict):
+            return jsonify({"error": "Failed to parse JSON from model response", "raw_text": text}), 502
+
+        # Normalize values to 'discrete' or 'continuous' with enhanced heuristics
+        normalized = {}
+        for k, v in mapping.items():
+            s = str(v).strip().lower()
+            if s.startswith('d'):
+                normalized[k] = 'discrete'
+            elif s.startswith('c'):
+                normalized[k] = 'continuous'
+            else:
+                # Enhanced fallback heuristics based on column name and samples
+                samples = sample_data.get(k, [])
+                col_name_lower = k.lower()
+                
+                # Check for discrete indicators in column name
+                discrete_keywords = ['id', 'code', 'type', 'category', 'class', 'group', 'status', 
+                                   'flag', 'level', 'grade', 'rating', 'rank', 'gender', 'sex',
+                                   'marital', 'education', 'occupation', 'department', 'region',
+                                   'state', 'country', 'city', 'zip', 'postal']
+                
+                continuous_keywords = ['age', 'amount', 'price', 'cost', 'salary', 'income', 'revenue',
+                                     'balance', 'rate', 'ratio', 'percent', 'score', 'weight', 'height',
+                                     'length', 'width', 'depth', 'distance', 'time', 'duration', 'years']
+                
+                is_discrete_name = any(keyword in col_name_lower for keyword in discrete_keywords)
+                is_continuous_name = any(keyword in col_name_lower for keyword in continuous_keywords)
+                
+                if is_discrete_name:
+                    normalized[k] = 'discrete'
+                elif is_continuous_name:
+                    normalized[k] = 'continuous'
+                else:
+                    # Analyze sample values
+                    try:
+                        if not samples:
+                            normalized[k] = 'discrete'  # Default when no data
+                        else:
+                            # Check for non-numeric values
+                            non_numeric_count = sum(1 for x in samples if not isinstance(x, (int, float)))
+                            if non_numeric_count > 0:
+                                normalized[k] = 'discrete'
+                            else:
+                                # For numeric data, check uniqueness and range
+                                unique_values = len(set(samples))
+                                if unique_values <= 10:  # Low cardinality suggests discrete
+                                    normalized[k] = 'discrete'
+                                elif unique_values == len(samples):  # All unique suggests continuous
+                                    normalized[k] = 'continuous'
+                                else:
+                                    # Check if values look like IDs (integers) or measurements (floats)
+                                    all_integers = all(isinstance(x, int) or (isinstance(x, float) and x.is_integer()) for x in samples)
+                                    if all_integers and max(samples) - min(samples) > unique_values * 2:
+                                        normalized[k] = 'discrete'  # Likely IDs or codes
+                                    else:
+                                        normalized[k] = 'continuous'  # Likely measurements
+                    except Exception:
+                        normalized[k] = 'discrete'  # Safe default
+
+        return jsonify(normalized)
+    except Exception as e:
+        import traceback
+        print('ai_classify_columns error:', traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
 # ----------- WOE/IV Calculation -----------
 def calculate_woe_iv(df, variable, target, bin_merges=None):
     app.logger.debug(f"calculate_woe_iv called for {variable}, bin_merges: {bin_merges is not None}")
@@ -776,7 +980,12 @@ def woe_iv_api():
             existing_woe_iv = {}
             if row and row[0]:
                 try:
-                    existing_woe_iv = json.loads(row[0])
+                    loaded = json.loads(row[0])
+                    if isinstance(loaded, dict):
+                        existing_woe_iv = loaded
+                    else:
+                        # If it's a list or anything else, replace with empty dict
+                        existing_woe_iv = {}
                 except json.JSONDecodeError:
                     existing_woe_iv = {}
             # Update with new results
@@ -1779,6 +1988,90 @@ def apply_scorecard():
         tb = traceback.format_exc()
         print(f"ERROR in apply_scorecard: {tb}")
         return jsonify({"error": f"Failed to apply score card ({type(e).__name__}): {str(e)}", "traceback": tb}), 500
+
+
+def classify_with_heuristics(column_name, samples):
+    """
+    Enhanced heuristic classification for discrete vs continuous variables.
+    Uses column name patterns and sample data analysis.
+    """
+    col_name_lower = column_name.lower()
+    
+    # Check for discrete indicators in column name
+    discrete_keywords = ['id', 'code', 'type', 'category', 'class', 'group', 'status', 
+                       'flag', 'level', 'grade', 'rating', 'rank', 'gender', 'sex',
+                       'marital', 'education', 'occupation', 'department', 'region',
+                       'state', 'country', 'city', 'zip', 'postal', 'bool', 'binary']
+    
+    continuous_keywords = ['age', 'amount', 'price', 'cost', 'salary', 'income', 'revenue',
+                         'balance', 'rate', 'ratio', 'percent', 'score', 'weight', 'height',
+                         'length', 'width', 'depth', 'distance', 'time', 'duration', 'years',
+                         'month', 'day', 'hour', 'minute', 'second', 'value']
+    
+    is_discrete_name = any(keyword in col_name_lower for keyword in discrete_keywords)
+    is_continuous_name = any(keyword in col_name_lower for keyword in continuous_keywords)
+    
+    if is_discrete_name:
+        return 'discrete'
+    elif is_continuous_name:
+        return 'continuous'
+    else:
+        # Analyze sample values if available
+        try:
+            if not samples or len(samples) == 0:
+                return 'discrete'  # Default when no data
+            
+            # Remove None/null values
+            clean_samples = [s for s in samples if s is not None and str(s).strip() != '']
+            if not clean_samples:
+                return 'discrete'
+            
+            # Check for non-numeric values (strings, booleans)
+            non_numeric_count = 0
+            for x in clean_samples:
+                if isinstance(x, str) and not x.replace('.', '').replace('-', '').isdigit():
+                    non_numeric_count += 1
+                elif isinstance(x, bool):
+                    non_numeric_count += 1
+            
+            if non_numeric_count > 0:
+                return 'discrete'
+            
+            # Convert to numeric for analysis
+            try:
+                numeric_samples = [float(x) for x in clean_samples]
+            except:
+                return 'discrete'
+            
+            # For numeric data, check patterns
+            unique_values = len(set(numeric_samples))
+            total_values = len(numeric_samples)
+            
+            # Low cardinality suggests discrete
+            if unique_values <= 10:
+                return 'discrete'
+            
+            # High cardinality (many unique values) suggests continuous
+            if unique_values > total_values * 0.8:
+                return 'continuous'
+            
+            # Check if values are all integers
+            all_integers = all(isinstance(x, int) or (isinstance(x, float) and x.is_integer()) for x in numeric_samples)
+            
+            if all_integers:
+                # Integer sequences with large gaps might be IDs
+                min_val, max_val = min(numeric_samples), max(numeric_samples)
+                if max_val - min_val > unique_values * 3:
+                    return 'discrete'  # Likely IDs or codes
+                else:
+                    return 'discrete' if unique_values <= 20 else 'continuous'
+            else:
+                # Float values generally suggest continuous
+                return 'continuous'
+                
+        except Exception:
+            return 'discrete'  # Safe default
+
 
 if __name__ == '__main__':
     init_db()

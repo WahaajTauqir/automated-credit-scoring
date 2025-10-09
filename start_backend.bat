@@ -1,0 +1,6 @@
+@echo off
+set GITHUB_TOKEN=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
+echo Starting backend with GitHub token...
+echo Token prefix: %GITHUB_TOKEN:~0,20%...
+C:/Wahaaj/PERSONAL/PROJ-PR-OG/automated-credit-scoring/.venv/Scripts/python.exe backend/app.py
+pause

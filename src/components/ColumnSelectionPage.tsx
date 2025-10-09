@@ -85,6 +85,78 @@ const ColumnSelectionPage = ({
         )}
         {columns.length > 0 && !hasWrongCsv && (
           <>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '16px' }}>
+              <button
+                className="assign-button"
+                onClick={async () => {
+                  // Classify ALL columns using backend AI endpoint (not just current page)
+                  try {
+                    const colsToClassify = columns; // Use ALL columns, not paginatedColumns
+                    if (!colsToClassify || colsToClassify.length === 0) {
+                      alert('No columns to classify');
+                      return;
+                    }
+                    
+                    // Show progress message
+                    alert(`Starting AI classification for ${colsToClassify.length} columns...`);
+                    
+                    // Prepare sample data by fetching actual CSV data
+                    let sampleData: Record<string, any[]> = {};
+                    try {
+                      // Fetch sample values from the uploaded CSV
+                      const sampleResp = await fetch('http://localhost:5000/api/csv-samples', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ columns: colsToClassify, sample_size: 20 })
+                      });
+                      if (sampleResp.ok) {
+                        sampleData = await sampleResp.json();
+                      } else {
+                        console.warn('Could not fetch CSV samples, using empty data');
+                        colsToClassify.forEach(col => {
+                          sampleData[col] = [];
+                        });
+                      }
+                    } catch (e) {
+                      console.warn('Could not fetch CSV data for samples:', e);
+                      // Fallback: send empty samples
+                      colsToClassify.forEach(col => {
+                        sampleData[col] = [];
+                      });
+                    }
+                    
+                    const resp = await fetch('http://localhost:5000/api/ai-classify-columns', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ columns: colsToClassify, sampleData })
+                    });
+                    const data = await resp.json();
+                    if (data && !data.error) {
+                      // Apply classifications via provided handler
+                      let discreteCount = 0;
+                      let continuousCount = 0;
+                      Object.entries(data).forEach(([col, typ]) => {
+                        if (col && (typ === 'discrete' || typ === 'continuous')) {
+                          handleTypeChange(col, typ as string);
+                          if (typ === 'discrete') discreteCount++;
+                          else continuousCount++;
+                        }
+                      });
+                      alert(`AI classification complete!\nClassified ${discreteCount} discrete and ${continuousCount} continuous variables.`);
+                    } else {
+                      console.error('AI classify error', data);
+                      alert('AI classification failed. See console for details.');
+                    }
+                  } catch (e) {
+                    console.error('AI classification request failed', e);
+                    alert('AI classification failed. See console for details.');
+                  }
+                }}
+              >
+                AI Separation (All Columns)
+              </button>
+            </div>
+
             <ColumnPanels
               columns={columns}
               paginatedColumns={paginatedColumns}

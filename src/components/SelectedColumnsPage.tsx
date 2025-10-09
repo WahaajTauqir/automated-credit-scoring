@@ -67,7 +67,7 @@ const SelectedColumnsPage = () => {
   const filteredColumns = selectedColumns
     .filter(col => col.toLowerCase().includes(searchTerm.toLowerCase()))
     .sort((a, b) => {
-      let valA, valB;
+      let valA: any, valB: any;
       if (sortBy === 'iv') {
         valA = woeIvResults[a]?.iv || 0;
         valB = woeIvResults[b]?.iv || 0;
@@ -98,6 +98,7 @@ const SelectedColumnsPage = () => {
       console.error('Recommendation failed', e);
     }
   };
+
 
   // Initialize component state from navigation state
   useEffect(() => {
@@ -345,6 +346,8 @@ const SelectedColumnsPage = () => {
       setActiveGroup((prev) => ({ ...prev, [col]: 1 }));
       setFineBinResults((prev) => ({ ...prev, [col]: prev[col] || [] }));
       await loadSavedFineBins(col, varType);
+      // Always fetch WOE/IV after coarse binning
+      await fetchWoeIv(col);
     } catch {
       alert('Error fetching coarse bin results');
     }
@@ -1021,6 +1024,7 @@ const SelectedColumnsPage = () => {
                   </div>
                 )}
 
+                {/* Always show Fine Binning Results if available */}
                 {fineBinResults[activeColumn]?.length > 0 && (
                   <div className="results-container">
                     <h2>Fine Binning Results</h2>
@@ -1120,45 +1124,44 @@ const SelectedColumnsPage = () => {
                         </tbody>
                       </table>
                     </div>
-
-                    {woeIvResults[activeColumn] && (
-                      <div className="woe-iv-embedded" style={{ marginTop: '24px' }}>
-                        <h3>WOE by Bin</h3>
-                        <ResponsiveContainer width="100%" height={300}>
-                          <BarChart
-                            data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
-                              Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
-                              WOE: parseFloat(row.WOE),
-                            }))}
-                            margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
-                          >
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-                            <YAxis />
-                            <Tooltip />
-                            <Bar dataKey="WOE" fill="#8884d8" />
-                          </BarChart>
-                        </ResponsiveContainer>
-
-                        <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
-                        <ResponsiveContainer width="100%" height={300}>
-                          <LineChart
-                            data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
-                              Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
-                              IV: parseFloat(row.IV),
-                            }))}
-                            margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
-                          >
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-                            <YAxis />
-                            <Tooltip />
-                            <Legend />
-                            <Line type="monotone" dataKey="IV" stroke="#82ca9d" strokeWidth={2} />
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </div>
-                    )}
+                  </div>
+                )}
+                {/* Always show WOE/IV cards if available, independently */}
+                {woeIvResults[activeColumn] && (
+                  <div className="woe-iv-embedded" style={{ marginTop: '24px' }}>
+                    <h3>WOE by Bin</h3>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart
+                        data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
+                          Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
+                          WOE: parseFloat(row.WOE),
+                        }))}
+                        margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                        <YAxis />
+                        <Tooltip />
+                        <Bar dataKey="WOE" fill="#8884d8" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                    <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <LineChart
+                        data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
+                          Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
+                          IV: parseFloat(row.IV),
+                        }))}
+                        margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                        <YAxis />
+                        <Tooltip />
+                        <Legend />
+                        <Line type="monotone" dataKey="IV" stroke="#82ca9d" strokeWidth={2} />
+                      </LineChart>
+                    </ResponsiveContainer>
                   </div>
                 )}
               </div>
