@@ -59,9 +59,9 @@ const ColumnSelectionPage = ({
   const needsUpload = restoring && columns.length === 0 && expectedColumns && expectedColumns.length > 0;
   const hasWrongCsv = !restoring && columns.length > 0 && expectedColumns && expectedColumns.length > 0 && expectedColumns.some(col => !columns.includes(col));
   return (
-    <div>
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       <Navbar />
-      <div className="app-container">
+      <div className="app-container" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         {needsUpload && (
           <div style={{ textAlign: 'center', width: '100%' }}>
             <p>Saved analysis found. Please upload the corresponding CSV to continue.</p>

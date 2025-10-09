@@ -23,6 +23,13 @@ from db import get_db_connection, init_db, save_record_db, upsert_single_record_
 import traceback
 import logging
 
+# Set PostgreSQL connection environment variables
+os.environ['PG_DBNAME'] = 'mydb'
+os.environ['PG_USER'] = 'myuser'
+os.environ['PG_PASSWORD'] = 'mypassword'
+os.environ['PG_HOST'] = 'localhost'
+os.environ['PG_PORT'] = '5432'
+
 # configure basic logging for debug
 logging.basicConfig(level=logging.DEBUG)
 
@@ -432,27 +439,50 @@ def fine_bin_api():
         csv_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
         df = pd.read_csv(csv_path)
         df[target] = df[target].fillna(0).astype(int)
-        
+
         if var_type == 'continuous':
             _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
-            # Only keep bins that exist
             existing_bins = set(df[f'{var}_binned'].unique())
-            bin_merges = {
-                k: [b for b in v if b in existing_bins]
-                for k, v in bin_merges.items()
-            }
-            # Remove empty merges
+            bin_merges = {k: [b for b in v if b in existing_bins] for k, v in bin_merges.items()}
             bin_merges = {k: v for k, v in bin_merges.items() if v}
-            tab, _, adjusted_merges, _ = fine_bin_continuous(df, var, target, bin_merges)  # Handle the extra bin_ranges return value
+            tab, _, adjusted_merges, _ = fine_bin_continuous(df, var, target, bin_merges)
         else:
             _, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
             tab, _, adjusted_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
-        
+
         if tab is None:
             return jsonify({"error": "Fine binning returned no results"}), 400
-        
-        # Save with helper function that handles retries
-        safe_save_csv(df)
+
+        # Save binning results to PostgreSQL
+        from db import save_record_db, save_finebin_details_db
+        # Always upsert into the same record (never create new)
+        record_id = req.get('recordId')
+        dataset_path = "uploaded.csv"
+        # Load latest record to preserve selected_columns, discrete_columns, continuous_columns
+        from db import get_records_db
+        records = get_records_db()
+        if records:
+            latest = records[0]
+            discrete_columns = latest.get('discrete_columns', '[]')
+            continuous_columns = latest.get('continuous_columns', '[]')
+            selected_columns = latest.get('selected_columns', '[]')
+        else:
+            discrete_columns = json.dumps([])
+            continuous_columns = json.dumps([])
+            selected_columns = json.dumps([])
+        target_variable = target
+        univariate_results = json.dumps([])
+        finebin_results = json.dumps(tab.to_dict(orient='records'))
+        crosstab_results = json.dumps([])
+        woe_iv_results = json.dumps([])
+        dashboard_selected_columns = json.dumps(req.get('dashboard_selected_columns', []))
+        if not record_id:
+            # If no recordId, upsert will create one
+            record_id = upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
+        else:
+            # If recordId exists, upsert will update it
+            upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
+        save_finebin_details_db(int(record_id), var, adjusted_merges)
         print("Fine binning done for", var)
         return jsonify({
             "success": True,
@@ -521,9 +551,8 @@ def cross_tab_api():
                 'bin_merges': final_merges
             }
         
-        # Save updated dataset with binned columns using helper function
-        safe_save_csv(df)
-        
+        # Save cross-tab results to PostgreSQL (if needed)
+        # Example: upsert_single_record_db(...)
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -742,18 +771,18 @@ def woe_iv_api():
         if record_id:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("SELECT woe_iv_results FROM records WHERE id = ?", (record_id,))
+            cur.execute("SELECT woe_iv_results FROM records WHERE id = %s", (record_id,))
             row = cur.fetchone()
             existing_woe_iv = {}
-            if row and row['woe_iv_results']:
+            if row and row[0]:
                 try:
-                    existing_woe_iv = json.loads(row['woe_iv_results'])
+                    existing_woe_iv = json.loads(row[0])
                 except json.JSONDecodeError:
                     existing_woe_iv = {}
             # Update with new results
             existing_woe_iv.update(results)
             cur.execute(
-                "UPDATE records SET woe_iv_results = ? WHERE id = ?",
+                "UPDATE records SET woe_iv_results = %s WHERE id = %s",
                 (json.dumps(existing_woe_iv), record_id)
             )
             conn.commit()
@@ -775,13 +804,14 @@ def save_record():
         discrete_columns = ','.join(data.get('discrete_columns', []))
         continuous_columns = ','.join(data.get('continuous_columns', []))
         selected_columns = ','.join(data.get('selected_columns', []))
+        dashboard_selected_columns = ','.join(data.get('dashboard_selected_columns', []))
         target_variable = data.get('target_variable', '')
         univariate_results = data.get('univariate_results', '')
         finebin_results = data.get('finebin_results', '')
         crosstab_results = data.get('crosstab_results', '')
         record_id = save_record_db(
-            dataset_path, discrete_columns, continuous_columns, 
-            selected_columns, target_variable, univariate_results, 
+            dataset_path, discrete_columns, continuous_columns,
+            selected_columns, dashboard_selected_columns, target_variable, univariate_results,
             finebin_results, crosstab_results
         )
         return jsonify({"success": True, "id": record_id})
@@ -801,14 +831,15 @@ def upsert_single_record():
         discrete_columns = ','.join(data.get('discrete_columns', []))
         continuous_columns = ','.join(data.get('continuous_columns', []))
         selected_columns = ','.join(data.get('selected_columns', []))
+        dashboard_selected_columns = ','.join(data.get('dashboard_selected_columns', []))
         target_variable = data.get('target_variable', '')
         univariate_results = data.get('univariate_results', '')
         finebin_results = data.get('finebin_results', '')
         crosstab_results = data.get('crosstab_results', '')
         woe_iv_results = data.get('woe_iv_results', '')
         record_id = upsert_single_record_db(
-            dataset_path, discrete_columns, continuous_columns, 
-            selected_columns, target_variable, univariate_results, 
+            dataset_path, discrete_columns, continuous_columns,
+            selected_columns, dashboard_selected_columns, target_variable, univariate_results,
             finebin_results, crosstab_results, woe_iv_results
         )
         return jsonify({"success": True, "id": record_id})
@@ -1459,7 +1490,24 @@ def generate_scorecard():
         try:
             result = logit_model.fit(disp=0, maxiter=1000)
         except np.linalg.LinAlgError:
-            return jsonify({"error": "Model failed due to singular matrix"}), 500
+            # Diagnostics: VIF and correlation matrix
+            from statsmodels.stats.outliers_influence import variance_inflation_factor
+            vif_data = []
+            X_np = X.values
+            for i in range(X_np.shape[1]):
+                try:
+                    vif = variance_inflation_factor(X_np, i)
+                except Exception:
+                    vif = None
+                vif_data.append({"variable": X.columns[i], "vif": vif})
+            corr_matrix = X.corr().round(3).to_dict()
+            return jsonify({
+                "error": "Model failed due to singular matrix",
+                "diagnostics": {
+                    "vif": vif_data,
+                    "correlation_matrix": corr_matrix
+                }
+            }), 500
         except Exception as fit_err:
             return jsonify({"error": f"Model fitting failed: {str(fit_err)}"}), 500
 
@@ -1555,6 +1603,183 @@ def generate_scorecard():
 
     except Exception as e:
         return jsonify({"error": f"Failed to generate score card ({type(e).__name__}): {str(e)}"}), 500
+
+# ----------- Apply Score Card to All Records -----------
+@app.route('/api/apply-scorecard', methods=['POST'])
+def apply_scorecard():
+    """
+    Applies the score card to all records in the uploaded dataset and returns sorted results.
+    Returns: [{index, score, target, ...}]
+    """
+    import numpy as np
+    try:
+        data = request.get_json()
+        selected_variables = data.get('selected_variables', [])
+        target = data.get('target')
+        woe_transformed_data = data.get('woe_transformed_data', {})
+        scorecard_bins = data.get('scorecard_bins', None)
+
+        # Input validation
+        if not selected_variables or not target or not woe_transformed_data:
+            return jsonify({"error": "Missing required data: selected_variables, target, or woe_transformed_data"}), 400
+
+        df = pd.read_csv("uploaded.csv")
+        if target not in df.columns:
+            return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
+
+        # Sanitize non-finite values in selected variables
+        for var in selected_variables:
+            if var in df.columns:
+                df[var] = df[var].replace([np.inf, -np.inf], np.nan)
+                if df[var].isnull().any():
+                    # Fill NaN with a placeholder (e.g., -9999 for discrete, or median for continuous)
+                    if df[var].dtype.kind in 'biufc':
+                        df[var] = df[var].fillna(df[var].median())
+                    else:
+                        df[var] = df[var].fillna('Missing')
+
+        # Prepare WOE-transformed data for each variable
+        modeling_data = {}
+        for var in selected_variables:
+            woe_data = woe_transformed_data[var]
+            ranges_list = None
+            if isinstance(woe_data, dict) and 'woe_ranges' in woe_data and isinstance(woe_data['woe_ranges'], list):
+                ranges_list = woe_data['woe_ranges']
+            elif isinstance(woe_data, dict) and 'stats' in woe_data and isinstance(woe_data['stats'], list):
+                ranges_list = [{
+                    'range': r.get('Range') or r.get('Bin') or str(r),
+                    'woe': float(r.get('WOE') or 0)
+                } for r in woe_data['stats']]
+            else:
+                continue
+            if not ranges_list:
+                continue
+            woe_mapping = {}
+            for range_info in ranges_list:
+                try:
+                    bin_range = range_info.get('range') if isinstance(range_info, dict) else str(range_info)
+                    woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
+                    if bin_range is None:
+                        continue
+                    # Handle Missing/NaN
+                    if isinstance(bin_range, str) and ('Missing' in bin_range or 'NaN' in bin_range):
+                        mask = df[var].isna() | (df[var] == 'Missing')
+                        for idx in df[mask].index:
+                            woe_mapping[idx] = woe_value
+                        continue
+                    # Numeric range parsing (e.g., "(a, b]", "[a, b]")
+                    if isinstance(bin_range, str) and any(ch in bin_range for ch in '(),[]'):
+                        range_str = bin_range.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
+                        parts = [p.strip() for p in range_str.split(',') if p.strip()]
+                        if len(parts) == 2:
+                            try:
+                                lower = float(parts[0]) if parts[0].lower() not in ['-inf', 'inf'] else (float('-inf') if parts[0].lower() == '-inf' else float('inf'))
+                                upper = float(parts[1]) if parts[1].lower() not in ['-inf', 'inf'] else (float('-inf') if parts[1].lower() == '-inf' else float('inf'))
+                                if lower == float('-inf'):
+                                    mask = df[var] <= upper
+                                elif upper == float('inf'):
+                                    mask = df[var] > lower
+                                else:
+                                    mask = (df[var] > lower) & (df[var] <= upper)
+                                for idx in df[mask].index:
+                                    woe_mapping[idx] = woe_value
+                                continue
+                            except (ValueError, TypeError):
+                                pass
+                    # Hyphen-separated ranges (e.g., "1 - 2")
+                    hyphen_match = re.match(r'^\s*-?\d+(?:\.\d+)?\s*-\s*-?\d+(?:\.\d+)?\s*$', str(bin_range))
+                    if isinstance(bin_range, str) and hyphen_match:
+                        try:
+                            parts = [p.strip() for p in bin_range.split('-')]
+                            lower, upper = float(parts[0]), float(parts[1])
+                            mask = (df[var].astype(float) >= lower) & (df[var].astype(float) <= upper)
+                            for idx in df[mask].index:
+                                woe_mapping[idx] = woe_value
+                            continue
+                        except (ValueError, TypeError):
+                            pass
+                    # Categorical values (comma-separated or single)
+                    if isinstance(bin_range, str):
+                        cat_vals = [v.strip() for v in bin_range.split(',') if v.strip()]
+                        for cat_val in cat_vals:
+                            try:
+                                mask = df[var].astype(str) == str(cat_val)
+                                for idx in df[mask].index:
+                                    woe_mapping[idx] = woe_value
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+            if woe_mapping:
+                woe_column = [woe_mapping.get(i, 0) for i in range(len(df))]
+                modeling_data[var] = woe_column
+            else:
+                modeling_data[var] = [0] * len(df)
+
+        # Score card parameters (reuse logic from generate-scorecard)
+        # For simplicity, re-fit logistic regression to get coefficients/intercept
+        model_df = pd.DataFrame(modeling_data)
+        model_df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
+        X = model_df[selected_variables]
+        y = model_df[target]
+        X_with_const = sm.add_constant(X)
+        logit_model = sm.Logit(y, X_with_const)
+        try:
+            result = logit_model.fit(disp=0, maxiter=1000)
+        except Exception as e:
+            return jsonify({"error": f"Model fit error: {str(e)}"}), 500
+        coefficients = result.params.to_dict()
+        intercept = coefficients.get('const', 0)
+        N = len(selected_variables)
+        base_score = 600
+        base_odds = 50
+        factor = 20 / np.log(2)
+        offset = base_score - factor * np.log(base_odds)
+
+        # Calculate score for each record
+        # Reverse sign of coefficients so higher score = more good-like
+        scores = []
+        for idx, row in model_df.iterrows():
+            score = 0
+            for var in selected_variables:
+                beta = coefficients.get(var, 0)
+                woe = row[var]
+                score += (-beta * woe + intercept / N) * factor + offset / N
+            scores.append(round(float(score), 2))
+
+        # Prepare results
+        results = []
+        y_true = []
+        y_score = []
+        for idx, score in enumerate(scores):
+            target_val = int(model_df.iloc[idx][target])
+            results.append({
+                "index": idx,
+                "score": score,
+                "target": target_val
+            })
+            y_true.append(target_val)
+            y_score.append(score)
+        # Sort descending by score
+        results = sorted(results, key=lambda x: x["score"], reverse=True)
+
+        # Calculate KS statistic (separation number)
+        try:
+            from sklearn.metrics import roc_curve
+            import numpy as np
+            fpr, tpr, thresholds = roc_curve(y_true, y_score)
+            diffs = np.abs(tpr - fpr)
+            ks_stat = float(np.max(diffs)) if len(diffs) > 0 else 0.0
+        except Exception as ks_err:
+            ks_stat = None
+
+        return jsonify({"success": True, "results": results, "ks_stat": ks_stat})
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"ERROR in apply_scorecard: {tb}")
+        return jsonify({"error": f"Failed to apply score card ({type(e).__name__}): {str(e)}", "traceback": tb}), 500
+
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5000))

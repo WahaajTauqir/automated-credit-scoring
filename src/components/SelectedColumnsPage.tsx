@@ -48,6 +48,9 @@ const SelectedColumnsPage = () => {
   const [notification, setNotification] = useState<string | null>(null);
   const [expandedRanges, setExpandedRanges] = useState<Record<string, boolean>>({});
   const [scoreCardData, setScoreCardData] = useState<any>(null);
+  const [testScoreLoading, setTestScoreLoading] = useState(false);
+  const [testScoreResults, setTestScoreResults] = useState<any[] | null>(null);
+  const [testScoreKS, setTestScoreKS] = useState<number | null>(null);
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'iv' | 'type'>('name');
@@ -392,6 +395,7 @@ const SelectedColumnsPage = () => {
 
       // Step 2: Run fine binning if bins are selected
       const colGroupsSnapshot = selectedBinGroups[col];
+      let mergesReturned = {};
       if (colGroupsSnapshot && Object.keys(colGroupsSnapshot).length > 0) {
         const existing = binMergeHistory[col] || {};
         const newEntries: Record<string, any[]> = {};
@@ -422,22 +426,20 @@ const SelectedColumnsPage = () => {
         }
 
         setFineBinResults((prev) => ({ ...prev, [col]: fineData.stats || [] }));
-        const mergesReturned = fineData.bin_merges || combined;
+        mergesReturned = fineData.bin_merges || combined;
         setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
         setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
         await persistFineBinColumn(col, mergesReturned);
-        await fetchWoeIv(col, mergesReturned);
-        setWoeReadyColumns((prev) => new Set(prev).add(col));
-        setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
       } else {
         // If no bins selected, use coarse binning results
         setFineBinResults((prev) => ({ ...prev, [col]: coarseData[col]?.stats || [] }));
         setBinMergeHistory((prev) => ({ ...prev, [col]: {} }));
         await persistFineBinColumn(col, {});
-        await fetchWoeIv(col);
-        setWoeReadyColumns((prev) => new Set(prev).add(col));
-        setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
       }
+      // Always trigger fresh WOE/IV calculation after fine binning
+      await fetchWoeIv(col, mergesReturned);
+      setWoeReadyColumns((prev) => new Set(prev).add(col));
+      setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
 
       showNotification(`Binning completed for ${col}`);
     } catch (err) {
@@ -528,8 +530,11 @@ const SelectedColumnsPage = () => {
         });
       }
 
-      // If continuous and no merges remain, revert to coarse bins (avoid fine-bin 400)
+      // Always re-run fine binning and WOE/IV after unmerge
+      let fineBinStats = [];
+      let mergesReturned = {};
       if (varType === 'continuous' && Object.keys(newHistory).length === 0) {
+        // Revert to coarse bins
         const coarseRes = await fetch('http://localhost:5000/api/univariate-analysis', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -542,20 +547,13 @@ const SelectedColumnsPage = () => {
         const coarseData = await coarseRes.json();
         setCoarseBinResults((prev) => ({ ...prev, [col]: (coarseData[col]?.stats || []) }));
         setUnivariateResults((prev) => ({ ...prev, [col]: coarseData[col] || coarseData }));
-          // Ensure bin names are present in fineBinResults
-          const coarseStats = coarseData[col]?.stats || [];
-          const binLabelKey = `${col}_binned`;
-          const fineBinsWithNames = coarseStats.map((row: any) => ({
-            ...row,
-            Bin: row.Bin ?? row[binLabelKey] ?? '',
-          }));
-          setFineBinResults((prev) => ({ ...prev, [col]: fineBinsWithNames }));
-        setBinMergeHistory((prev) => ({ ...prev, [col]: {} }));
-        setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
-        await persistFineBinColumn(col, {});
-        await fetchWoeIv(col);
-        setWoeReadyColumns((prev) => new Set(prev).add(col));
-        setSelectedForModeling((prev) => [...new Set([...prev, col])]);
+        const coarseStats = coarseData[col]?.stats || [];
+        const binLabelKey = `${col}_binned`;
+        fineBinStats = coarseStats.map((row: any) => ({
+          ...row,
+          Bin: row.Bin ?? row[binLabelKey] ?? '',
+        }));
+        mergesReturned = {};
       } else {
         // Re-run fine binning with updated merges
         const res = await fetch('http://localhost:5000/api/fine-bin', {
@@ -573,16 +571,17 @@ const SelectedColumnsPage = () => {
         if (!data.success) {
           throw new Error(data.error || 'Fine binning failed during unmerge');
         }
-
-        setFineBinResults((prev) => ({ ...prev, [col]: data.stats || [] }));
-        const mergesReturned = data.bin_merges || newHistory;
-        setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
-        setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
-        await persistFineBinColumn(col, mergesReturned);
-        await fetchWoeIv(col, mergesReturned);
-        setWoeReadyColumns((prev) => new Set(prev).add(col));
-        setSelectedForModeling((prev) => [...new Set([...prev, col])]);
+        fineBinStats = data.stats || [];
+        mergesReturned = data.bin_merges || newHistory;
       }
+      setFineBinResults((prev) => ({ ...prev, [col]: fineBinStats }));
+      setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
+      setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
+      await persistFineBinColumn(col, mergesReturned);
+      // Always trigger fresh WOE/IV calculation with latest merges
+      await fetchWoeIv(col, mergesReturned);
+      setWoeReadyColumns((prev) => new Set(prev).add(col));
+      setSelectedForModeling((prev) => [...new Set([...prev, col])]);
 
       showNotification(`Unmerged '${mergedLabel}' for ${col}.`);
     } catch (err) {
@@ -681,16 +680,6 @@ const SelectedColumnsPage = () => {
 
   const fetchWoeIv = async (col: string, merges?: Record<string, any[]>) => {
     try {
-      if (recordId && !merges) {
-        const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
-        const recordData = await recordResp.json();
-        if (recordData.woe_iv_results && recordData.woe_iv_results[col]) {
-          setWoeIvResults((prev) => ({ ...prev, [col]: recordData.woe_iv_results[col] }));
-          setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
-          return;
-        }
-      }
-
       const body: any = { variables: [col], target: targetVariable };
       if (recordId) body.record_id = recordId;
       if (merges) body.bin_merges = merges;
@@ -768,21 +757,21 @@ const SelectedColumnsPage = () => {
   };
 
   useEffect(() => {
+    // Only fetch record when recordId changes, not in every render or loop
     loadSavedData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordId]);
 
   useEffect(() => {
-    const ensureWoeForAll = async () => {
-      if (currentStep !== 2 && currentStep !== 3) return;
+    // Only trigger WOE/IV fetch when entering step 2 or 3, not in a loop
+    if (currentStep === 2 || currentStep === 3) {
       const cols: string[] = selectedColumns;
       const missing = cols.filter((c) => !woeIvResults[c]);
-      if (missing.length === 0) return;
-      for (const col of missing) {
-        await fetchWoeIv(col);
+      if (missing.length > 0) {
+        missing.forEach((col) => fetchWoeIv(col));
       }
-    };
-    ensureWoeForAll();
-  }, [currentStep, selectedColumns, woeIvResults]);
+    }
+  }, [currentStep]);
 
   return (
     <div>
@@ -1295,6 +1284,78 @@ const SelectedColumnsPage = () => {
                         </div>
                       </div>
                     )}
+
+                    {/* Test Score Button and Results Table */}
+                    <div style={{ marginTop: '32px' }}>
+                      <button
+                        className="run-regression-btn"
+                        onClick={async () => {
+                          setTestScoreLoading(true);
+                          setTestScoreResults(null);
+                          try {
+                            const response = await fetch('http://localhost:5000/api/apply-scorecard', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                selected_variables: selectedForModeling,
+                                target: targetVariable,
+                                woe_transformed_data: woeIvResults,
+                                scorecard_bins: scoreCardData.scorecard_bins
+                              })
+                            });
+                            const data = await response.json();
+                            if (data.success && data.results) {
+                              setTestScoreResults(data.results);
+                              setTestScoreKS(typeof data.ks_stat === 'number' ? data.ks_stat : null);
+                            } else {
+                              alert('Error applying score card: ' + (data.error || 'Unknown error'));
+                            }
+                          } catch (err) {
+                            alert('Error applying score card: ' + err);
+                          } finally {
+                            setTestScoreLoading(false);
+                          }
+                        }}
+                        disabled={testScoreLoading}
+                        aria-label="Test Score Card on Data"
+                        style={{ marginBottom: '16px' }}
+                      >
+                        {testScoreLoading ? 'Testing...' : 'Test Score Card'}
+                      </button>
+
+                      {testScoreResults && (
+                        <div className="scorecard-test-results">
+                          <h5>Score Card Test Results (Sorted by Score)</h5>
+                          {testScoreKS !== null && (
+                            <div style={{ marginBottom: '12px', fontWeight: 'bold' }}>
+                              Separation Number (KS Statistic): {testScoreKS.toFixed(4)}
+                            </div>
+                          )}
+                          <div className="table-container">
+                            <table className="scorecard-table" aria-label="Score card test results">
+                              <thead>
+                                <tr>
+                                  <th>#</th>
+                                  <th>Score</th>
+                                  <th>Target</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {testScoreResults.map((row: any, idx: number) => (
+                                  <tr key={idx}>
+                                    <td>{idx + 1}</td>
+                                    <td>{row.score}</td>
+                                    <td style={{ color: row.target === 0 ? 'green' : row.target === 1 ? 'red' : undefined }}>
+                                      {row.target}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
