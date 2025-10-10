@@ -99,6 +99,24 @@ function App() {
     }
 
     try {
+      // Preserve any existing dashboard_selected_columns from latest record to avoid clearing on older backend versions
+      let preservedDashboardSelected: string[] | undefined = undefined;
+      try {
+        if (records && records.length > 0) {
+          const latestId = records[0].id;
+          const recResp = await fetch(`http://localhost:5000/api/record/${latestId}`);
+          const recJson = await recResp.json();
+          const dsc = recJson?.dashboard_selected_columns;
+          if (typeof dsc === 'string' && dsc.trim().length > 0) {
+            preservedDashboardSelected = dsc.split(',').map((s: string) => s.trim()).filter((s: string) => s);
+          } else if (Array.isArray(dsc) && dsc.length > 0) {
+            preservedDashboardSelected = dsc.map((s: any) => String(s).trim()).filter((s: string) => s);
+          }
+        }
+      } catch {
+        // Non-blocking: proceed without preserved selection
+      }
+
       const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -107,6 +125,8 @@ function App() {
           discrete_columns: discreteColumns,
           continuous_columns: continuousColumns,
           selected_columns: selectedForUnivariate,
+          // Include preserved selection if any, to avoid clearing on older server logic
+          ...(preservedDashboardSelected ? { dashboard_selected_columns: preservedDashboardSelected } : {}),
           target_variable: targetVariable,
           univariate_results: '',
           finebin_results: '',
@@ -168,7 +188,6 @@ function App() {
   // Select/unselect all discrete columns for univariate selection
   const toggleSelectAllDiscrete = (selectAll?: boolean) => {
     setSelectedForUnivariate(prev => {
-      const discreteSet = new Set(discreteColumns);
       const currentSet = new Set(prev);
       // If selectAll explicitly false, remove all discrete
       if (selectAll === false) {
@@ -196,7 +215,6 @@ function App() {
   // Select/unselect all continuous columns for univariate selection
   const toggleSelectAllContinuous = (selectAll?: boolean) => {
     setSelectedForUnivariate(prev => {
-      const continuousSet = new Set(continuousColumns);
       const currentSet = new Set(prev);
       if (selectAll === false) {
         continuousColumns.forEach(c => currentSet.delete(c));

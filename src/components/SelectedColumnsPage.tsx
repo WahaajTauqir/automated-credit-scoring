@@ -40,7 +40,7 @@ const SelectedColumnsPage = () => {
   const [activeGroup, setActiveGroup] = useState<Record<string, number>>({});
   const [fineBinResults, setFineBinResults] = useState<Record<string, any[]>>({});
   const [binMergeHistory, setBinMergeHistory] = useState<Record<string, Record<string, any[]>>>({});
-  const [binMergeStack, setBinMergeStack] = useState<Record<string, any[]>>({}); // For undo
+  const [, setBinMergeStack] = useState<Record<string, any[]>>({}); // For undo (unused history for now)
   const [recordId, setRecordId] = useState<number | undefined>(initialRecordId);
   const [woeIvResults, setWoeIvResults] = useState<Record<string, any>>({});
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
@@ -88,12 +88,12 @@ const SelectedColumnsPage = () => {
     try {
       const missing = selectedColumns.filter(col => !woeIvResults[col]);
       for (const col of missing) {
-        await fetchWoeIv(col);
+        await fetchWoeIv(col, undefined, false);
       }
       const sortedByIV = [...selectedColumns].sort((a, b) => (woeIvResults[b]?.iv || 0) - (woeIvResults[a]?.iv || 0));
       const top = sortedByIV.slice(0, topN);
-      setSelectedForModeling(top);
-      showNotification(`Recommended and selected top ${topN} columns by IV.`);
+      // Recommend top columns but do not auto-select them; let user confirm
+      showNotification(`Recommended top ${topN} columns by IV: ${top.join(', ')}`);
     } catch (e) {
       console.error('Recommendation failed', e);
     }
@@ -113,7 +113,6 @@ const SelectedColumnsPage = () => {
     if (anyWoe) { 
       setWoeIvResults(anyWoe);
       setWoeReadyColumns(new Set(Object.keys(anyWoe)));
-      setSelectedForModeling(Object.keys(anyWoe)); // Auto-select all WOE-ready columns
     }
     if (navSelectedColumns) setSelectedColumns(navSelectedColumns);
     if ((state as any).recordId) setRecordId((state as any).recordId);
@@ -137,8 +136,6 @@ const SelectedColumnsPage = () => {
       setSelectedForModeling((prev) => prev.filter((col) => selectedColumns.includes(col)));
       showNotification(`WOE/IV data cleaned for dropped columns: ${columnsToRemove.join(', ')}`);
     }
-    // Update selectedForModeling to include all woeReadyColumns
-    setSelectedForModeling(Array.from(woeReadyColumns));
   }, [selectedColumns, woeIvResults, woeReadyColumns]);
 
   // Utility functions
@@ -259,7 +256,7 @@ const SelectedColumnsPage = () => {
   };
 
   // API calls
-  const loadSavedFineBins = async (col: string, varType: string) => {
+  const loadSavedFineBins = async (col: string, varType: string, addToModeling: boolean = true) => {
     if (!recordId) return;
     try {
       const resp = await fetch(`http://localhost:5000/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
@@ -289,15 +286,17 @@ const SelectedColumnsPage = () => {
           type: varType,
           bin_merges: savedMerges,
           record_id: recordId,
+          // Pass current dashboard selections so backend doesn't wipe them
+          dashboard_selected_columns: Array.from(selectedForModeling),
         }),
       });
       const data = await res.json();
       if (data.success && !data.error) {
         setFineBinResults((prev) => ({ ...prev, [col]: data.stats || [] }));
         setBinMergeHistory((prev) => ({ ...prev, [col]: data.bin_merges || savedMerges }));
-        await fetchWoeIv(col, data.bin_merges || savedMerges);
+        // Fetch WOE/IV but allow caller to suppress auto-selecting the column for modeling
+        await fetchWoeIv(col, data.bin_merges || savedMerges, addToModeling);
         setWoeReadyColumns((prev) => new Set(prev).add(col));
-        setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
       } else {
         console.error('Fine binning failed:', data.error);
       }
@@ -311,14 +310,36 @@ const SelectedColumnsPage = () => {
     try {
       const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
       const recordData = await recordResp.json();
+      console.debug('[SelectedColumnsPage] loadSavedData: fetched record', recordId, recordData);
       if (recordData.woe_iv_results) {
         setWoeIvResults(recordData.woe_iv_results);
         const readyColumns = new Set(Object.keys(recordData.woe_iv_results));
         setWoeReadyColumns(readyColumns);
-        setSelectedForModeling(Array.from(readyColumns)); // Auto-select all WOE-ready columns
       }
       if (recordData.selected_columns) {
         setSelectedColumns(recordData.selected_columns.split(','));
+      }
+      // Restore dashboard checkbox selection (supports string CSV or JSON array)
+      if (recordData.dashboard_selected_columns !== undefined && recordData.dashboard_selected_columns !== null) {
+        let restoredArr: string[] = [];
+        try {
+          if (Array.isArray(recordData.dashboard_selected_columns)) {
+            restoredArr = recordData.dashboard_selected_columns.map((s: any) => String(s).trim()).filter((s: string) => s);
+          } else if (typeof recordData.dashboard_selected_columns === 'string') {
+            const raw = recordData.dashboard_selected_columns.trim();
+            if (raw.startsWith('[')) {
+              // JSON array stored as text
+              const parsed = JSON.parse(raw);
+              restoredArr = Array.isArray(parsed) ? parsed.map((s: any) => String(s).trim()).filter((s: string) => s) : [];
+            } else {
+              restoredArr = raw.split(',').map((s: string) => s.trim()).filter((s: string) => s);
+            }
+          }
+        } catch (e) {
+          console.warn('[SelectedColumnsPage] loadSavedData: failed to parse dashboard_selected_columns', e);
+        }
+        console.debug('[SelectedColumnsPage] loadSavedData: restoring selectedForModeling', restoredArr);
+        setSelectedForModeling(restoredArr);
       }
     } catch (e) {
       console.error('Failed to load saved record data', e);
@@ -345,9 +366,10 @@ const SelectedColumnsPage = () => {
       setSelectedBinGroups((prev) => ({ ...prev, [col]: prev[col] || {} }));
       setActiveGroup((prev) => ({ ...prev, [col]: 1 }));
       setFineBinResults((prev) => ({ ...prev, [col]: prev[col] || [] }));
-      await loadSavedFineBins(col, varType);
-      // Always fetch WOE/IV after coarse binning
-      await fetchWoeIv(col);
+      // Load any saved fine bins but do NOT auto-select the column for modeling when clicking the card
+      await loadSavedFineBins(col, varType, false);
+      // Always fetch WOE/IV after coarse binning but suppress auto-select on click
+      await fetchWoeIv(col, undefined, false);
     } catch {
       alert('Error fetching coarse bin results');
     }
@@ -421,6 +443,7 @@ const SelectedColumnsPage = () => {
             type: varType,
             bin_merges: combined,
             record_id: recordId,
+            dashboard_selected_columns: Array.from(selectedForModeling),
           }),
         });
         const fineData = await fineRes.json();
@@ -439,10 +462,9 @@ const SelectedColumnsPage = () => {
         setBinMergeHistory((prev) => ({ ...prev, [col]: {} }));
         await persistFineBinColumn(col, {});
       }
-      // Always trigger fresh WOE/IV calculation after fine binning
-      await fetchWoeIv(col, mergesReturned);
-      setWoeReadyColumns((prev) => new Set(prev).add(col));
-      setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
+  // Always trigger fresh WOE/IV calculation after fine binning (do not auto-select)
+  await fetchWoeIv(col, mergesReturned, false);
+  setWoeReadyColumns((prev) => new Set(prev).add(col));
 
       showNotification(`Binning completed for ${col}`);
     } catch (err) {
@@ -451,24 +473,24 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  const undoBinMerge = (col: string) => {
-    if (binMergeStack[col]) {
-      setBinMergeHistory((prev) => ({
-        ...prev,
-        [col]: typeof binMergeStack[col] === 'object' && !Array.isArray(binMergeStack[col]) ? binMergeStack[col] : {},
-      }));
-      setBinMergeStack((prev) => {
-        const newStack = { ...prev };
-        delete newStack[col];
-        return newStack;
-      });
-      showNotification(`Undo last merge for ${col}`);
-      // Re-run fine binning with previous history
-      runBinning(col);
-    } else {
-      showNotification(`No undo available for ${col}`);
-    }
-  };
+  // const undoBinMerge = (col: string) => {
+  //   if (binMergeStack[col]) {
+  //     setBinMergeHistory((prev) => ({
+  //       ...prev,
+  //       [col]: typeof binMergeStack[col] === 'object' && !Array.isArray(binMergeStack[col]) ? binMergeStack[col] : {},
+  //     }));
+  //     setBinMergeStack((prev) => {
+  //       const newStack = { ...prev };
+  //       delete newStack[col];
+  //       return newStack;
+  //     });
+  //     showNotification(`Undo last merge for ${col}`);
+  //     // Re-run fine binning with previous history
+  //     runBinning(col);
+  //   } else {
+  //     showNotification(`No undo available for ${col}`);
+  //   }
+  // };
 
   // Unmerge a specific merged fine bin for a column and refresh results
   const unmergeFineBin = async (col: string, mergedLabelRaw: any) => {
@@ -568,6 +590,7 @@ const SelectedColumnsPage = () => {
             type: varType,
             bin_merges: newHistory,
             record_id: recordId,
+            dashboard_selected_columns: Array.from(selectedForModeling),
           }),
         });
         const data = await res.json();
@@ -581,10 +604,9 @@ const SelectedColumnsPage = () => {
       setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
       setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
       await persistFineBinColumn(col, mergesReturned);
-      // Always trigger fresh WOE/IV calculation with latest merges
-      await fetchWoeIv(col, mergesReturned);
-      setWoeReadyColumns((prev) => new Set(prev).add(col));
-      setSelectedForModeling((prev) => [...new Set([...prev, col])]);
+  // Always trigger fresh WOE/IV calculation with latest merges (do not auto-select)
+  await fetchWoeIv(col, mergesReturned, false);
+  setWoeReadyColumns((prev) => new Set(prev).add(col));
 
       showNotification(`Unmerged '${mergedLabel}' for ${col}.`);
     } catch (err) {
@@ -647,6 +669,7 @@ const SelectedColumnsPage = () => {
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
           selected_columns: selectedColumns,
+          dashboard_selected_columns: selectedForModeling,
           target_variable: targetVariable || '',
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
@@ -671,17 +694,56 @@ const SelectedColumnsPage = () => {
     }
   };
 
+  const persistDashboardSelectedColumns = async (newSelection: string[]) => {
+    try {
+      console.debug('[SelectedColumnsPage] persistDashboardSelectedColumns ->', newSelection);
+      const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_path: 'uploaded.csv',
+          discrete_columns: discreteColumns || [],
+          continuous_columns: continuousColumns || [],
+          selected_columns: selectedColumns,
+          dashboard_selected_columns: newSelection,
+          target_variable: targetVariable || '',
+          univariate_results: JSON.stringify(univariateResults || {}),
+          finebin_results: JSON.stringify(fineBinResults || {}),
+          crosstab_results: JSON.stringify(coarseBinResults || {}),
+          woe_iv_results: JSON.stringify(woeIvResults || {}),
+          record_id: recordId,
+        }),
+      });
+      const data = await resp.json();
+      console.debug('[SelectedColumnsPage] upsert-single-record response:', data);
+      if (!data.error && data.id) {
+        setRecordId(data.id);
+      }
+    } catch (e) {
+      console.error('Persist dashboard selections failed', e);
+    }
+  };
+
   const toggleSelectedForModeling = (col: string) => {
     setSelectedForModeling((prev) => {
+      console.debug('[SelectedColumnsPage] toggleSelectedForModeling before:', prev);
       const newSelection = prev.includes(col)
         ? prev.filter((c) => c !== col)
         : [...prev, col];
+      console.debug('[SelectedColumnsPage] toggleSelectedForModeling after:', newSelection);
       showNotification(`${col} ${prev.includes(col) ? 'deselected' : 'selected'} for modeling.`);
+      // Fire-and-forget persistence (don't block UI)
+      persistDashboardSelectedColumns(newSelection);
       return newSelection;
     });
   };
 
-  const fetchWoeIv = async (col: string, merges?: Record<string, any[]>) => {
+  // Debug render mapping of checkbox state to columns
+  useEffect(() => {
+    console.debug('[SelectedColumnsPage] render: selectedForModeling ->', selectedForModeling);
+  }, [selectedForModeling]);
+
+  const fetchWoeIv = async (col: string, merges?: Record<string, any[]>, addToModeling: boolean = true) => {
     try {
       const body: any = { variables: [col], target: targetVariable };
       if (recordId) body.record_id = recordId;
@@ -695,7 +757,10 @@ const SelectedColumnsPage = () => {
       const data = await res.json();
       if (!data.error) {
         setWoeIvResults((prev) => ({ ...prev, ...data }));
-        setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
+        // Only auto-add to "selected for modeling" when allowed by caller
+        if (addToModeling) {
+          setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
+        }
       }
     } catch (e) {
       console.error('WOE/IV fetch failed', e);
@@ -737,6 +802,7 @@ const SelectedColumnsPage = () => {
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
           selected_columns: selectedColumns,
+          dashboard_selected_columns: selectedForModeling,
           target_variable: targetVariable || '',
           univariate_results: JSON.stringify(univariateResults || {}),
           finebin_results: JSON.stringify(fineBinResults || {}),
@@ -771,7 +837,7 @@ const SelectedColumnsPage = () => {
       const cols: string[] = selectedColumns;
       const missing = cols.filter((c) => !woeIvResults[c]);
       if (missing.length > 0) {
-        missing.forEach((col) => fetchWoeIv(col));
+        missing.forEach((col) => fetchWoeIv(col, undefined, false));
       }
     }
   }, [currentStep]);
@@ -848,7 +914,19 @@ const SelectedColumnsPage = () => {
                 <button onClick={() => recommendTopColumns(5)} className="recommend-btn">Recommend Top 5</button>
               </div>
               <div className="columns-grid" aria-label="List of selectable columns">
-                {filteredColumns.map((col: string) => (
+                {(() => {
+                  try {
+                    console.debug('[SelectedColumnsPage] render: filteredColumns ->', filteredColumns);
+                    console.debug('[SelectedColumnsPage] render: selectedColumns ->', selectedColumns);
+                  } catch {}
+                  return null;
+                })()}
+                {filteredColumns.map((col: string) => {
+                  const isChecked = selectedForModeling.includes(col);
+                  try {
+                    console.debug('[SelectedColumnsPage] render checkbox', { col, isChecked });
+                  } catch {}
+                  return (
                   <div
                     key={col}
                     className={`column-card ${col === activeColumn ? 'active' : ''} ${col === compareColumn ? 'compare-active' : ''}`}
@@ -861,7 +939,7 @@ const SelectedColumnsPage = () => {
                     <div className="column-card-content">
                       <input
                         type="checkbox"
-                        checked={selectedForModeling.includes(col)}
+                        checked={isChecked}
                         onChange={(e) => {
                           e.stopPropagation();
                           toggleSelectedForModeling(col);
@@ -883,7 +961,8 @@ const SelectedColumnsPage = () => {
                       {/* Compare button removed with WOE/IV section */}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </aside>
           )}

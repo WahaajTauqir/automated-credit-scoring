@@ -1058,7 +1058,17 @@ def save_record():
         discrete_columns = ','.join(data.get('discrete_columns', []))
         continuous_columns = ','.join(data.get('continuous_columns', []))
         selected_columns = ','.join(data.get('selected_columns', []))
-        dashboard_selected_columns = ','.join(data.get('dashboard_selected_columns', []))
+        # Only update dashboard_selected_columns if provided; otherwise keep existing
+        if 'dashboard_selected_columns' in data:
+            dsc = data.get('dashboard_selected_columns')
+            if isinstance(dsc, list):
+                dashboard_selected_columns = ','.join(dsc)
+            elif isinstance(dsc, str):
+                dashboard_selected_columns = dsc
+            else:
+                dashboard_selected_columns = ''
+        else:
+            dashboard_selected_columns = None
         target_variable = data.get('target_variable', '')
         univariate_results = data.get('univariate_results', '')
         finebin_results = data.get('finebin_results', '')
@@ -1081,11 +1091,33 @@ def upsert_single_record():
     """
     try:
         data = request.get_json()
+        try:
+            print('[backend] upsert_single_record payload keys:', list(data.keys()) if isinstance(data, dict) else type(data))
+        except Exception:
+            pass
         dataset_path = data.get('dataset_path', '')
         discrete_columns = ','.join(data.get('discrete_columns', []))
         continuous_columns = ','.join(data.get('continuous_columns', []))
         selected_columns = ','.join(data.get('selected_columns', []))
-        dashboard_selected_columns = ','.join(data.get('dashboard_selected_columns', []))
+        # Preserve existing dashboard_selected_columns unless explicitly provided
+        if 'dashboard_selected_columns' in data:
+            dsc = data.get('dashboard_selected_columns')
+            if isinstance(dsc, list):
+                dashboard_selected_columns = ','.join(dsc)
+            elif isinstance(dsc, str):
+                dashboard_selected_columns = dsc
+            else:
+                dashboard_selected_columns = ''
+            try:
+                print('[backend] upsert_single_record dashboard_selected_columns (provided):', dashboard_selected_columns)
+            except Exception:
+                pass
+        else:
+            dashboard_selected_columns = None  # triggers COALESCE to keep existing
+            try:
+                print('[backend] upsert_single_record dashboard_selected_columns not provided -> preserve existing')
+            except Exception:
+                pass
         target_variable = data.get('target_variable', '')
         univariate_results = data.get('univariate_results', '')
         finebin_results = data.get('finebin_results', '')
@@ -1137,6 +1169,16 @@ def get_record(record_id):
     try:
         record = get_record_db(record_id)
         if record:
+            try:
+                print('[backend] get_record returning dashboard_selected_columns:', record.get('dashboard_selected_columns'))
+            except Exception:
+                pass
+            try:
+                # Ensure types are serializable and add parsing indicators
+                dbg = record.get('dashboard_selected_columns')
+                print('[backend] get_record raw dashboard_selected_columns type:', type(dbg), 'value:', dbg)
+            except Exception:
+                pass
             # Ensure woe_iv_results is parsed if it's a JSON string
             if record.get('woe_iv_results'):
                 try:
