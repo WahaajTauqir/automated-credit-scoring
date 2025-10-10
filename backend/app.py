@@ -24,12 +24,12 @@ from db import get_db_connection, init_db, save_record_db, upsert_single_record_
 import traceback
 import logging
 
-# Set PostgreSQL connection environment variables
-os.environ['PG_DBNAME'] = 'mydb'
-os.environ['PG_USER'] = 'myuser'
-os.environ['PG_PASSWORD'] = 'mypassword'
-os.environ['PG_HOST'] = 'localhost'
-os.environ['PG_PORT'] = '5432'
+# Optional: load environment variables from a .env file if present
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
 
 # configure basic logging for debug
 logging.basicConfig(level=logging.DEBUG)
@@ -68,7 +68,8 @@ def get_uploaded_csv_columns():
     Returns the column headers from the uploaded.csv file.
     """
     try:
-        df = pd.read_csv('uploaded.csv', nrows=0)
+        csv_path = get_csv_path()
+        df = pd.read_csv(csv_path, nrows=0)
         return jsonify({"columns": df.columns.tolist()})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -80,6 +81,47 @@ def health():
     A simple health check endpoint.
     """
     return jsonify({"status": "OK", "time": str(datetime.datetime.now())})
+
+# ----------- Database Health Check -----------
+@app.route('/api/db-health', methods=['GET'])
+def db_health():
+    """
+    Checks database connectivity by running a simple query.
+    Returns connection parameters (masked) and status.
+    """
+    try:
+        # Read env without mutating
+        dbname = os.getenv('PG_DBNAME')
+        user = os.getenv('PG_USER')
+        host = os.getenv('PG_HOST')
+        port = os.getenv('PG_PORT')
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT 1')
+        cur.fetchone()
+        conn.close()
+        return jsonify({
+            "ok": True,
+            "connection": {
+                "dbname": dbname,
+                "user": user,
+                "host": host,
+                "port": port
+            }
+        })
+    except Exception as e:
+        logging.exception("DB health check failed")
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+            "connection": {
+                "dbname": os.getenv('PG_DBNAME'),
+                "user": os.getenv('PG_USER'),
+                "host": os.getenv('PG_HOST'),
+                "port": os.getenv('PG_PORT')
+            }
+        }), 500
 
 # ----------- Upload CSV -----------
 @app.route('/api/upload-csv', methods=['POST'])
@@ -119,7 +161,8 @@ def target_distribution():
     Computes and returns the value counts for a specified target column.
     """
     try:
-        df = pd.read_csv("uploaded.csv")
+        csv_path = get_csv_path()
+        df = pd.read_csv(csv_path)
         data = request.get_json()
         col = data.get('column')
         if not col or col not in df.columns:
@@ -571,7 +614,8 @@ def univariate_analysis():
         target = req.get('target')
         if not target:
             return jsonify({"error": "Missing required field: target"}), 400
-        df = pd.read_csv("uploaded.csv")
+        csv_path = get_csv_path()
+        df = pd.read_csv(csv_path)
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
         df[target] = df[target].fillna(0).astype(int)
@@ -897,7 +941,8 @@ def woe_iv_api():
         variables = data.get("variables", [])
         target = data.get("target")
         record_id = data.get("record_id")
-        df = pd.read_csv("uploaded.csv")
+        csv_path = get_csv_path()
+        df = pd.read_csv(csv_path)
         df[target] = df[target].fillna(0).astype(int)
         results = {}
         
@@ -1104,6 +1149,27 @@ def get_record(record_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/record/<int:record_id>/load-dataset', methods=['GET'])
+def load_record_dataset(record_id):
+    """
+    Loads the dataset for a given record and returns it as JSON.
+    """
+    try:
+        record = get_record_db(record_id)
+        if not record:
+            return jsonify({"error": "Record not found"}), 404
+        dataset_path = record.get('dataset_path')
+        if not dataset_path:
+            return jsonify({"error": "No dataset_path in record"}), 404
+        # Resolve relative path if needed
+        if not os.path.isabs(dataset_path):
+            dataset_path = os.path.join(os.path.dirname(__file__), dataset_path)
+        if not os.path.exists(dataset_path):
+            return jsonify({"error": f"Dataset file not found: {dataset_path}"}), 404
+        df = pd.read_csv(dataset_path)
+        return jsonify({"data": df.to_dict(orient="records"), "columns": df.columns.tolist()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 # ----------- Logistic Regression Analysis -----------
 @app.route('/api/logistic-regression', methods=['POST'])
 def logistic_regression_analysis():
