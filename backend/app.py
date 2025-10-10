@@ -1183,28 +1183,30 @@ def logistic_regression_analysis():
         selected_variables = data.get('selected_variables', [])
         target = data.get('target')
         woe_transformed_data = data.get('woe_transformed_data', {})
-        
+
         if not selected_variables or not target:
             return jsonify({"error": "Missing selected_variables or target"}), 400
-        
+
         # Read the dataset
-        df = pd.read_csv("uploaded.csv")
-        
+        df = pd.read_csv(get_csv_path())
+
         if target not in df.columns:
             return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
-        
+
+
+        # Load CSV into df at the very start
+        try:
+            df = pd.read_csv(get_csv_path())
+        except Exception as e:
+            return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
+
         # Create WOE transformed dataset
         woe_df = df[[target]].copy()
-        
+
         for var in selected_variables:
             # Robust WOE mapping + diagnostics
             if var in woe_transformed_data:
-                # print(f"LOGISTIC DEBUG: woe_transformed_data for '{var}':", woe_transformed_data.get(var))
-                # initialize column as NaN so we can detect unmapped rows
                 woe_df[f'{var}_WOE'] = np.nan
-                # woe_transformed_data[var] may be either:
-                # - a list of bin dicts, or
-                # - a dict like { 'iv': ..., 'stats': [bin_dicts...] }
                 raw_bins = woe_transformed_data.get(var)
                 if isinstance(raw_bins, dict) and isinstance(raw_bins.get('stats'), list):
                     bins_list = raw_bins.get('stats')
@@ -1215,7 +1217,6 @@ def logistic_regression_analysis():
                 if not bins_list:
                     print(f"LOGISTIC DEBUG: no bin definitions found for '{var}' in woe_transformed_data")
                 for bin_info in bins_list:
-                    # accept multiple key spellings
                     bin_range = bin_info.get('range') or bin_info.get('Range') or bin_info.get('Bin') or bin_info.get('bin')
                     woe_value = bin_info.get('woe') or bin_info.get('WOE')
                     if woe_value is None:
@@ -1224,15 +1225,12 @@ def logistic_regression_analysis():
                         woe_value = float(woe_value)
                     except Exception:
                         continue
-                    # handle list/array of categories
                     if isinstance(bin_range, (list, tuple)):
                         mask = df[var].isin(bin_range)
                         woe_df.loc[mask, f'{var}_WOE'] = woe_value
                         continue
-                    # handle string ranges: "a to b" or "a - b" or "min - max"
                     if isinstance(bin_range, str):
                         br = bin_range.strip()
-                        # common separators
                         if ' to ' in br:
                             parts = [p.strip() for p in br.split(' to ')]
                         elif '-' in br and any(ch.isdigit() for ch in br):
@@ -1248,74 +1246,55 @@ def logistic_regression_analysis():
                                 continue
                             except Exception:
                                 pass
-                        # discrete: maybe comma-separated categories
-                        cats = re.split(r'[,\|;]', br)
+                        cats = re.split(r'[\,\|;]', br)
                         cats = [c.strip() for c in cats if c.strip() != '']
                         if len(cats) > 1:
                             mask = df[var].astype(str).isin(cats)
                             woe_df.loc[mask, f'{var}_WOE'] = woe_value
                             continue
-                        # fallback: direct equality to the label
                         mask = df[var].astype(str) == br
                         woe_df.loc[mask, f'{var}_WOE'] = woe_value
                     else:
-                        # final fallback: compare as string
                         mask = df[var].astype(str) == str(bin_range)
                         woe_df.loc[mask, f'{var}_WOE'] = woe_value
-                # diagnostics after mapping
                 non_null = int(woe_df[f'{var}_WOE'].notna().sum())
                 print(f"LOGISTIC DEBUG: mapped WOE rows for '{var}':", non_null, "of", len(df))
-                # convert unmapped to 0 (or consider leaving NaN to detect issues)
                 woe_df[f'{var}_WOE'] = woe_df[f'{var}_WOE'].fillna(0)
             else:
                 print(f"LOGISTIC DEBUG: no woe_transformed_data for '{var}' — creating zero column")
                 woe_df[f'{var}_WOE'] = 0
-        
-        # Prepare feature matrix
+
         feature_cols = [f'{var}_WOE' for var in selected_variables]
         X = woe_df[feature_cols].fillna(0)
         y = woe_df[target]
-        
-        # Remove any rows with missing target values
+
         mask = ~y.isna()
         X = X[mask]
         y = y[mask]
-        
+
         if len(X) == 0:
             return jsonify({"error": "No valid data after preprocessing"}), 400
-        
-                # --- DIAGNOSTICS (added) ---
-        # quick checks to identify singularity causes
+
         try:
             nunique = X.nunique()
             zero_var_cols = nunique[nunique <= 1].index.tolist()
             variances = X.var().to_dict()
-            # exact duplicate columns
             dup_mask = X.T.duplicated()
             dup_cols = X.columns[dup_mask].tolist()
             sample = X.head(5).to_dict(orient='records')
             y_counts = y.value_counts().to_dict()
-            # print("LOGISTIC DEBUG: X shape:", X.shape)
-            # print("LOGISTIC DEBUG: feature_cols:", feature_cols)
-            # print("LOGISTIC DEBUG: zero-variance cols:", zero_var_cols)
-            # print("LOGISTIC DEBUG: duplicated cols:", dup_cols)
-            # print("LOGISTIC DEBUG: variances (sample):", {k: variances[k] for k in list(variances)[:10]})
-            # print("LOGISTIC DEBUG: y distribution:", y_counts)
             print("LOGISTIC DEBUG: X sample rows:", sample)
         except Exception as _diag:
             print("LOGISTIC DEBUG: diagnostics failed:", str(_diag))
-        # --- END DIAGNOSTICS ---
 
-        # Fit logistic regression model
         logit_model = sm.Logit(y, sm.add_constant(X))
         result = logit_model.fit(disp=0)
-        
-        # Calculate VIF for multicollinearity
+
         vif_data = []
         if len(feature_cols) > 1:
             X_with_const = sm.add_constant(X)
             for i, col in enumerate(['const'] + feature_cols):
-                if i > 0:  # Skip constant
+                if i > 0:
                     try:
                         vif = variance_inflation_factor(X_with_const.values, i)
                         vif_data.append({
@@ -1327,23 +1306,17 @@ def logistic_regression_analysis():
                             'variable': selected_variables[i-1],
                             'vif': 0
                         })
-        
-        # ROC Curve calculation
+
         y_pred_proba = result.predict(sm.add_constant(X))
         fpr, tpr, thresholds = roc_curve(y, y_pred_proba)
         roc_auc = auc(fpr, tpr)
-        
-        # Gini coefficient (2 * AUC - 1)
         gini_coefficient = 2 * roc_auc - 1
-        
-        # Classification predictions (threshold 0.5)
+
         try:
             y_pred = (y_pred_proba >= 0.5).astype(int)
         except Exception:
-            # fallback in case shapes differ
             y_pred = (np.array(y_pred_proba) >= 0.5).astype(int)
 
-        # Confusion matrix and classification metrics
         try:
             cm = confusion_matrix(y, y_pred)
             accuracy = accuracy_score(y, y_pred)
@@ -1354,19 +1327,16 @@ def logistic_regression_analysis():
             cm = np.array([[0, 0], [0, 0]])
             accuracy = precision = recall = f1 = 0.0
 
-        # Create confusion matrix image (PNG, base64)
         try:
             fig, ax = plt.subplots(figsize=(4, 4))
             im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
             ax.set_title('Confusion Matrix')
             ax.set_ylabel('Actual')
             ax.set_xlabel('Predicted')
-            # Tick labels for binary 0/1
             ax.set_xticks([0, 1])
             ax.set_yticks([0, 1])
             ax.set_xticklabels(['0', '1'])
             ax.set_yticklabels(['0', '1'])
-            # Annotate
             thresh = cm.max() / 2.0 if cm.max() != 0 else 0
             for i in range(cm.shape[0]):
                 for j in range(cm.shape[1]):
@@ -1381,15 +1351,12 @@ def logistic_regression_analysis():
             cm_image_data = f"data:image/png;base64,{img_b64}"
         except Exception as _img_err:
             cm_image_data = None
-        
-        # Prepare results
+
         coefficients = []
         p_values = []
-        
         for i, var in enumerate(['const'] + selected_variables):
             coef = result.params[i] if i < len(result.params) else 0
             p_val = result.pvalues[i] if i < len(result.pvalues) else 1
-            
             if var == 'const':
                 coefficients.append({
                     'variable': 'Intercept',
@@ -1412,9 +1379,7 @@ def logistic_regression_analysis():
                     'p_value': float(p_val),
                     'significance': 'Highly Significant' if p_val < 0.01 else 'Significant' if p_val < 0.05 else 'Not Significant'
                 })
-        
-        # ROC Curve data for plotting (include thresholds)
-        # Helper to sanitize numeric values for JSON (replace inf/nan with None)
+
         def _sanitize_number(x):
             try:
                 v = float(x)
@@ -1422,7 +1387,6 @@ def logistic_regression_analysis():
             except Exception:
                 return None
 
-        # Debug raw thresholds (some sklearn versions include 'inf')
         try:
             raw_thresholds = list(thresholds)
             print('LOGISTIC DEBUG: raw thresholds sample (first 10):', raw_thresholds[:10])
@@ -1436,19 +1400,16 @@ def logistic_regression_analysis():
         roc_data = [{'fpr': _sanitize_number(f), 'tpr': _sanitize_number(t), 'threshold': _sanitize_number(th)}
                     for f, t, th in zip(fpr, tpr, thresholds)]
 
-        # KS statistic: max difference between TPR and FPR across thresholds
         try:
             diffs = [abs(t - f) for f, t in zip(fpr, tpr)]
             ks_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
             ks_stat_raw = diffs[ks_idx] if len(diffs) > 0 else 0.0
             ks_threshold_raw = thresholds[ks_idx] if len(thresholds) > 0 else 0.0
-            # sanitize
             ks_stat = float(ks_stat_raw) if np.isfinite(ks_stat_raw) else 0.0
             ks_threshold = float(ks_threshold_raw) if np.isfinite(ks_threshold_raw) else None
             ks_curve = []
             for f, t, th in zip(fpr, tpr, thresholds):
                 ks_curve.append({'threshold': _sanitize_number(th), 'tpr': _sanitize_number(t), 'fpr': _sanitize_number(f), 'diff': _sanitize_number(abs(t - f))})
-
             if ks_threshold is None:
                 print('LOGISTIC DEBUG: KS threshold was non-finite; sanitized to None')
         except Exception as _ks_err:
@@ -1456,8 +1417,7 @@ def logistic_regression_analysis():
             ks_stat = 0.0
             ks_threshold = None
             ks_curve = []
-        
-        # Model summary statistics
+
         model_stats = {
             'aic': float(result.aic),
             'bic': float(result.bic),
@@ -1465,10 +1425,8 @@ def logistic_regression_analysis():
             'pseudo_r_squared': float(result.prsquared),
             'n_observations': int(result.nobs)
         }
-        
-        # Final sanitization and debug logging before JSON response
+
         try:
-            # inspect roc_data and ks_curve for non-finite or None values
             print('LOGISTIC DEBUG: roc_data sample (first 8):', roc_data[:8])
             if any(item.get('threshold') is None for item in roc_data):
                 print('LOGISTIC DEBUG: some roc_data.threshold entries are None')
@@ -1487,21 +1445,19 @@ def logistic_regression_analysis():
             'auc': float(roc_auc),
             'roc_data': roc_data,
             'model_stats': model_stats,
-            # Confusion matrix and classification metrics
             'confusion_matrix': (cm.tolist() if isinstance(cm, (list, np.ndarray)) else None),
             'confusion_matrix_image': cm_image_data,
             'accuracy': float(accuracy),
             'precision': float(precision),
             'recall': float(recall),
             'f1': float(f1),
-            # KS statistic and curve (sanitized)
             'ks_stat': float(ks_stat) if np.isfinite(ks_stat) else None,
             'ks_threshold': _sanitize_number(ks_threshold),
             'ks_curve': ks_curve
         }
 
         return jsonify(resp)
-        
+
     except Exception as e:
         return jsonify({"error": f"Failed to perform logistic regression: {str(e)}"}), 500
 
@@ -1554,7 +1510,7 @@ def debug_binning(variable):
     Debug endpoint to see what's happening with binning for a specific variable.
     """
     try:
-        df = pd.read_csv("uploaded.csv")
+        df = pd.read_csv(get_csv_path())
         
         if variable not in df.columns:
             return jsonify({"error": f"Variable {variable} not found"}), 400
@@ -1621,7 +1577,7 @@ def generate_scorecard():
             return jsonify({"error": "woe_transformed_data must be a dictionary"}), 400
 
         # Load dataset
-        df = pd.read_csv("uploaded.csv")
+        df = pd.read_csv(get_csv_path())
 
         # Validate columns
         if target not in df.columns:
@@ -1898,7 +1854,7 @@ def apply_scorecard():
         if not selected_variables or not target or not woe_transformed_data:
             return jsonify({"error": "Missing required data: selected_variables, target, or woe_transformed_data"}), 400
 
-        df = pd.read_csv("uploaded.csv")
+        df = pd.read_csv(get_csv_path())
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
 
