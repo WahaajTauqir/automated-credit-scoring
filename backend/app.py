@@ -6,6 +6,7 @@ import os
 import datetime
 import json
 import requests
+import math
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_curve, auc, classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
@@ -1220,6 +1221,24 @@ def logistic_regression_analysis():
     Expects payload: { selected_variables: [list], target: string, woe_transformed_data: {} }
     Returns: model metrics, coefficients, p-values, VIF, Gini, ROC data
     """
+    def sanitize_for_json(obj):
+        """Recursively replace NaN/inf with None for valid JSON."""
+        import numpy as np
+        if isinstance(obj, dict):
+            return {sanitize_for_json(k): sanitize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [sanitize_for_json(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.floating)):
+            if np.isnan(obj) or np.isinf(obj):
+                return None
+            return float(obj)
+        elif isinstance(obj, (int, float)):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        else:
+            return obj
+
     try:
         data = request.get_json()
         selected_variables = data.get('selected_variables', [])
@@ -1229,82 +1248,84 @@ def logistic_regression_analysis():
         if not selected_variables or not target:
             return jsonify({"error": "Missing selected_variables or target"}), 400
 
-        # Read the dataset
-        df = pd.read_csv(get_csv_path())
-
-        if target not in df.columns:
-            return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
-
-
         # Load CSV into df at the very start
         try:
             df = pd.read_csv(get_csv_path())
         except Exception as e:
             return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
 
-        # Create WOE transformed dataset
+        if target not in df.columns:
+            return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
+
+        # Filter to only variables with WOE data to avoid constant 0 columns
+        valid_selected_vars = [var for var in selected_variables if var in woe_transformed_data]
+        if len(valid_selected_vars) == 0:
+            return jsonify({"error": "No variables have valid WOE transformations. Please check your WOE setup."}), 400
+        if len(valid_selected_vars) < len(selected_variables):
+            print(f"LOGISTIC DEBUG: Skipped {len(selected_variables) - len(valid_selected_vars)} variables without WOE data")
+
+        selected_variables = valid_selected_vars  # Update to valid only
         woe_df = df[[target]].copy()
+        dropped_constants = []
 
         for var in selected_variables:
             # Robust WOE mapping + diagnostics
-            if var in woe_transformed_data:
-                woe_df[f'{var}_WOE'] = np.nan
-                raw_bins = woe_transformed_data.get(var)
-                if isinstance(raw_bins, dict) and isinstance(raw_bins.get('stats'), list):
-                    bins_list = raw_bins.get('stats')
-                elif isinstance(raw_bins, list):
-                    bins_list = raw_bins
-                else:
-                    bins_list = []
-                if not bins_list:
-                    print(f"LOGISTIC DEBUG: no bin definitions found for '{var}' in woe_transformed_data")
-                for bin_info in bins_list:
-                    bin_range = bin_info.get('range') or bin_info.get('Range') or bin_info.get('Bin') or bin_info.get('bin')
-                    woe_value = bin_info.get('woe') or bin_info.get('WOE')
-                    if woe_value is None:
-                        continue
-                    try:
-                        woe_value = float(woe_value)
-                    except Exception:
-                        continue
-                    if isinstance(bin_range, (list, tuple)):
-                        mask = df[var].isin(bin_range)
-                        woe_df.loc[mask, f'{var}_WOE'] = woe_value
-                        continue
-                    if isinstance(bin_range, str):
-                        br = bin_range.strip()
-                        if ' to ' in br:
-                            parts = [p.strip() for p in br.split(' to ')]
-                        elif '-' in br and any(ch.isdigit() for ch in br):
-                            parts = [p.strip() for p in re.split(r"-", br, maxsplit=1)]
-                        else:
-                            parts = None
-                        if parts and len(parts) == 2:
-                            try:
-                                min_val = float(parts[0])
-                                max_val = float(parts[1])
-                                mask = (pd.to_numeric(df[var], errors='coerce') >= min_val) & (pd.to_numeric(df[var], errors='coerce') <= max_val)
-                                woe_df.loc[mask.fillna(False), f'{var}_WOE'] = woe_value
-                                continue
-                            except Exception:
-                                pass
-                        cats = re.split(r'[\,\|;]', br)
-                        cats = [c.strip() for c in cats if c.strip() != '']
-                        if len(cats) > 1:
-                            mask = df[var].astype(str).isin(cats)
-                            woe_df.loc[mask, f'{var}_WOE'] = woe_value
-                            continue
-                        mask = df[var].astype(str) == br
-                        woe_df.loc[mask, f'{var}_WOE'] = woe_value
-                    else:
-                        mask = df[var].astype(str) == str(bin_range)
-                        woe_df.loc[mask, f'{var}_WOE'] = woe_value
-                non_null = int(woe_df[f'{var}_WOE'].notna().sum())
-                print(f"LOGISTIC DEBUG: mapped WOE rows for '{var}':", non_null, "of", len(df))
-                woe_df[f'{var}_WOE'] = woe_df[f'{var}_WOE'].fillna(0)
+            raw_bins = woe_transformed_data.get(var)
+            if isinstance(raw_bins, dict) and isinstance(raw_bins.get('stats'), list):
+                bins_list = raw_bins.get('stats')
+            elif isinstance(raw_bins, list):
+                bins_list = raw_bins
             else:
-                print(f"LOGISTIC DEBUG: no woe_transformed_data for '{var}' — creating zero column")
-                woe_df[f'{var}_WOE'] = 0
+                bins_list = []
+            if not bins_list:
+                print(f"LOGISTIC DEBUG: no bin definitions found for '{var}' in woe_transformed_data")
+                continue  # Skip if no bins
+
+            woe_df[f'{var}_WOE'] = np.nan
+            for bin_info in bins_list:
+                bin_range = bin_info.get('range') or bin_info.get('Range') or bin_info.get('Bin') or bin_info.get('bin')
+                woe_value = bin_info.get('woe') or bin_info.get('WOE')
+                if woe_value is None:
+                    continue
+                try:
+                    woe_value = float(woe_value)
+                except Exception:
+                    continue
+                if isinstance(bin_range, (list, tuple)):
+                    mask = df[var].isin(bin_range)
+                    woe_df.loc[mask, f'{var}_WOE'] = woe_value
+                    continue
+                if isinstance(bin_range, str):
+                    br = bin_range.strip()
+                    if ' to ' in br:
+                        parts = [p.strip() for p in br.split(' to ')]
+                    elif '-' in br and any(ch.isdigit() for ch in br):
+                        parts = [p.strip() for p in re.split(r"-", br, maxsplit=1)]
+                    else:
+                        parts = None
+                    if parts and len(parts) == 2:
+                        try:
+                            min_val = float(parts[0])
+                            max_val = float(parts[1])
+                            mask = (pd.to_numeric(df[var], errors='coerce') >= min_val) & (pd.to_numeric(df[var], errors='coerce') <= max_val)
+                            woe_df.loc[mask.fillna(False), f'{var}_WOE'] = woe_value
+                            continue
+                        except Exception:
+                            pass
+                    cats = re.split(r'[\,\|;]', br)
+                    cats = [c.strip() for c in cats if c.strip() != '']
+                    if len(cats) > 1:
+                        mask = df[var].astype(str).isin(cats)
+                        woe_df.loc[mask, f'{var}_WOE'] = woe_value
+                        continue
+                    mask = df[var].astype(str) == br
+                    woe_df.loc[mask, f'{var}_WOE'] = woe_value
+                else:
+                    mask = df[var].astype(str) == str(bin_range)
+                    woe_df.loc[mask, f'{var}_WOE'] = woe_value
+            non_null = int(woe_df[f'{var}_WOE'].notna().sum())
+            print(f"LOGISTIC DEBUG: mapped WOE rows for '{var}':", non_null, "of", len(df))
+            woe_df[f'{var}_WOE'] = woe_df[f'{var}_WOE'].fillna(0)
 
         feature_cols = [f'{var}_WOE' for var in selected_variables]
         X = woe_df[feature_cols].fillna(0)
@@ -1317,39 +1338,138 @@ def logistic_regression_analysis():
         if len(X) == 0:
             return jsonify({"error": "No valid data after preprocessing"}), 400
 
+        # Remove constant features (zero variance)
+        variances = X.var()
+        constant_cols = variances[variances == 0].index.tolist()
+        if constant_cols:
+            dropped_constants = [col.replace('_WOE', '') for col in constant_cols]
+            print(f"LOGISTIC DEBUG: Removing constant columns: {dropped_constants}")
+            X = X.drop(columns=constant_cols)
+            feature_cols = [col for col in feature_cols if col not in constant_cols]
+            selected_variables = [var for var in selected_variables if f'{var}_WOE' not in constant_cols]
+
+        if len(selected_variables) == 0:
+            return jsonify({"error": "All features are constant after WOE transformation. Try fewer or different variables."}), 400
+
+        # Iterative VIF-based feature removal to prevent singularity
+        max_vif_threshold = 10.0
+        vif_dropped = []
+        while len(X.columns) > 0:
+            # Compute VIFs
+            vif_data_temp = []
+            X_with_const_temp = sm.add_constant(X)
+            for i in range(1, len(X.columns) + 1):  # Skip const
+                try:
+                    vif = variance_inflation_factor(X_with_const_temp.values, i)
+                    if np.isfinite(vif):
+                        vif_data_temp.append((X.columns[i-1], vif))
+                    else:
+                        vif_data_temp.append((X.columns[i-1], np.inf))
+                except Exception:
+                    vif_data_temp.append((X.columns[i-1], np.inf))
+            
+            if not vif_data_temp:
+                break
+            
+            # Find max VIF column
+            max_vif_col, max_vif = max(vif_data_temp, key=lambda x: x[1])
+            
+            if max_vif < max_vif_threshold:
+                break  # All good
+            
+            # Drop the high VIF column
+            print(f"LOGISTIC DEBUG: Dropping high VIF column '{max_vif_col}' (VIF: {max_vif})")
+            X = X.drop(columns=[max_vif_col])
+            feature_cols = [col for col in feature_cols if col not in [max_vif_col]]
+            selected_variables = [var for var in selected_variables if f'{var}_WOE' not in [max_vif_col]]
+            vif_dropped.append(max_vif_col.replace('_WOE', ''))
+        
+        dropped_variables = dropped_constants + vif_dropped
+        if len(selected_variables) == 0:
+            return jsonify({"error": f"All features removed due to constants or high multicollinearity (VIF > {max_vif_threshold}). Try selecting fewer or less correlated variables."}), 400
+
+        # Check for linear dependence via matrix rank
+        X_const = sm.add_constant(X)
+        rank = np.linalg.matrix_rank(X_const)
+        full_rank = X_const.shape[1]
+        rank_dropped = []
+        while rank < full_rank and len(X.columns) > 0:
+            # Drop the feature with lowest variance (least informative)
+            var_dict = X.var().to_dict()
+            if not var_dict:
+                break
+            to_drop = min(var_dict, key=var_dict.get)
+            print(f"LOGISTIC DEBUG: Dropping low-variance column '{to_drop}' due to rank deficiency")
+            X = X.drop(to_drop, axis=1)
+            feature_cols = [col for col in feature_cols if col not in [to_drop]]
+            selected_variables = [var for var in selected_variables if f'{var}_WOE' not in [to_drop]]
+            rank_dropped.append(to_drop.replace('_WOE', ''))
+            X_const = sm.add_constant(X)
+            rank = np.linalg.matrix_rank(X_const)
+            full_rank = X_const.shape[1]
+
+        dropped_variables += rank_dropped
+        if len(selected_variables) == 0:
+            return jsonify({"error": "All features removed due to linear dependence. Try fewer variables."}), 400
+
+        # Diagnostics (updated for current X)
         try:
             nunique = X.nunique()
-            zero_var_cols = nunique[nunique <= 1].index.tolist()
+            zero_var_cols = nunique[nunique <= 1].index.tolist()  # Should be empty now
             variances = X.var().to_dict()
             dup_mask = X.T.duplicated()
             dup_cols = X.columns[dup_mask].tolist()
             sample = X.head(5).to_dict(orient='records')
             y_counts = y.value_counts().to_dict()
             print("LOGISTIC DEBUG: X sample rows:", sample)
+            print(f"LOGISTIC DEBUG: Final rank check - Rank: {rank}, Full: {full_rank}")
         except Exception as _diag:
             print("LOGISTIC DEBUG: diagnostics failed:", str(_diag))
 
-        logit_model = sm.Logit(y, sm.add_constant(X))
-        result = logit_model.fit(disp=0)
+        # Warn if too many variables relative to observations
+        n_features = len(selected_variables)
+        n_obs = len(X)
+        if n_features > n_obs / 10:  # Stricter: 10 obs per feature
+            print(f"LOGISTIC DEBUG: Warning - Very high dimensionality: {n_features} features vs {n_obs} observations. Model may be unstable.")
 
+        # Now fit the model with robust optimizer
+        logit_model = sm.Logit(y, X_const)
+        result = None
+        methods_to_try = ['bfgs', 'newton', 'nm']  # Fallback optimizers
+        for method in methods_to_try:
+            try:
+                print(f"LOGISTIC DEBUG: Trying fit with method='{method}'")
+                result = logit_model.fit(disp=0, method=method, maxiter=1000)
+                print(f"LOGISTIC DEBUG: Fit succeeded with {method}")
+                break
+            except Exception as fit_err:
+                print(f"LOGISTIC DEBUG: Fit failed with {method}: {fit_err}")
+                if method == methods_to_try[-1]:  # Last one
+                    return jsonify({"error": f"Model fitting failed with all optimizers due to data issues (e.g., perfect separation). Try fewer variables. Error: {str(fit_err)}"}), 400
+                continue
+
+        if result is None:
+            return jsonify({"error": "Model fitting failed unexpectedly."}), 500
+
+        # VIF on final model
         vif_data = []
         if len(feature_cols) > 1:
-            X_with_const = sm.add_constant(X)
-            for i, col in enumerate(['const'] + feature_cols):
-                if i > 0:
-                    try:
-                        vif = variance_inflation_factor(X_with_const.values, i)
-                        vif_data.append({
-                            'variable': selected_variables[i-1],
-                            'vif': float(vif) if not np.isnan(vif) and not np.isinf(vif) else 0
-                        })
-                    except:
-                        vif_data.append({
-                            'variable': selected_variables[i-1],
-                            'vif': 0
-                        })
+            X_with_const_final = sm.add_constant(X)
+            for i in range(1, len(feature_cols) + 1):
+                try:
+                    vif = variance_inflation_factor(X_with_const_final.values, i)
+                    vif_data.append({
+                        'variable': selected_variables[i-1],
+                        'vif': float(vif) if not np.isnan(vif) and not np.isinf(vif) else None
+                    })
+                except Exception as vif_err:
+                    print(f"LOGISTIC DEBUG: VIF failed for {selected_variables[i-1]}: {vif_err}")
+                    vif_data.append({
+                        'variable': selected_variables[i-1],
+                        'vif': None
+                    })
 
-        y_pred_proba = result.predict(sm.add_constant(X))
+        y_pred_proba = result.predict(X_const)
         fpr, tpr, thresholds = roc_curve(y, y_pred_proba)
         roc_auc = auc(fpr, tpr)
         gini_coefficient = 2 * roc_auc - 1
@@ -1402,23 +1522,23 @@ def logistic_regression_analysis():
             if var == 'const':
                 coefficients.append({
                     'variable': 'Intercept',
-                    'coefficient': float(coef),
+                    'coefficient': float(coef) if np.isfinite(coef) else None,
                     'significance': 'Highly Significant' if p_val < 0.01 else 'Significant' if p_val < 0.05 else 'Not Significant'
                 })
                 p_values.append({
                     'variable': 'Intercept',
-                    'p_value': float(p_val),
+                    'p_value': float(p_val) if np.isfinite(p_val) else None,
                     'significance': 'Highly Significant' if p_val < 0.01 else 'Significant' if p_val < 0.05 else 'Not Significant'
                 })
             else:
                 coefficients.append({
                     'variable': var,
-                    'coefficient': float(coef),
+                    'coefficient': float(coef) if np.isfinite(coef) else None,
                     'significance': 'Highly Significant' if p_val < 0.01 else 'Significant' if p_val < 0.05 else 'Not Significant'
                 })
                 p_values.append({
                     'variable': var,
-                    'p_value': float(p_val),
+                    'p_value': float(p_val) if np.isfinite(p_val) else None,
                     'significance': 'Highly Significant' if p_val < 0.01 else 'Significant' if p_val < 0.05 else 'Not Significant'
                 })
 
@@ -1447,7 +1567,7 @@ def logistic_regression_analysis():
             ks_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
             ks_stat_raw = diffs[ks_idx] if len(diffs) > 0 else 0.0
             ks_threshold_raw = thresholds[ks_idx] if len(thresholds) > 0 else 0.0
-            ks_stat = float(ks_stat_raw) if np.isfinite(ks_stat_raw) else 0.0
+            ks_stat = float(ks_stat_raw) if np.isfinite(ks_stat_raw) else None
             ks_threshold = float(ks_threshold_raw) if np.isfinite(ks_threshold_raw) else None
             ks_curve = []
             for f, t, th in zip(fpr, tpr, thresholds):
@@ -1456,15 +1576,15 @@ def logistic_regression_analysis():
                 print('LOGISTIC DEBUG: KS threshold was non-finite; sanitized to None')
         except Exception as _ks_err:
             print('LOGISTIC DEBUG: KS computation failed:', str(_ks_err))
-            ks_stat = 0.0
+            ks_stat = None
             ks_threshold = None
             ks_curve = []
 
         model_stats = {
-            'aic': float(result.aic),
-            'bic': float(result.bic),
-            'log_likelihood': float(result.llf),
-            'pseudo_r_squared': float(result.prsquared),
+            'aic': float(result.aic) if np.isfinite(result.aic) else None,
+            'bic': float(result.bic) if np.isfinite(result.bic) else None,
+            'log_likelihood': float(result.llf) if np.isfinite(result.llf) else None,
+            'pseudo_r_squared': float(result.prsquared) if np.isfinite(result.prsquared) else None,
             'n_observations': int(result.nobs)
         }
 
@@ -1478,29 +1598,40 @@ def logistic_regression_analysis():
         except Exception as _log_err:
             print('LOGISTIC DEBUG: pre-return inspection failed:', str(_log_err))
 
+        # Include dropped info in response for frontend (optional)
         resp = {
             'success': True,
             'coefficients': coefficients,
             'p_values': p_values,
             'vif_data': vif_data,
-            'gini_coefficient': float(gini_coefficient),
-            'auc': float(roc_auc),
+            'gini_coefficient': float(gini_coefficient) if np.isfinite(gini_coefficient) else None,
+            'auc': float(roc_auc) if np.isfinite(roc_auc) else None,
             'roc_data': roc_data,
             'model_stats': model_stats,
             'confusion_matrix': (cm.tolist() if isinstance(cm, (list, np.ndarray)) else None),
             'confusion_matrix_image': cm_image_data,
-            'accuracy': float(accuracy),
-            'precision': float(precision),
-            'recall': float(recall),
-            'f1': float(f1),
-            'ks_stat': float(ks_stat) if np.isfinite(ks_stat) else None,
-            'ks_threshold': _sanitize_number(ks_threshold),
-            'ks_curve': ks_curve
+            'accuracy': float(accuracy) if np.isfinite(accuracy) else None,
+            'precision': float(precision) if np.isfinite(precision) else None,
+            'recall': float(recall) if np.isfinite(recall) else None,
+            'f1': float(f1) if np.isfinite(f1) else None,
+            'ks_stat': ks_stat,
+            'ks_threshold': ks_threshold,
+            'ks_curve': ks_curve,
+            'dropped_variables': dropped_variables  # Updated: includes constants, high-VIF, rank-deficient
         }
+
+        # Sanitize entire response for JSON
+        resp = sanitize_for_json(resp)
+
+        if dropped_variables:
+            print(f"LOGISTIC DEBUG: Dropped variables: {dropped_variables}")
 
         return jsonify(resp)
 
     except Exception as e:
+        print(f"LOGISTIC DEBUG: Unhandled error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": f"Failed to perform logistic regression: {str(e)}"}), 500
 
 # ----------- Delete Record -----------

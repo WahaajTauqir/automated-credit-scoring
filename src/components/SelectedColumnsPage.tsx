@@ -1125,81 +1125,94 @@ const SelectedColumnsPage = () => {
                             <th>Total</th>
                             <th>Bad Rate (%)</th>
                             <th>Freq%</th>
+                            <th>WOE</th>
+                            <th>IV</th>
                             <th>Actions</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {fineBinResults[activeColumn]
-                            .sort((a, b) => {
-                              const labelA = (a[activeColumn + '_fine_binned'] || '').toString();
-                              const labelB = (b[activeColumn + '_fine_binned'] || '').toString();
-                              return labelA.localeCompare(labelB);
-                            })
-                            .map((bin, idx) => {
-                              const isContinuous = (continuousColumns || []).includes(activeColumn);
-                              const rangeKey = `${activeColumn}_${idx}`;
-                              const rangeValue = String(bin.Range ?? '');
-                              const isTruncated = !isContinuous && rangeValue.length > 50;
-                              const truncatedRange = isTruncated ? truncateRange(rangeValue) : rangeValue;
+                          {(() => {
+                            const woeStats = woeIvResults[activeColumn]?.stats || [];
+                            const woeMap = new Map();
+                            woeStats.forEach((row: any) => {
+                              const binLabel = row.Bin || row.temp_bin || row.Range || `Bin_${woeStats.indexOf(row) + 1}`;
+                              woeMap.set(binLabel, { woe: parseFloat(row.WOE), iv: parseFloat(row.IV) });
+                            });
+                            return fineBinResults[activeColumn]
+                              .sort((a, b) => {
+                                const labelA = (a[activeColumn + '_fine_binned'] || '').toString();
+                                const labelB = (b[activeColumn + '_fine_binned'] || '').toString();
+                                return labelA.localeCompare(labelB);
+                              })
+                              .map((bin, idx) => {
+                                const isContinuous = (continuousColumns || []).includes(activeColumn);
+                                const rangeKey = `${activeColumn}_${idx}`;
+                                const rangeValue = String(bin.Range ?? '');
+                                const isTruncated = !isContinuous && rangeValue.length > 50;
+                                const truncatedRange = isTruncated ? truncateRange(rangeValue) : rangeValue;
 
-                              const labelVal = bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1'];
-                              const isMergedLabel = typeof labelVal === 'string' && (
-                                labelVal.includes(',') || (binMergeHistory[activeColumn] && binMergeHistory[activeColumn][labelVal]) ||
-                                labelVal.startsWith('Merged_')
-                              );
+                                const labelVal = bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1'];
+                                const woeData = woeMap.get(String(labelVal)) || { woe: 0, iv: 0 };
+                                const isMergedLabel = typeof labelVal === 'string' && (
+                                  labelVal.includes(',') || (binMergeHistory[activeColumn] && binMergeHistory[activeColumn][labelVal]) ||
+                                  labelVal.startsWith('Merged_')
+                                );
 
-                              return (
-                                <tr
-                                  key={idx}
-                                  style={{
-                                    backgroundColor:
-                                      typeof bin[activeColumn + '_fine_binned'] === 'string' &&
-                                      (bin[activeColumn + '_fine_binned'].indexOf(',') !== -1 || bin[activeColumn + '_fine_binned'].startsWith('Merged_'))
-                                        ? 'var(--merged-bin-bg, #21262d)'
-                                        : 'transparent',
-                                  }}
-                                >
-                                  <td style={{ maxWidth: '120px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', verticalAlign: 'middle' }} title={labelVal}>
-                                    {labelVal}
-                                  </td>
-                                  {isContinuous ? (
-                                    <>
-                                      <td>{bin.Min ?? 'N/A'}</td>
-                                      <td>{bin.Max ?? 'N/A'}</td>
-                                    </>
-                                  ) : (
-                                    <td>
-                                      <button
-                                        type="button"
-                                        title={rangeValue}
-                                        style={{ cursor: isTruncated ? 'pointer' : 'default', background: 'none', border: 'none', color: 'inherit' }}
-                                        onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                                        aria-label={isTruncated ? `Expand range for bin ${bin[activeColumn + '_fine_binned']}` : undefined}
-                                      >
-                                        {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
-                                      </button>
+                                return (
+                                  <tr
+                                    key={idx}
+                                    style={{
+                                      backgroundColor:
+                                        typeof bin[activeColumn + '_fine_binned'] === 'string' &&
+                                        (bin[activeColumn + '_fine_binned'].indexOf(',') !== -1 || bin[activeColumn + '_fine_binned'].startsWith('Merged_'))
+                                          ? 'var(--merged-bin-bg, #21262d)'
+                                          : 'transparent',
+                                    }}
+                                  >
+                                    <td style={{ maxWidth: '120px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', verticalAlign: 'middle' }} title={labelVal}>
+                                      {labelVal}
                                     </td>
-                                  )}
-                                  <td>{bin.Bad ?? bin['Bad'] ?? 0}</td>
-                                  <td>{bin.Good ?? bin['Good'] ?? 0}</td>
-                                  <td>{bin.Total ?? bin['Total'] ?? 0}</td>
-                                  <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4) ?? '0.0000'}</td>
-                                  <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : '0.00'}</td>
-                                  <td>
-                                    {isMergedLabel ? (
-                                      <button
-                                        className="unmerge-btn compact"
-                                        onClick={() => unmergeFineBin(activeColumn, labelVal)}
-                                        aria-label={`Unmerge ${String(labelVal)}`}
-                                        title="Unmerge"
-                                      >
-                                        <span style={{fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s'}}>Unmerge</span>
-                                      </button>
-                                    ) : null}
-                                  </td>
-                                </tr>
-                              );
-                            })}
+                                    {isContinuous ? (
+                                      <>
+                                        <td>{bin.Min ?? 'N/A'}</td>
+                                        <td>{bin.Max ?? 'N/A'}</td>
+                                      </>
+                                    ) : (
+                                      <td>
+                                        <button
+                                          type="button"
+                                          title={rangeValue}
+                                          style={{ cursor: isTruncated ? 'pointer' : 'default', background: 'none', border: 'none', color: 'inherit' }}
+                                          onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
+                                          aria-label={isTruncated ? `Expand range for bin ${bin[activeColumn + '_fine_binned']}` : undefined}
+                                        >
+                                          {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
+                                        </button>
+                                      </td>
+                                    )}
+                                    <td>{bin.Bad ?? bin['Bad'] ?? 0}</td>
+                                    <td>{bin.Good ?? bin['Good'] ?? 0}</td>
+                                    <td>{bin.Total ?? bin['Total'] ?? 0}</td>
+                                    <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4) ?? '0.0000'}</td>
+                                    <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : '0.00'}</td>
+                                    <td>{formatToFourDecimals(woeData.woe)}</td>
+                                    <td>{formatToFourDecimals(woeData.iv)}</td>
+                                    <td>
+                                      {isMergedLabel ? (
+                                        <button
+                                          className="unmerge-btn compact"
+                                          onClick={() => unmergeFineBin(activeColumn, labelVal)}
+                                          aria-label={`Unmerge ${String(labelVal)}`}
+                                          title="Unmerge"
+                                        >
+                                          <span style={{fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s'}}>Unmerge</span>
+                                        </button>
+                                      ) : null}
+                                    </td>
+                                  </tr>
+                                );
+                              });
+                          })()}
                         </tbody>
                       </table>
                     </div>
