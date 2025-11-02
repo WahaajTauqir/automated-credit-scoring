@@ -64,7 +64,25 @@ const FineBinResults = ({ fineBinResults, formatToFourDecimals, discreteColumns 
                     </tr>
                   </thead>
                   <tbody>
-                    {bins.map((bin, idx) => {
+                    {([...bins])
+                      .slice()
+                      .sort((a: any, b: any) => {
+                        const getMin = (r: any) => {
+                          const m = r.Min ?? r.min ?? r.MinValue ?? r.minValue ?? null;
+                          const v = m === null || m === undefined ? NaN : Number(m);
+                          return Number.isFinite(v) ? v : NaN;
+                        };
+                        const minA = getMin(a);
+                        const minB = getMin(b);
+                        if (!Number.isNaN(minA) && !Number.isNaN(minB)) return minA - minB;
+                        const la = (a.Bin || a.bin || '').toString();
+                        const lb = (b.Bin || b.bin || '').toString();
+                        const na = parseInt((la.match(/\d+/) || [])[0] || '', 10);
+                        const nb = parseInt((lb.match(/\d+/) || [])[0] || '', 10);
+                        if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+                        return la.localeCompare(lb);
+                      })
+                      .map((bin, idx) => {
                       const rangeKey = `${col}_${idx}`; // Unique key for each row's range
                       const rangeValue = String(bin.Range ?? '');
                       const isTruncated = rangeValue.length > 50;

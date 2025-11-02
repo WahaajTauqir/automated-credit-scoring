@@ -373,8 +373,24 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
                 max_val = int(np.ceil(values.max())) if not values.empty else None
                 bin_ranges[bin_label] = (min_val, max_val)
         
-        # Cross-tab summary
-        cross_tab = pd.crosstab(df[fine_binned_col], df[target])
+        # Ensure a deterministic ordering for continuous fine bins: sort by Min value
+        # Build ordered labels from bin_ranges (Min value). Place None/empty bins at the end.
+        try:
+            ordered_bins = sorted(list(bin_ranges.items()), key=lambda kv: (kv[1][0] if kv[1][0] is not None else float('inf')))
+            ordered_labels = [label for label, _ in ordered_bins]
+            # apply ordered categorical so pandas preserves this order in aggregations
+            df[fine_binned_col] = df[fine_binned_col].astype(str)
+            df[fine_binned_col] = pd.Categorical(df[fine_binned_col], categories=ordered_labels, ordered=True)
+        except Exception:
+            # fallback: keep as-is
+            df[fine_binned_col] = df[fine_binned_col].astype(str)
+
+        # Cross-tab summary (avoid pandas automatic sorting)
+        try:
+            cross_tab = pd.crosstab(df[fine_binned_col], df[target], sort=False)
+        except TypeError:
+            # Older pandas versions don't accept 'sort' kwarg
+            cross_tab = pd.crosstab(df[fine_binned_col], df[target])
         cols = cross_tab.columns.tolist()
         col_map = {}
         if 0 in cols:
@@ -394,6 +410,14 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
         cross_tab['Min'] = cross_tab[fine_binned_col].map(lambda x: bin_ranges.get(x, (None, None))[0])
         cross_tab['Max'] = cross_tab[fine_binned_col].map(lambda x: bin_ranges.get(x, (None, None))[1])
         
+        # Ensure the final table follows the ordered_labels if available
+        try:
+            if 'ordered_labels' in locals():
+                cross_tab[fine_binned_col] = cross_tab[fine_binned_col].astype(str)
+                cross_tab = cross_tab.set_index(fine_binned_col).reindex(ordered_labels).reset_index()
+        except Exception:
+            pass
+
         columns_order = [fine_binned_col, 'Min', 'Max', 'Bad', 'Good', 'Total', 'Freq%', 'Bad Rate']
         cross_tab = cross_tab[columns_order]
         return cross_tab, df[fine_binned_col], updated_merges, bin_ranges
@@ -439,8 +463,26 @@ def fine_bin_discrete(df, var, target, bin_merges=None, bin_mapping=None):
                 else:
                     bin_ranges[bin_label] = ['N/A']
 
-        # Crosstab
-        cross_tab = pd.crosstab(df[fine_binned_col], df[target])
+        # Determine an ordered label set for discrete fine bins (preserve bin_merges order when present)
+        try:
+            if bin_merges:
+                ordered_labels = [str(k) for k in bin_merges.keys()]
+                # append any remaining bins in appearance order
+                remaining = [lbl for lbl in df[fine_binned_col].astype(str).unique() if lbl not in ordered_labels]
+                ordered_labels.extend(remaining)
+            else:
+                ordered_labels = [str(x) for x in df[fine_binned_col].astype(str).unique()]
+            df[fine_binned_col] = df[fine_binned_col].astype(str)
+            df[fine_binned_col] = pd.Categorical(df[fine_binned_col], categories=ordered_labels, ordered=True)
+        except Exception:
+            df[fine_binned_col] = df[fine_binned_col].astype(str)
+
+        # Crosstab (avoid automatic sorting)
+        try:
+            cross_tab = pd.crosstab(df[fine_binned_col], df[target], sort=False)
+        except TypeError:
+            # Older pandas versions don't accept 'sort' kwarg
+            cross_tab = pd.crosstab(df[fine_binned_col], df[target])
         col_map = {}
         if 0 in cross_tab.columns: col_map[0] = 'Good'
         if 1 in cross_tab.columns: col_map[1] = 'Bad'
@@ -898,12 +940,32 @@ def calculate_woe_iv(df, variable, target, bin_merges=None):
                 values = df.loc[mask, variable].unique()
                 bin_ranges[bin_label] = sorted([str(val) for val in values])
     
-    # Aggregate counts
-    grouped = df.groupby("final_bin", observed=True).agg(
+    # Build ordered labels for output (continuous: order by Min; discrete: preserve insertion/order)
+    ordered_labels = None
+    try:
+        if is_continuous:
+            ordered_bins = sorted(list(bin_ranges.items()), key=lambda kv: (kv[1][0] if kv[1][0] is not None else float('inf')))
+            ordered_labels = [label for label, _ in ordered_bins]
+        else:
+            # For discrete, preserve the order found in final_bin unique (insertion order), fallback to sorted
+            ordered_labels = list(dict.fromkeys(df["final_bin"].astype(str).tolist()))
+    except Exception:
+        ordered_labels = None
+
+    # Aggregate counts (preserve bin order using sort=False and reindex later)
+    grouped = df.groupby("final_bin", observed=True, sort=False).agg(
         Total=(target, "count"),
         Good=(target, lambda x: (x == 0).sum()),
         Bad=(target, lambda x: (x == 1).sum())
     ).reset_index()
+    # Reindex grouped by ordered_labels when available
+    try:
+        if ordered_labels:
+            present = [lbl for lbl in ordered_labels if lbl in grouped['final_bin'].astype(str).tolist()]
+            if present:
+                grouped = grouped.set_index('final_bin').reindex(present).reset_index()
+    except Exception:
+        pass
     total_good = grouped["Good"].sum()
     total_bad = grouped["Bad"].sum()
     n_bins = len(grouped)

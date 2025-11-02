@@ -1138,10 +1138,27 @@ const SelectedColumnsPage = () => {
                               const binLabel = row.Bin || row.temp_bin || row.Range || `Bin_${woeStats.indexOf(row) + 1}`;
                               woeMap.set(binLabel, { woe: parseFloat(row.WOE), iv: parseFloat(row.IV) });
                             });
-                            return fineBinResults[activeColumn]
-                              .sort((a, b) => {
-                                const labelA = (a[activeColumn + '_fine_binned'] || '').toString();
-                                const labelB = (b[activeColumn + '_fine_binned'] || '').toString();
+                            return (fineBinResults[activeColumn] || [])
+                              .slice()
+                              .sort((a: any, b: any) => {
+                                // Prefer numeric Min provided by backend (case-insensitive)
+                                const getMin = (r: any) => {
+                                  const m = r.Min ?? r.min ?? r.MinValue ?? r.minValue ?? null;
+                                  const v = m === null || m === undefined ? NaN : Number(m);
+                                  return Number.isFinite(v) ? v : NaN;
+                                };
+                                const minA = getMin(a);
+                                const minB = getMin(b);
+                                if (!Number.isNaN(minA) && !Number.isNaN(minB)) return minA - minB;
+
+                                // Fallback: try to parse numeric part from label
+                                const labelA = (a[activeColumn + '_fine_binned'] || a.Bin || '').toString();
+                                const labelB = (b[activeColumn + '_fine_binned'] || b.Bin || '').toString();
+                                const numA = parseInt((labelA.match(/\d+/) || [])[0] || '', 10);
+                                const numB = parseInt((labelB.match(/\d+/) || [])[0] || '', 10);
+                                if (!Number.isNaN(numA) && !Number.isNaN(numB)) return numA - numB;
+
+                                // Last resort: lexicographic
                                 return labelA.localeCompare(labelB);
                               })
                               .map((bin, idx) => {
