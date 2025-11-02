@@ -103,7 +103,8 @@ body {
 /* Page Container with Container Queries */
 .page-container {
   container-type: inline-size;
-  padding: var(--spacing-md) 0 0 0;
+  /* reduce top spacing so the page gives more room to inner panels */
+  padding: var(--spacing-sm) 0 0 0;
   width: 100vw;
   max-width: none;
   margin: 0;
@@ -388,9 +389,10 @@ h4 { font-size: 0.95rem; }
 /* Main Content Wrapper */
 .main-content-wrapper {
   display: grid;
-  grid-template-columns: minmax(280px, 30%) 1fr;
-  gap: var(--spacing-md);
-  padding: 0 var(--spacing-md);
+  grid-template-columns: minmax(250px, 28%) 1fr;
+  gap: calc(var(--spacing-sm));
+  /* remove larger horizontal gutters so the content section gains more width */
+  padding: 0 var(--spacing-xs);
 }
 
 /* Column Selection Section (Sidebar) */
@@ -612,7 +614,8 @@ h4 { font-size: 0.95rem; }
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-large);
-  padding: var(--spacing-lg);
+  /* reduce internal padding to give tables and charts more room */
+  padding: var(--spacing-sm);
   overflow-y: auto;
   max-height: 80vh;
   box-shadow: var(--shadow-modern);
@@ -671,7 +674,7 @@ h4 { font-size: 0.95rem; }
 /* Table Container */
 .table-container {
   overflow-x: auto;
-  margin-bottom: 1rem;
+  margin-bottom: 0.5rem;
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-medium);
@@ -733,7 +736,17 @@ tr[style*="21262d"] {
 }
 
 /* Binning and Scorecard Controls */
-.binning-controls,
+.binning-controls {
+  display: flex;
+  gap: var(--spacing-sm);
+  /* remove the separator line and extra spacing above the binning controls
+     so the buttons sit immediately after the table */
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+  flex-wrap: wrap;
+}
+
 .scorecard-controls {
   display: flex;
   gap: var(--spacing-sm);
@@ -851,15 +864,17 @@ tr[style*="21262d"] {
 
 .results-section {
   position: relative;
-  padding-top: 50px;
+  /* reduce the large top offset so results sit closer to controls */
+  padding-top: 8px;
 }
 
 .results-container {
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-medium);
-  padding: 1rem;
-  margin-bottom: 1rem;
+  /* tighter padding to leave more space for inner tables and charts */
+  padding: 0.6rem;
+  margin-bottom: 0.5rem;
   box-shadow: var(--shadow-modern);
 }
 

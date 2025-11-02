@@ -1,6 +1,5 @@
 import { useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import UnivariateResults from './UnivariateResults';
 import LogisticRegressionResults from './LogisticRegressionResults';
 import Navbar from './Navbar';
 // import WoeIvResults from './WoeIvResults';
@@ -32,13 +31,11 @@ const SelectedColumnsPage = () => {
   // State declarations
   const [selectedColumns, setSelectedColumns] = useState<string[]>(navSelectedColumns || []);
   const [activeColumn, setActiveColumn] = useState<string>('');
-  const [compareColumn, setCompareColumn] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState(1);
   const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
   const [coarseBinResults, setCoarseBinResults] = useState<Record<string, any[]>>({});
-  const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, Record<number, any[]>>>({});
-  const [activeGroup, setActiveGroup] = useState<Record<string, number>>({});
   const [fineBinResults, setFineBinResults] = useState<Record<string, any[]>>({});
+  const [selectedFineBins, setSelectedFineBins] = useState<Record<string, string[]>>({});
   const [binMergeHistory, setBinMergeHistory] = useState<Record<string, Record<string, any[]>>>({});
   const [, setBinMergeStack] = useState<Record<string, any[]>>({}); // For undo (unused history for now)
   const [recordId, setRecordId] = useState<number | undefined>(initialRecordId);
@@ -46,7 +43,6 @@ const SelectedColumnsPage = () => {
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
   const [selectedForModeling, setSelectedForModeling] = useState<string[]>([]);
   const [notification, setNotification] = useState<string | null>(null);
-  const [expandedRanges, setExpandedRanges] = useState<Record<string, boolean>>({});
   const [scoreCardData, setScoreCardData] = useState<any>(null);
   const [testScoreLoading, setTestScoreLoading] = useState(false);
   const [testScoreResults, setTestScoreResults] = useState<any[] | null>(null);
@@ -146,65 +142,6 @@ const SelectedColumnsPage = () => {
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const truncateRange = (range: string, maxLength: number = 50): string => {
-    if (range.length <= maxLength) return range;
-    return `${range.slice(0, maxLength - 3)}...`;
-  };
-
-  const toggleRangeExpansion = (key: string) => {
-    setExpandedRanges((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
-  };
-
-  const handleDropColumn = (col: string) => {
-    setSelectedColumns((prev) => prev.filter((c) => c !== col));
-    setUnivariateResults((prev) => {
-      const newResults = { ...prev };
-      delete newResults[col];
-      return newResults;
-    });
-    setCoarseBinResults((prev) => {
-      const newResults = { ...prev };
-      delete newResults[col];
-      return newResults;
-    });
-    setFineBinResults((prev) => {
-      const newResults = { ...prev };
-      delete newResults[col];
-      return newResults;
-    });
-    setBinMergeHistory((prev) => {
-      const newHistory = { ...prev };
-      delete newHistory[col];
-      return newHistory;
-    });
-    setSelectedBinGroups((prev) => {
-      const newGroups = { ...prev };
-      delete newGroups[col];
-      return newGroups;
-    });
-    setWoeIvResults((prev) => {
-      const newResults = { ...prev };
-      delete newResults[col];
-      return newResults;
-    });
-    setWoeReadyColumns((prev) => {
-      const newSet = new Set(prev);
-      newSet.delete(col);
-      return newSet;
-    });
-    setSelectedForModeling((prev) => prev.filter((c) => c !== col));
-    if (activeColumn === col) {
-      setActiveColumn('');
-    }
-    if (compareColumn === col) {
-      setCompareColumn(null);
-    }
-    showNotification(`Column ${col} dropped.`);
-  };
-
   const generateScoreCard = async () => {
     setGeneratingScoreCard(true);
     try {
@@ -294,6 +231,7 @@ const SelectedColumnsPage = () => {
       if (data.success && !data.error) {
         setFineBinResults((prev) => ({ ...prev, [col]: data.stats || [] }));
         setBinMergeHistory((prev) => ({ ...prev, [col]: data.bin_merges || savedMerges }));
+        setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
         // Fetch WOE/IV but allow caller to suppress auto-selecting the column for modeling
         await fetchWoeIv(col, data.bin_merges || savedMerges, addToModeling);
         setWoeReadyColumns((prev) => new Set(prev).add(col));
@@ -361,11 +299,12 @@ const SelectedColumnsPage = () => {
         }),
       });
       const data = await res.json();
+      const coarseStats = data[col]?.stats || [];
       setUnivariateResults((prev) => ({ ...prev, [col]: data[col] || data }));
-      setCoarseBinResults((prev) => ({ ...prev, [col]: (data[col]?.stats || []) }));
-      setSelectedBinGroups((prev) => ({ ...prev, [col]: prev[col] || {} }));
-      setActiveGroup((prev) => ({ ...prev, [col]: 1 }));
-      setFineBinResults((prev) => ({ ...prev, [col]: prev[col] || [] }));
+      setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
+      setFineBinResults((prev) => ({ ...prev, [col]: coarseStats }));
+      setBinMergeHistory((prev) => ({ ...prev, [col]: prev[col] || {} }));
+      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
       // Load any saved fine bins but do NOT auto-select the column for modeling when clicking the card
       await loadSavedFineBins(col, varType, false);
       // Always fetch WOE/IV after coarse binning but suppress auto-select on click
@@ -375,36 +314,41 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  const toggleBinSelection = (col: string, binValue: any, group?: number) => {
-    const isContinuous = (continuousColumns || []).includes(col);
-    setSelectedBinGroups((prev) => {
-      const colGroups = prev[col] || {};
-      if (isContinuous) {
-        const selectedBins = colGroups[1] || [];
-        const updatedBins = selectedBins.includes(binValue)
-          ? selectedBins.filter((v) => v !== binValue)
-          : [...selectedBins, binValue];
-        return { ...prev, [col]: { 1: updatedBins } };
-      } else {
-        const currentGroupBins = colGroups[group!] || [];
-        const updatedBins = currentGroupBins.includes(binValue)
-          ? currentGroupBins.filter((v) => v !== binValue)
-          : [...currentGroupBins, binValue];
-        return { ...prev, [col]: { ...colGroups, [group!]: updatedBins } };
-      }
+  const toggleFineBinSelection = (col: string, binLabel: string) => {
+    const normalized = String(binLabel);
+    setSelectedFineBins((prev) => {
+      const current = prev[col] || [];
+      const exists = current.includes(normalized);
+      const updated = exists ? current.filter((label) => label !== normalized) : [...current, normalized];
+      return { ...prev, [col]: updated };
     });
   };
 
   const runBinning = async (col: string) => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+    const selectedLabels = Array.from(new Set((selectedFineBins[col] || []).map((label) => String(label))));
+    const history = binMergeHistory[col] || {};
+    const expandedSelection = Array.from(new Set(selectedLabels.flatMap((label) => {
+      const underlying = history[label];
+      if (Array.isArray(underlying) && underlying.length > 0) {
+        return underlying.map((item) => String(item));
+      }
+      return [label];
+    })));
+
+    if (expandedSelection.length < 2) {
+      showNotification('Select at least two bins to merge.');
+      return;
+    }
+
     try {
-      // Backup for undo
+      const previousHistory = history ? JSON.parse(JSON.stringify(history)) : {};
       setBinMergeStack((prev) => ({
         ...prev,
-        [col]: Array.isArray(binMergeHistory[col]) ? binMergeHistory[col] : [],
+        [col]: previousHistory as any,
       }));
 
-      // Step 1: Run coarse binning
+      // Step 1: Run coarse binning to refresh stats
       const coarseRes = await fetch('http://localhost:5000/api/univariate-analysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -415,57 +359,67 @@ const SelectedColumnsPage = () => {
         }),
       });
       const coarseData = await coarseRes.json();
+      const coarseStats = coarseData[col]?.stats || [];
       setUnivariateResults((prev) => ({ ...prev, [col]: coarseData[col] || coarseData }));
-      setCoarseBinResults((prev) => ({ ...prev, [col]: (coarseData[col]?.stats || []) }));
+      setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
 
-      // Step 2: Run fine binning if bins are selected
-      const colGroupsSnapshot = selectedBinGroups[col];
-      let mergesReturned = {};
-      if (colGroupsSnapshot && Object.keys(colGroupsSnapshot).length > 0) {
-        const existing = binMergeHistory[col] || {};
-        const newEntries: Record<string, any[]> = {};
-        Object.entries(colGroupsSnapshot).forEach(([gid, bins]) => {
-          if (bins && bins.length > 0) {
-            const sortedBins = [...bins].sort((a, b) => String(a).localeCompare(String(b)));
-            const mergeKey = varType === 'continuous' ? `Merged_${gid}` : sortedBins.join(', ');
-            newEntries[mergeKey] = sortedBins;
-          }
-        });
-        const combined = { ...existing, ...newEntries };
-        console.log(`bin_merges for ${col}:`, combined);
-
-        const fineRes = await fetch('http://localhost:5000/api/fine-bin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            variable: col,
-            target: targetVariable,
-            type: varType,
-            bin_merges: combined,
-            record_id: recordId,
-            dashboard_selected_columns: Array.from(selectedForModeling),
-          }),
-        });
-        const fineData = await fineRes.json();
-        if (!fineData.success) {
-          throw new Error(fineData.error || 'Fine binning failed');
+      const currentRows = (fineBinResults[col] && fineBinResults[col].length > 0)
+        ? fineBinResults[col]
+        : coarseStats;
+      const orderMap = new Map<string, number>();
+      currentRows.forEach((row: any, index: number) => {
+        const label = String(row[`${col}_fine_binned`] ?? row[`${col}_binned`] ?? row.Bin ?? row.bin ?? row.Range ?? `Bin_${index + 1}`);
+        if (!orderMap.has(label)) {
+          orderMap.set(label, index);
         }
+      });
 
-        setFineBinResults((prev) => ({ ...prev, [col]: fineData.stats || [] }));
-        mergesReturned = fineData.bin_merges || combined;
-        setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
-        setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
-        await persistFineBinColumn(col, mergesReturned);
-      } else {
-        // If no bins selected, use coarse binning results
-        setFineBinResults((prev) => ({ ...prev, [col]: coarseData[col]?.stats || [] }));
-        setBinMergeHistory((prev) => ({ ...prev, [col]: {} }));
-        await persistFineBinColumn(col, {});
+      const filteredHistoryEntries = Object.entries(history).filter(([, bins]) => {
+        const normalizedBins = Array.isArray(bins) ? bins.map((b) => String(b)) : [];
+        return normalizedBins.every((b) => !expandedSelection.includes(b));
+      });
+      const filteredHistory = Object.fromEntries(filteredHistoryEntries);
+
+      const sortedExpanded = [...expandedSelection].sort((a, b) => {
+        const orderA = orderMap.has(a) ? orderMap.get(a)! : Number.MAX_SAFE_INTEGER;
+        const orderB = orderMap.has(b) ? orderMap.get(b)! : Number.MAX_SAFE_INTEGER;
+        if (orderA === orderB) {
+          return a.localeCompare(b);
+        }
+        return orderA - orderB;
+      });
+
+      const nextMergeIndex = Object.keys(filteredHistory).length + 1;
+      const mergeKey = varType === 'continuous'
+        ? `Merged_${nextMergeIndex}`
+        : sortedExpanded.join(', ');
+
+      const payloadMerges = { ...filteredHistory, [mergeKey]: sortedExpanded };
+
+      const fineRes = await fetch('http://localhost:5000/api/fine-bin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          variable: col,
+          target: targetVariable,
+          type: varType,
+          bin_merges: payloadMerges,
+          record_id: recordId,
+          dashboard_selected_columns: Array.from(selectedForModeling),
+        }),
+      });
+      const fineData = await fineRes.json();
+      if (!fineData.success) {
+        throw new Error(fineData.error || 'Fine binning failed');
       }
-  // Always trigger fresh WOE/IV calculation after fine binning (do not auto-select)
-  await fetchWoeIv(col, mergesReturned, false);
-  setWoeReadyColumns((prev) => new Set(prev).add(col));
 
+      const mergesReturned = fineData.bin_merges || payloadMerges;
+      setFineBinResults((prev) => ({ ...prev, [col]: fineData.stats || [] }));
+      setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
+      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
+      await persistFineBinColumn(col, mergesReturned);
+      await fetchWoeIv(col, mergesReturned, false);
+      setWoeReadyColumns((prev) => new Set(prev).add(col));
       showNotification(`Binning completed for ${col}`);
     } catch (err) {
       console.error('Error in runBinning:', err);
@@ -602,11 +556,11 @@ const SelectedColumnsPage = () => {
       }
       setFineBinResults((prev) => ({ ...prev, [col]: fineBinStats }));
       setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
-      setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
+      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
       await persistFineBinColumn(col, mergesReturned);
-  // Always trigger fresh WOE/IV calculation with latest merges (do not auto-select)
-  await fetchWoeIv(col, mergesReturned, false);
-  setWoeReadyColumns((prev) => new Set(prev).add(col));
+      // Always trigger fresh WOE/IV calculation with latest merges (do not auto-select)
+      await fetchWoeIv(col, mergesReturned, false);
+      setWoeReadyColumns((prev) => new Set(prev).add(col));
 
       showNotification(`Unmerged '${mergedLabel}' for ${col}.`);
     } catch (err) {
@@ -620,7 +574,7 @@ const SelectedColumnsPage = () => {
       // Reset fine binning results and history
       setFineBinResults((prev) => ({ ...prev, [col]: [] }));
       setBinMergeHistory((prev) => ({ ...prev, [col]: {} }));
-      setSelectedBinGroups((prev) => ({ ...prev, [col]: {} }));
+      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
       setWoeIvResults((prev) => {
         const newResults = { ...prev };
         delete newResults[col];
@@ -647,7 +601,8 @@ const SelectedColumnsPage = () => {
       const data = await res.json();
       setCoarseBinResults((prev) => ({ ...prev, [col]: (data[col]?.stats || []) }));
       setUnivariateResults((prev) => ({ ...prev, [col]: data[col] || data }));
-      setFineBinResults((prev) => ({ ...prev, [col]: data[col]?.stats || [] }));
+    setFineBinResults((prev) => ({ ...prev, [col]: data[col]?.stats || [] }));
+    setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
       
       // Persist the reset state
       await persistFineBinColumn(col, {});
@@ -929,7 +884,7 @@ const SelectedColumnsPage = () => {
                   return (
                   <div
                     key={col}
-                    className={`column-card ${col === activeColumn ? 'active' : ''} ${col === compareColumn ? 'compare-active' : ''}`}
+                    className={`column-card ${col === activeColumn ? 'active' : ''}`}
                     onClick={() => handleColumnClick(col)}
                     role="button"
                     tabIndex={0}
@@ -974,152 +929,58 @@ const SelectedColumnsPage = () => {
               transition: 'width 0.3s'
             }}
           >
-            {currentStep === 1 && activeColumn && (
-              <div className="binning-section" aria-label="Binning controls and results">
+            {currentStep === 1 && activeColumn && (() => {
+              const isContinuousColumn = (continuousColumns || []).includes(activeColumn);
+              const coarseRows = coarseBinResults[activeColumn] || [];
+              const fineRows = (fineBinResults[activeColumn] && fineBinResults[activeColumn].length > 0)
+                ? fineBinResults[activeColumn]
+                : coarseRows;
+              const history = binMergeHistory[activeColumn] || {};
+              const selectedLabels = selectedFineBins[activeColumn] || [];
+              const selectedCount = selectedLabels.length;
+              const woeStats = woeIvResults[activeColumn]?.stats || [];
+              const woeMap = new Map<string, { woe: number; iv: number }>();
+              woeStats.forEach((row: any, index: number) => {
+                const label = String(row.Bin || row.temp_bin || row.Range || `Bin_${index + 1}`);
+                const woeVal = Number(row.WOE ?? row.woe ?? 0);
+                const ivVal = Number(row.IV ?? row.iv ?? 0);
+                woeMap.set(label, { woe: woeVal, iv: ivVal });
+              });
 
-                {coarseBinResults[activeColumn] && (
+              const sortedRows = [...fineRows].sort((a: any, b: any) => {
+                const getMin = (row: any) => {
+                  const candidate = row.Min ?? row.min ?? row.MinValue ?? row.minValue ?? null;
+                  const numeric = candidate === null || candidate === undefined ? NaN : Number(candidate);
+                  return Number.isFinite(numeric) ? numeric : NaN;
+                };
+                const minA = getMin(a);
+                const minB = getMin(b);
+                if (!Number.isNaN(minA) && !Number.isNaN(minB)) {
+                  return minA - minB;
+                }
+                const labelA = String(a[`${activeColumn}_fine_binned`] ?? a[`${activeColumn}_binned`] ?? a.Bin ?? a.bin ?? '');
+                const labelB = String(b[`${activeColumn}_fine_binned`] ?? b[`${activeColumn}_binned`] ?? b.Bin ?? b.bin ?? '');
+                const numA = parseInt((labelA.match(/\d+/) || [])[0] || '', 10);
+                const numB = parseInt((labelB.match(/\d+/) || [])[0] || '', 10);
+                if (!Number.isNaN(numA) && !Number.isNaN(numB)) {
+                  return numA - numB;
+                }
+                return labelA.localeCompare(labelB);
+              });
+
+              return (
+                <div className="binning-section" aria-label="Binning controls and results">
                   <div className="results-container">
                     <h3>Binning - {activeColumn}</h3>
-                    <h4>Merge Adjacent Bins For Fine Binning</h4>
-
-                    {!((continuousColumns || []).includes(activeColumn)) && (
-                      <div className="group-selector">
-                        <label htmlFor={`group-select-${activeColumn}`} style={{ marginRight: '8px' }}>
-                          Select group:
-                        </label>
-                        <select
-                          id={`group-select-${activeColumn}`}
-                          value={activeGroup[activeColumn] || 1}
-                          onChange={(e) => setActiveGroup((prev) => ({ ...prev, [activeColumn]: Number(e.target.value) }))}
-                          aria-label={`Select binning group for ${activeColumn}`}
-                        >
-                          {[1, 2, 3, 4, 5].map((g) => (
-                            <option key={g} value={g}>
-                              Group {g}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
+                    <p className="binning-helper-text">Select adjacent bins below and click Fine Binning on Selected to merge them.</p>
                     <div className="table-container">
-                      <table className="cross-tab-table" aria-label={`Coarse binning results for ${activeColumn}`}>
+                      <table className="cross-tab-table" aria-label={`Fine binning workspace for ${activeColumn}`}>
                         <thead>
                           <tr>
                             <th>Select</th>
                             <th>Bin</th>
-                            {(continuousColumns || []).includes(activeColumn) ? (
-                              <>
-                                <th>Min</th>
-                                <th>Max</th>
-                              </>
-                            ) : (
-                              <th>Range</th>
-                            )}
-                            <th>Bad</th>
-                            <th>Good</th>
-                            <th>Total</th>
-                            <th>Bad Rate (%)</th>
-                            <th>Freq %</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(coarseBinResults[activeColumn] || []).filter((bin) => {
-                            const merges = binMergeHistory[activeColumn];
-                            if (!merges) return true;
-                            const mergedValues = Object.values(merges).flat();
-                            return !mergedValues.includes(bin[`${activeColumn}_binned`]);
-                          }).map((bin, idx) => {
-                            const binLabelKey = `${activeColumn}_binned`;
-                            const group = activeGroup[activeColumn] || 1;
-                            const isContinuous = (continuousColumns || []).includes(activeColumn);
-                            const originalLabel = typeof bin[binLabelKey] === 'string' ? bin[binLabelKey] : `Bin_${bin[binLabelKey]}`;
-                            const rangeKey = `${activeColumn}_${idx}`;
-                            const rangeValue = String(bin.Range ?? '');
-                            const isTruncated = !isContinuous && rangeValue.length > 50;
-                            const truncatedRange = isTruncated ? truncateRange(rangeValue) : rangeValue;
-
-                            return (
-                              <tr key={bin[binLabelKey]}>
-                                <td>
-                                  <input
-                                    type="checkbox"
-                                    checked={
-                                      selectedBinGroups[activeColumn]?.[isContinuous ? 1 : group]?.includes(bin[binLabelKey]) || false
-                                    }
-                                    onChange={() => toggleBinSelection(activeColumn, bin[binLabelKey], isContinuous ? 1 : group)}
-                                    aria-label={`Select bin ${originalLabel} for ${activeColumn}`}
-                                  />
-                                </td>
-                                <td>{originalLabel}</td>
-                                {isContinuous ? (
-                                  <>
-                                    <td>{bin.Min ?? ''}</td>
-                                    <td>{bin.Max ?? ''}</td>
-                                  </>
-                                ) : (
-                                  <td>
-                                    <button
-                                      type="button"
-                                      title={rangeValue}
-                                      style={{ cursor: isTruncated ? 'pointer' : 'default', background: 'none', border: 'none', color: 'inherit' }}
-                                      onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                                      aria-label={isTruncated ? `Expand range for bin ${originalLabel}` : undefined}
-                                    >
-                                      {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
-                                    </button>
-                                  </td>
-                                )}
-                                <td>{bin.Bad}</td>
-                                <td>{bin.Good}</td>
-                                <td>{bin.Total}</td>
-                                <td>{formatToFourDecimals(bin['Bad Rate'])}%</td>
-                                <td>{formatToFourDecimals(bin['Freq%'])}%</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <div className="binning-controls">
-                      <button className="fine-bin-btn" onClick={() => runBinning(activeColumn)} aria-label={`Run binning for ${activeColumn}`}>
-                        Fine Binning on Selected
-                      </button>
-                      <button className="reset-bin-btn" onClick={() => resetFineBinning(activeColumn)} aria-label={`Reset binning for ${activeColumn}`}>
-                        Reset Binning
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {activeColumn && univariateResults[activeColumn] && (
-                  <div className="univariate-results-section">
-                    <UnivariateResults
-                      univariateResults={{ [activeColumn]: univariateResults[activeColumn] }}
-                      formatToFourDecimals={formatToFourDecimals}
-                      onDropColumn={handleDropColumn}
-                    />
-                  </div>
-                )}
-
-                {/* Always show Fine Binning Results if available */}
-                {fineBinResults[activeColumn]?.length > 0 && (
-                  <div className="results-container">
-                    <h2>Fine Binning Results</h2>
-                    <div className="table-container">
-                      <table className="cross-tab-table" aria-label={`Fine binning results for ${activeColumn}`}>
-                        <thead>
-                          <tr>
-                            <th>Bin</th>
-                            {(continuousColumns || []).includes(activeColumn) ? (
-                              <>
-                                <th>Min</th>
-                                <th>Max</th>
-                              </>
-                            ) : (
-                              <th>Range</th>
-                            )}
+                            <th>Min</th>
+                            <th>Max</th>
                             <th>Bad</th>
                             <th>Good</th>
                             <th>Total</th>
@@ -1131,150 +992,135 @@ const SelectedColumnsPage = () => {
                           </tr>
                         </thead>
                         <tbody>
-                          {(() => {
-                            const woeStats = woeIvResults[activeColumn]?.stats || [];
-                            const woeMap = new Map();
-                            woeStats.forEach((row: any) => {
-                              const binLabel = row.Bin || row.temp_bin || row.Range || `Bin_${woeStats.indexOf(row) + 1}`;
-                              woeMap.set(binLabel, { woe: parseFloat(row.WOE), iv: parseFloat(row.IV) });
-                            });
-                            return (fineBinResults[activeColumn] || [])
-                              .slice()
-                              .sort((a: any, b: any) => {
-                                // Prefer numeric Min provided by backend (case-insensitive)
-                                const getMin = (r: any) => {
-                                  const m = r.Min ?? r.min ?? r.MinValue ?? r.minValue ?? null;
-                                  const v = m === null || m === undefined ? NaN : Number(m);
-                                  return Number.isFinite(v) ? v : NaN;
-                                };
-                                const minA = getMin(a);
-                                const minB = getMin(b);
-                                if (!Number.isNaN(minA) && !Number.isNaN(minB)) return minA - minB;
+                          {sortedRows.length === 0 ? (
+                            <tr>
+                              <td colSpan={12} style={{ textAlign: 'center', padding: '16px' }}>No binning results available.</td>
+                            </tr>
+                          ) : (
+                            sortedRows.map((bin: any, idx: number) => {
+                              const labelValRaw = bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? `Bin_${idx + 1}`;
+                              const labelVal = String(labelValRaw);
+                              const rangeValue = String(bin.Range ?? '');
+                              const minVal = bin.Min ?? bin.min ?? bin.MinValue ?? bin.minValue ?? null;
+                              const maxVal = bin.Max ?? bin.max ?? bin.MaxValue ?? bin.maxValue ?? null;
+                              const minDisplay = minVal !== null && minVal !== undefined ? minVal : (isContinuousColumn ? 'N/A' : '—');
+                              const maxDisplay = maxVal !== null && maxVal !== undefined ? maxVal : (isContinuousColumn ? 'N/A' : '—');
+                              const badValue = bin.Bad ?? bin['Bad'] ?? 0;
+                              const goodValue = bin.Good ?? bin['Good'] ?? 0;
+                              const totalValue = bin.Total ?? bin['Total'] ?? (badValue + goodValue);
+                              const badRateRaw = typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'] : (typeof bin.BadRate === 'number' ? bin.BadRate : null);
+                              const freqRaw = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
+                              const woeData = woeMap.get(labelVal) || woeMap.get(labelVal.replace(/\s+/g, '')) || { woe: 0, iv: 0 };
+                              const isMergedLabel = Boolean(history[labelVal]);
+                              const isSelected = selectedLabels.includes(labelVal);
 
-                                // Fallback: try to parse numeric part from label
-                                const labelA = (a[activeColumn + '_fine_binned'] || a.Bin || '').toString();
-                                const labelB = (b[activeColumn + '_fine_binned'] || b.Bin || '').toString();
-                                const numA = parseInt((labelA.match(/\d+/) || [])[0] || '', 10);
-                                const numB = parseInt((labelB.match(/\d+/) || [])[0] || '', 10);
-                                if (!Number.isNaN(numA) && !Number.isNaN(numB)) return numA - numB;
-
-                                // Last resort: lexicographic
-                                return labelA.localeCompare(labelB);
-                              })
-                              .map((bin, idx) => {
-                                const isContinuous = (continuousColumns || []).includes(activeColumn);
-                                const rangeKey = `${activeColumn}_${idx}`;
-                                const rangeValue = String(bin.Range ?? '');
-                                const isTruncated = !isContinuous && rangeValue.length > 50;
-                                const truncatedRange = isTruncated ? truncateRange(rangeValue) : rangeValue;
-
-                                const labelVal = bin[activeColumn + '_fine_binned'] || bin['Bin'] || bin['Bin_1'];
-                                const woeData = woeMap.get(String(labelVal)) || { woe: 0, iv: 0 };
-                                const isMergedLabel = typeof labelVal === 'string' && (
-                                  labelVal.includes(',') || (binMergeHistory[activeColumn] && binMergeHistory[activeColumn][labelVal]) ||
-                                  labelVal.startsWith('Merged_')
-                                );
-
-                                return (
-                                  <tr
-                                    key={idx}
-                                    style={{
-                                      backgroundColor:
-                                        typeof bin[activeColumn + '_fine_binned'] === 'string' &&
-                                        (bin[activeColumn + '_fine_binned'].indexOf(',') !== -1 || bin[activeColumn + '_fine_binned'].startsWith('Merged_'))
-                                          ? 'var(--merged-bin-bg, #21262d)'
-                                          : 'transparent',
-                                    }}
-                                  >
-                                    <td style={{ maxWidth: '120px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', verticalAlign: 'middle' }} title={labelVal}>
-                                      {labelVal}
-                                    </td>
-                                    {isContinuous ? (
-                                      <>
-                                        <td>{bin.Min ?? 'N/A'}</td>
-                                        <td>{bin.Max ?? 'N/A'}</td>
-                                      </>
-                                    ) : (
-                                      <td>
-                                        <button
-                                          type="button"
-                                          title={rangeValue}
-                                          style={{ cursor: isTruncated ? 'pointer' : 'default', background: 'none', border: 'none', color: 'inherit' }}
-                                          onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                                          aria-label={isTruncated ? `Expand range for bin ${bin[activeColumn + '_fine_binned']}` : undefined}
-                                        >
-                                          {expandedRanges[rangeKey] ? rangeValue : truncatedRange}
-                                        </button>
-                                      </td>
-                                    )}
-                                    <td>{bin.Bad ?? bin['Bad'] ?? 0}</td>
-                                    <td>{bin.Good ?? bin['Good'] ?? 0}</td>
-                                    <td>{bin.Total ?? bin['Total'] ?? 0}</td>
-                                    <td>{typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'].toFixed(4) : bin['BadRate']?.toFixed(4) ?? '0.0000'}</td>
-                                    <td>{typeof bin['Freq%'] === 'number' ? bin['Freq%'].toFixed(2) : '0.00'}</td>
-                                    <td>{formatToFourDecimals(woeData.woe)}</td>
-                                    <td>{formatToFourDecimals(woeData.iv)}</td>
-                                    <td>
-                                      {isMergedLabel ? (
-                                        <button
-                                          className="unmerge-btn compact"
-                                          onClick={() => unmergeFineBin(activeColumn, labelVal)}
-                                          aria-label={`Unmerge ${String(labelVal)}`}
-                                          title="Unmerge"
-                                        >
-                                          <span style={{fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s'}}>Unmerge</span>
-                                        </button>
-                                      ) : null}
-                                    </td>
-                                  </tr>
-                                );
-                              });
-                          })()}
+                              return (
+                                <tr
+                                  key={`${labelVal}-${idx}`}
+                                  style={{
+                                    backgroundColor: isMergedLabel ? 'var(--merged-bin-bg, #21262d)' : 'transparent',
+                                  }}
+                                >
+                                  <td>
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      onChange={() => toggleFineBinSelection(activeColumn, labelVal)}
+                                      aria-label={`Select bin ${labelVal} for ${activeColumn}`}
+                                    />
+                                  </td>
+                                  <td title={rangeValue.length > 0 ? rangeValue : undefined} style={{ maxWidth: '160px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {labelVal}
+                                  </td>
+                                  <td>{minDisplay}</td>
+                                  <td>{maxDisplay}</td>
+                                  <td>{badValue}</td>
+                                  <td>{goodValue}</td>
+                                  <td>{totalValue}</td>
+                                  <td>{badRateRaw !== null && badRateRaw !== undefined ? badRateRaw.toFixed(4) : '0.0000'}</td>
+                                  <td>{freqRaw !== null && freqRaw !== undefined ? freqRaw.toFixed(2) : '0.00'}</td>
+                                  <td>{formatToFourDecimals(woeData.woe)}</td>
+                                  <td>{formatToFourDecimals(woeData.iv)}</td>
+                                  <td>
+                                    {isMergedLabel ? (
+                                      <button
+                                        className="unmerge-btn compact"
+                                        onClick={() => unmergeFineBin(activeColumn, labelVal)}
+                                        aria-label={`Unmerge ${labelVal}`}
+                                        title="Unmerge"
+                                      >
+                                        <span style={{ fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s' }}>Unmerge</span>
+                                      </button>
+                                    ) : null}
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
                         </tbody>
                       </table>
                     </div>
-                  </div>
-                )}
-                {/* Always show WOE/IV cards if available, independently */}
-                {woeIvResults[activeColumn] && (
-                  <div className="woe-iv-embedded" style={{ marginTop: '24px' }}>
-                    <h3>WOE by Bin</h3>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <BarChart
-                        data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
-                          Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
-                          WOE: parseFloat(row.WOE),
-                        }))}
-                        margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+
+                    <div className="binning-controls">
+                      <button
+                        className="fine-bin-btn"
+                        onClick={() => runBinning(activeColumn)}
+                        aria-label={`Run binning for ${activeColumn}`}
+                        disabled={selectedCount < 2}
+                        title={selectedCount < 2 ? 'Select at least two bins to merge' : undefined}
                       >
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-                        <YAxis />
-                        <Tooltip />
-                        <Bar dataKey="WOE" fill="#8884d8" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                    <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <LineChart
-                        data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
-                          Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
-                          IV: parseFloat(row.IV),
-                        }))}
-                        margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                        Fine Binning on Selected
+                      </button>
+                      <button
+                        className="reset-bin-btn"
+                        onClick={() => resetFineBinning(activeColumn)}
+                        aria-label={`Reset binning for ${activeColumn}`}
                       >
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-                        <YAxis />
-                        <Tooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="IV" stroke="#82ca9d" strokeWidth={2} />
-                      </LineChart>
-                    </ResponsiveContainer>
+                        Reset Binning
+                      </button>
+                    </div>
                   </div>
-                )}
-              </div>
-            )}
+
+                  {woeIvResults[activeColumn] && (
+                    <div className="woe-iv-embedded" style={{ marginTop: '24px' }}>
+                      <h3>WOE by Bin</h3>
+                      <ResponsiveContainer width="100%" height={300}>
+                        <BarChart
+                          data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
+                            Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
+                            WOE: parseFloat(row.WOE),
+                          }))}
+                          margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                          <YAxis />
+                          <Tooltip />
+                          <Bar dataKey="WOE" fill="#8884d8" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                      <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
+                      <ResponsiveContainer width="100%" height={300}>
+                        <LineChart
+                          data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
+                            Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
+                            IV: parseFloat(row.IV),
+                          }))}
+                          margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                          <YAxis />
+                          <Tooltip />
+                          <Legend />
+                          <Line type="monotone" dataKey="IV" stroke="#82ca9d" strokeWidth={2} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {currentStep === 2 && (
               <LogisticRegressionResults
