@@ -575,17 +575,9 @@ const SelectedColumnsPage = () => {
       setFineBinResults((prev) => ({ ...prev, [col]: [] }));
       setBinMergeHistory((prev) => ({ ...prev, [col]: {} }));
       setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
-      setWoeIvResults((prev) => {
-        const newResults = { ...prev };
-        delete newResults[col];
-        return newResults;
-      });
-      setWoeReadyColumns((prev) => {
-        const newSet = new Set(prev);
-        newSet.delete(col);
-        return newSet;
-      });
-      setSelectedForModeling((prev) => prev.filter((c) => c !== col));
+      // Keep existing WOE/IV graphs intact when resetting bins so users
+      // can still view WOE by Bin and IV Contribution even after a reset.
+      // (Do not delete woeIvResults[col] or remove from woeReadyColumns.)
 
       // Re-run coarse binning to restore original bins
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
@@ -601,12 +593,20 @@ const SelectedColumnsPage = () => {
       const data = await res.json();
       setCoarseBinResults((prev) => ({ ...prev, [col]: (data[col]?.stats || []) }));
       setUnivariateResults((prev) => ({ ...prev, [col]: data[col] || data }));
-    setFineBinResults((prev) => ({ ...prev, [col]: data[col]?.stats || [] }));
-    setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
-      
-      // Persist the reset state
-      await persistFineBinColumn(col, {});
-      showNotification(`Binning for ${col} reset to original coarse bins.`);
+      setFineBinResults((prev) => ({ ...prev, [col]: data[col]?.stats || [] }));
+      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
+
+        // Persist the reset state (save empty merges) before requesting WOE
+        // so the backend has the authoritative merge state if it looks up by record.
+        await persistFineBinColumn(col, {});
+
+        // Recompute WOE/IV based on the restored coarse bins so graphs reflect the reset.
+        // Pass an explicit empty merges object to ensure the backend computes
+        // WOE using no merges rather than relying on persisted state timing.
+        await fetchWoeIv(col, {}, false);
+        setWoeReadyColumns((prev) => new Set(prev).add(col));
+
+        showNotification(`Binning for ${col} reset to original coarse bins.`);
     } catch (err) {
       console.error('Error resetting binning:', err);
       alert('Error resetting binning');
@@ -711,7 +711,15 @@ const SelectedColumnsPage = () => {
       });
       const data = await res.json();
       if (!data.error) {
-        setWoeIvResults((prev) => ({ ...prev, ...data }));
+        // The backend may return an object keyed by column name (e.g. { colName: { stats: [...] } })
+        // or it may return the column payload directly. Normalize so woeIvResults[col] is set.
+        if (data && typeof data === 'object' && Object.prototype.hasOwnProperty.call(data, col)) {
+          // Merge other columns (if any) but ensure the returned column is assigned
+          setWoeIvResults((prev) => ({ ...prev, ...data }));
+        } else {
+          // Put the returned payload under the column key
+          setWoeIvResults((prev) => ({ ...prev, [col]: data }));
+        }
         // Only auto-add to "selected for modeling" when allowed by caller
         if (addToModeling) {
           setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
