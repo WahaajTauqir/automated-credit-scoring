@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS records (
 
 -- Table to store fine binning details
 CREATE TABLE IF NOT EXISTS finebin_details (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     record_id INTEGER NOT NULL,
     column_name TEXT NOT NULL,
     group_id TEXT NOT NULL,

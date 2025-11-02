@@ -1,0 +1,11 @@
+flask
+flask-cors
+python-dotenv
+psycopg2-binary
+pandas
+numpy
+scikit-learn
+statsmodels
+scipy
+matplotlib
+requests

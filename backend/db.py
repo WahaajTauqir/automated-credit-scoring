@@ -10,13 +10,25 @@ def init_db():
     Stub for database initialization. No-op for PostgreSQL.
     """
     pass
+# Prefer a full DATABASE_URL if provided; fall back to individual PG_* vars.
+DATABASE_URL = os.getenv('DATABASE_URL')
 PG_DBNAME = os.getenv('PG_DBNAME', 'your_db_name')
 PG_USER = os.getenv('PG_USER', 'your_db_user')
 PG_PASSWORD = os.getenv('PG_PASSWORD', 'your_db_password')
 PG_HOST = os.getenv('PG_HOST', 'localhost')
 PG_PORT = os.getenv('PG_PORT', '5432')
 
+
 def get_db_connection():
+    """
+    Return a psycopg2 connection. If DATABASE_URL is set, use it directly
+    (recommended). Otherwise use individual PG_* environment variables.
+    """
+    if DATABASE_URL:
+        # Let psycopg2 parse the full connection string / DSN
+        return psycopg2.connect(DATABASE_URL)
+
+    # Fallback to component-wise connection
     conn = psycopg2.connect(
         dbname=PG_DBNAME,
         user=PG_USER,

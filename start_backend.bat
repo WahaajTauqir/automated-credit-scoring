@@ -1,7 +1,8 @@
 @echo off
-set GITHUB_TOKEN=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
-echo Starting backend with GitHub token...
-echo Token prefix: %GITHUB_TOKEN:~0,20%...
+REM GITHUB_TOKEN is sensitive — DO NOT hardcode real tokens in this file.
+REM Set your token in a local, untracked `backend/.env` file instead.
+REM Example (PowerShell/CMD): set GITHUB_TOKEN=your_token_here
+echo Starting backend (ensure GITHUB_TOKEN is set in your environment or backend\.env)
 rem PostgreSQL connection settings - update these to your environment
 
 call .venv\Scripts\activate
