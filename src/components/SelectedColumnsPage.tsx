@@ -51,12 +51,8 @@ const SelectedColumnsPage = () => {
   const [searchTerm, setSearchTerm] = useState('');
   // Removed UI sorting controls per request; keep search only
 
-  // Get IV badge class based on IV value
-  const getIVBadgeClass = (iv: number) => {
-    if (iv < 0.1) return 'weak';
-    if (iv < 0.3) return 'medium';
-    return 'strong';
-  };
+  // Helper to format IV class if needed later
+  // (kept here for possible future IV badge usage)
 
   // Filtered and sorted columns
   // Filter columns by search term and sort alphabetically by name
@@ -164,12 +160,14 @@ const SelectedColumnsPage = () => {
   };
 
   // API calls
-  const loadSavedFineBins = async (col: string, varType: string, addToModeling: boolean = true) => {
-    if (!recordId) return;
+  const loadSavedFineBins = async (col: string, varType: string): Promise<{ merges: Record<string, any[]> | undefined }> => {
+    if (!recordId) return { merges: undefined };
     try {
       const resp = await fetch(`http://localhost:5000/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
       const details = await resp.json();
-      if (!Array.isArray(details) || details.length === 0) return;
+      if (!Array.isArray(details) || details.length === 0) {
+        return { merges: undefined };
+      }
 
       const savedMerges: Record<string, any[]> = {};
       details.forEach((row: any) => {
@@ -183,7 +181,9 @@ const SelectedColumnsPage = () => {
           savedMerges[row.group_id] = bins;
         }
       });
-      if (Object.keys(savedMerges).length === 0) return;
+      if (Object.keys(savedMerges).length === 0) {
+        return { merges: undefined };
+      }
 
       const res = await fetch('http://localhost:5000/api/fine-bin', {
         method: 'POST',
@@ -203,15 +203,14 @@ const SelectedColumnsPage = () => {
         setFineBinResults((prev) => ({ ...prev, [col]: data.stats || [] }));
         setBinMergeHistory((prev) => ({ ...prev, [col]: data.bin_merges || savedMerges }));
         setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
-        // Fetch WOE/IV but allow caller to suppress auto-selecting the column for modeling
-        await fetchWoeIv(col, data.bin_merges || savedMerges, addToModeling);
-        setWoeReadyColumns((prev) => new Set(prev).add(col));
+        return { merges: data.bin_merges || savedMerges };
       } else {
         console.error('Fine binning failed:', data.error);
       }
     } catch (e) {
       console.error('Failed to load saved fine bins for', col, e);
     }
+    return { merges: undefined };
   };
 
   const loadSavedData = async () => {
@@ -277,9 +276,12 @@ const SelectedColumnsPage = () => {
       setBinMergeHistory((prev) => ({ ...prev, [col]: prev[col] || {} }));
       setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
       // Load any saved fine bins but do NOT auto-select the column for modeling when clicking the card
-      await loadSavedFineBins(col, varType, false);
-      // Always fetch WOE/IV after coarse binning but suppress auto-select on click
-      await fetchWoeIv(col, undefined, false);
+      const { merges } = await loadSavedFineBins(col, varType);
+      const mergePayload = merges && Object.keys(merges).length > 0 ? merges : undefined;
+      const woeSuccess = await fetchWoeIv(col, mergePayload, false);
+      if (woeSuccess) {
+        setWoeReadyColumns((prev) => new Set(prev).add(col));
+      }
     } catch {
       alert('Error fetching coarse bin results');
     }
@@ -669,7 +671,11 @@ const SelectedColumnsPage = () => {
     console.debug('[SelectedColumnsPage] render: selectedForModeling ->', selectedForModeling);
   }, [selectedForModeling]);
 
-  const fetchWoeIv = async (col: string, merges?: Record<string, any[]>, addToModeling: boolean = true) => {
+  const fetchWoeIv = async (
+    col: string,
+    merges?: Record<string, any[]>,
+    addToModeling: boolean = true,
+  ): Promise<boolean> => {
     try {
       const body: any = { variables: [col], target: targetVariable };
       if (recordId) body.record_id = recordId;
@@ -695,10 +701,12 @@ const SelectedColumnsPage = () => {
         if (addToModeling) {
           setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
         }
+        return true;
       }
     } catch (e) {
       console.error('WOE/IV fetch failed', e);
     }
+    return false;
   };
 
   const canGoToStep = (step: number) => {
@@ -896,12 +904,22 @@ const SelectedColumnsPage = () => {
               const selectedLabels = selectedFineBins[activeColumn] || [];
               const selectedCount = selectedLabels.length;
               const woeStats = woeIvResults[activeColumn]?.stats || [];
-              const woeMap = new Map<string, { woe: number; iv: number }>();
+              const normalizeLabel = (value: string) => value.replace(/\s+/g, ' ').trim();
+              const getFirstNumeric = (...values: any[]): number | undefined => {
+                for (const val of values) {
+                  if (val === null || val === undefined || val === '') continue;
+                  const num = Number(val);
+                  if (Number.isFinite(num)) return num;
+                }
+                return undefined;
+              };
+              const woeMap = new Map<string, { woe: number; iv: number; index: number }>();
               woeStats.forEach((row: any, index: number) => {
                 const label = String(row.Bin || row.temp_bin || row.Range || `Bin_${index + 1}`);
-                const woeVal = Number(row.WOE ?? row.woe ?? 0);
-                const ivVal = Number(row.IV ?? row.iv ?? 0);
-                woeMap.set(label, { woe: woeVal, iv: ivVal });
+                const normalizedLabel = normalizeLabel(label);
+                const woeVal = getFirstNumeric(row.WOE, row.woe, row.WoE, row.Woe, row.woe_value, row.WOEValue) ?? 0;
+                const ivVal = getFirstNumeric(row.IV, row.iv, row.Iv, row.iv_contribution, row.IVContribution) ?? 0;
+                woeMap.set(normalizedLabel, { woe: woeVal, iv: ivVal, index });
               });
 
               const sortedRows = [...fineRows].sort((a: any, b: any) => {
@@ -923,6 +941,60 @@ const SelectedColumnsPage = () => {
                   return numA - numB;
                 }
                 return labelA.localeCompare(labelB);
+              });
+
+              const chartValueMap = new Map<string, { woe: number; iv: number }>();
+              const chartRows = sortedRows.map((row: any, idx: number) => {
+                const labelRaw = row[`${activeColumn}_fine_binned`] ?? row[`${activeColumn}_binned`] ?? row.Bin ?? row.bin ?? `Bin_${idx + 1}`;
+                const label = String(labelRaw);
+                const normalizedLabel = normalizeLabel(label);
+                const mapped = woeMap.get(normalizedLabel);
+                const fallbackStat = woeStats[mapped?.index ?? idx];
+                const rowWoe = getFirstNumeric(
+                  row.WOE,
+                  row.woe,
+                  row.WoE,
+                  row.Woe,
+                  row.woe_value,
+                  row.WOEValue,
+                  row['WOE'],
+                  row['woe']
+                );
+                const rowIv = getFirstNumeric(
+                  row.IV,
+                  row.iv,
+                  row.Iv,
+                  row.iv_contribution,
+                  row.IVContribution,
+                  row['IV'],
+                  row['iv']
+                );
+                const fallbackWoe = getFirstNumeric(
+                  fallbackStat?.WOE,
+                  fallbackStat?.woe,
+                  fallbackStat?.WoE,
+                  fallbackStat?.woe_value,
+                  fallbackStat?.WOEValue
+                );
+                const fallbackIv = getFirstNumeric(
+                  fallbackStat?.IV,
+                  fallbackStat?.iv,
+                  fallbackStat?.Iv,
+                  fallbackStat?.iv_contribution,
+                  fallbackStat?.IVContribution
+                );
+                const resolvedWoe = getFirstNumeric(rowWoe, mapped?.woe, fallbackWoe, 0) ?? 0;
+                const resolvedIv = getFirstNumeric(rowIv, mapped?.iv, fallbackIv, 0) ?? 0;
+                const resolved = { woe: resolvedWoe, iv: resolvedIv };
+                chartValueMap.set(label, resolved);
+                if (normalizedLabel !== label) {
+                  chartValueMap.set(normalizedLabel, resolved);
+                }
+                return {
+                  Bin: label,
+                  WOE: resolvedWoe,
+                  IV: resolvedIv,
+                };
               });
 
               return (
@@ -967,7 +1039,8 @@ const SelectedColumnsPage = () => {
                               const totalValue = bin.Total ?? bin['Total'] ?? (badValue + goodValue);
                               const badRateRaw = typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'] : (typeof bin.BadRate === 'number' ? bin.BadRate : null);
                               const freqRaw = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
-                              const woeData = woeMap.get(labelVal) || woeMap.get(labelVal.replace(/\s+/g, '')) || { woe: 0, iv: 0 };
+                              const normalizedLabel = normalizeLabel(labelVal);
+                              const woeData = chartValueMap.get(labelVal) || chartValueMap.get(normalizedLabel) || { woe: 0, iv: 0 };
                               const isMergedLabel = Boolean(history[labelVal]);
                               const isSelected = selectedLabels.includes(labelVal);
 
@@ -1035,27 +1108,77 @@ const SelectedColumnsPage = () => {
                             })
                           )}
                         </tbody>
+                      
+                        {/* Attach a one-row totals footer inside the same table so columns align */}
+                        <tfoot>
+                          {(() => {
+                            // compute totals from the sortedRows and chartValueMap
+                            const totals = ((): {
+                              totalBad: number;
+                              totalGood: number;
+                              totalTotal: number;
+                              badRatePercent: number;
+                              freqPercent: number;
+                              weightedWoe: number;
+                              totalIv: number;
+                            } => {
+                              let totalBad = 0;
+                              let totalGood = 0;
+                              let totalTotal = 0;
+                              let sumFreq = 0;
+                              let freqProvided = false;
+                              let sumWoeWeighted = 0;
+                              let sumIv = 0;
+                              sortedRows.forEach((bin: any, idx: number) => {
+                                const bad = Number(bin.Bad ?? bin['Bad'] ?? 0) || 0;
+                                const good = Number(bin.Good ?? bin['Good'] ?? 0) || 0;
+                                const total = Number(bin.Total ?? bin['Total'] ?? (bad + good)) || (bad + good);
+                                totalBad += bad;
+                                totalGood += good;
+                                totalTotal += total;
+                                const freq = (typeof bin['Freq%'] === 'number') ? Number(bin['Freq%']) : (typeof bin.Freq === 'number' ? Number(bin.Freq) : null);
+                                if (freq !== null) {
+                                  sumFreq += freq;
+                                  freqProvided = true;
+                                }
+                                const labelRaw = bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? `Bin_${idx + 1}`;
+                                const label = String(labelRaw);
+                                const entry = chartValueMap.get(label) || chartValueMap.get(label.replace(/\s+/g, ' ')) || { woe: 0, iv: 0 };
+                                const woeNum = Number(entry.woe) || 0;
+                                const ivNum = Number(entry.iv) || 0;
+                                sumWoeWeighted += woeNum * total; // weight by count
+                                sumIv += ivNum;
+                              });
+
+                              const badRatePercent = totalTotal > 0 ? (totalBad / totalTotal) * 100 : 0;
+                              const freqPercent = freqProvided ? sumFreq : (totalTotal > 0 ? 100 : 0);
+                              const weightedWoe = totalTotal > 0 ? (sumWoeWeighted / totalTotal) : 0;
+                              // prefer authoritative IV if available from woeIvResults
+                              const totalIv = Number(woeIvResults[activeColumn]?.iv ?? sumIv) || 0;
+
+                              return { totalBad, totalGood, totalTotal, badRatePercent, freqPercent, weightedWoe, totalIv };
+                            })();
+
+                            return (
+                              <tr className="totals-row">
+                                <td><strong>Total</strong></td>
+                                <td />
+                                <td />
+                                <td />
+                                <td>{totals.totalBad}</td>
+                                <td>{totals.totalGood}</td>
+                                <td>{totals.totalTotal}</td>
+                                <td>{totals.badRatePercent.toFixed(2)}</td>
+                                <td>{totals.freqPercent.toFixed(2)}</td>
+                                <td>{formatToFourDecimals(totals.weightedWoe)}</td>
+                                <td className="iv-total">{formatToFourDecimals(totals.totalIv)}</td>
+                                <td />
+                              </tr>
+                            );
+                          })()}
+                        </tfoot>
                       </table>
                     </div>
-
-                    {/* IV summary moved here (under the table, above the binning controls) */}
-                    {woeIvResults[activeColumn] && (() => {
-                      const ivVal = Number(woeIvResults[activeColumn].iv || 0);
-                      const ivClass = getIVBadgeClass(ivVal); // 'weak' | 'medium' | 'strong'
-                      const ivLabel = ivVal < 0.1 ? 'Weak' : ivVal < 0.3 ? 'Medium' : 'Strong';
-                      return (
-                        <div className={`iv-summary ${ivClass}`} aria-live="polite" aria-label={`Information Value ${ivVal}, ${ivLabel}`}>
-                          <div className="iv-summary-accent" aria-hidden="true" />
-                          <div className="iv-summary-main">
-                            <div className="iv-summary-title">Information Value</div>
-                            <div className="iv-summary-row">
-                              <span className="iv-summary-value">{formatToFourDecimals(ivVal)}</span>
-                              <span className="iv-summary-category">{ivLabel}</span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })()}
 
                     <div className="binning-controls">
                       <button
@@ -1079,39 +1202,34 @@ const SelectedColumnsPage = () => {
 
                   {woeIvResults[activeColumn] && (
                     <div className="woe-iv-embedded" style={{ marginTop: '24px' }}>
-                      <h3>WOE by Bin</h3>
-                      <ResponsiveContainer width="100%" height={300}>
-                        <BarChart
-                          data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
-                            Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
-                            WOE: parseFloat(row.WOE),
-                          }))}
-                          margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
-                        >
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-                          <YAxis />
-                          <Tooltip />
-                          <Bar dataKey="WOE" fill="#8884d8" />
-                        </BarChart>
-                      </ResponsiveContainer>
-                      <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
-                      <ResponsiveContainer width="100%" height={300}>
-                        <LineChart
-                          data={(woeIvResults[activeColumn]?.stats || []).map((row: any, idx: number) => ({
-                            Bin: row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`,
-                            IV: parseFloat(row.IV),
-                          }))}
-                          margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
-                        >
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-                          <YAxis />
-                          <Tooltip />
-                          <Legend />
-                          <Line type="monotone" dataKey="IV" stroke="#82ca9d" strokeWidth={2} />
-                        </LineChart>
-                      </ResponsiveContainer>
+                          <h3>WOE by Bin</h3>
+                          <ResponsiveContainer width="100%" height={300}>
+                            <LineChart
+                                data={chartRows}
+                              margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                            >
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                              <YAxis />
+                              <Tooltip />
+                              <Legend />
+                              <Line type="monotone" dataKey="WOE" stroke="#39ff14" strokeWidth={2} dot={{ r: 3, fill: '#39ff14', stroke: '#39ff14' }} />
+                            </LineChart>
+                          </ResponsiveContainer>
+
+                          <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
+                          <ResponsiveContainer width="100%" height={300}>
+                            <BarChart
+                              data={chartRows}
+                              margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
+                            >
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                              <YAxis />
+                              <Tooltip />
+                              <Bar dataKey="IV" fill="#8884d8" />
+                            </BarChart>
+                          </ResponsiveContainer>
                     </div>
                   )}
                 </div>
