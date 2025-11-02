@@ -338,8 +338,9 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
                 mask = df[binned_col] == bin_label
                 if mask.any():
                     values = df.loc[mask, var]
-                    min_val = int(np.floor(values.min())) if not values.empty else None
-                    max_val = int(np.ceil(values.max())) if not values.empty else None
+                    # Preserve precise numeric min/max (do not round to integers)
+                    min_val = float(values.min()) if not values.empty else None
+                    max_val = float(values.max()) if not values.empty else None
                     bin_ranges[bin_label] = (min_val, max_val)
             return None, df[fine_binned_col], {}, bin_ranges
         
@@ -357,8 +358,9 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
                 mask = df[binned_col].isin(g)
                 if mask.any():
                     values = df.loc[mask, var]
-                    min_val = int(np.floor(values.min())) if not values.empty else None
-                    max_val = int(np.ceil(values.max())) if not values.empty else None
+                    # Preserve precise numeric min/max for merged bins
+                    min_val = float(values.min()) if not values.empty else None
+                    max_val = float(values.max()) if not values.empty else None
                     bin_ranges[merged_name] = (min_val, max_val)
         
         # Apply new mapping
@@ -369,8 +371,9 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
             mask = df[binned_col] == bin_label
             if mask.any():
                 values = df.loc[mask, var]
-                min_val = int(np.floor(values.min())) if not values.empty else None
-                max_val = int(np.ceil(values.max())) if not values.empty else None
+                # Preserve precise numeric min/max for unmapped bins
+                min_val = float(values.min()) if not values.empty else None
+                max_val = float(values.max()) if not values.empty else None
                 bin_ranges[bin_label] = (min_val, max_val)
         
         # Ensure a deterministic ordering for continuous fine bins: sort by Min value
@@ -930,8 +933,9 @@ def calculate_woe_iv(df, variable, target, bin_merges=None):
             mask = df["final_bin"] == bin_label
             if mask.any():
                 values = df.loc[mask, variable]
-                min_val = int(np.floor(values.min())) if not values.empty else None
-                max_val = int(np.ceil(values.max())) if not values.empty else None
+                # Preserve precise numeric min/max (do not round)
+                min_val = float(values.min()) if not values.empty else None
+                max_val = float(values.max()) if not values.empty else None
                 bin_ranges[bin_label] = (min_val, max_val)
     else:
         for bin_label in df["final_bin"].unique():

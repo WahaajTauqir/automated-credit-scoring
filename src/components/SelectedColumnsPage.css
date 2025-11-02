@@ -389,10 +389,19 @@ h4 { font-size: 0.95rem; }
 /* Main Content Wrapper */
 .main-content-wrapper {
   display: grid;
-  grid-template-columns: minmax(250px, 28%) 1fr;
-  gap: calc(var(--spacing-sm));
-  /* remove larger horizontal gutters so the content section gains more width */
+  /* Reduce the left column (columns dashboard) width further so main content gains space */
+  grid-template-columns: minmax(100px, 14%) 1fr;
+  gap: var(--spacing-sm);
+  /* make horizontal padding consistent and smaller */
   padding: 0 var(--spacing-xs);
+}
+
+.main-content-wrapper.full-width {
+  grid-template-columns: 1fr;
+}
+
+.content-section {
+  transition: width 0.3s;
 }
 
 /* Column Selection Section (Sidebar) */
@@ -401,18 +410,22 @@ h4 { font-size: 0.95rem; }
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-large);
-  padding: var(--spacing-md);
+  /* give a little extra left inset so the dashboard doesn't feel squeezed
+    while keeping compact vertical padding. Use a slightly larger left
+    padding but keep right padding small to preserve horizontal space. */
+  padding: 0.35rem 0.45rem 0.35rem 0.7rem; /* top right bottom left */
   position: sticky;
   top: var(--spacing-sm);
- max-height: 80vh;
+  max-height: 80vh;
   overflow-y: auto;
   box-shadow: var(--shadow-modern);
-  min-width: 280px;
+  min-width: 100px; /* narrower minimum to compress left block further */
 }
 
 .column-selection-section h3 {
   font-size: 1rem;
-  margin: 0 0 var(--spacing-md) 0;
+  /* reduce bottom margin so "Columns Dashboard" header sits closer to controls */
+  margin: 0 0 var(--spacing-xs) 0;
 }
 
 .sidebar-controls {
@@ -481,12 +494,13 @@ h4 { font-size: 0.95rem; }
   flex-direction: column;
   gap: var(--spacing-sm);
   overflow-y: auto;
-  overflow-x: auto;
-  white-space: nowrap;
+  overflow-x: hidden;
+  white-space: normal; /* allow wrapping to reduce horizontal space */
+  align-items: stretch; /* make cards equal width */
 }
 
 .column-card {
-  padding: 0.6rem;
+  padding: 0.35rem 0.5rem; /* compact horizontal padding */
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-medium);
   background: var(--bg-tertiary);
@@ -494,8 +508,11 @@ h4 { font-size: 0.95rem; }
   transition: all var(--duration-normal) var(--transition-smooth);
   display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
-  min-width: 250px;
+  gap: 0.5rem;
+  width: 100%; /* fill the sidebar width so all cards match */
+  box-sizing: border-box;
+  font-size: 13px;
+  white-space: normal;
 }
 
 .column-card:hover {
@@ -518,26 +535,33 @@ h4 { font-size: 0.95rem; }
 
 .column-card-content {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto;
+  /* two columns: checkbox, text - simplifies layout and avoids reserved empty column */
+  grid-template-columns: auto 1fr;
   align-items: center;
-  gap: var(--spacing-sm);
+  gap: 0.35rem;
   width: 100%;
   position: relative;
-  min-height: 40px;
+  min-height: 44px;
 }
 
 .column-info {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  flex: 1;
-  min-width: 0; /* Allow text to truncate */
+  gap: 0.15rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 2px; /* reduce right empty gutter */
 }
 
 .column-name {
+  white-space: normal; /* allow wrapping */
+  overflow-wrap: anywhere; /* break long names to next line */
+  line-height: 1.1;
+  display: -webkit-box; /* clamp to two lines for better layout */
+  line-clamp: 2;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .column-checkbox {
@@ -551,9 +575,8 @@ h4 { font-size: 0.95rem; }
   margin: 0;
   font-size: 13px;
   font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal; /* allow title to wrap and increase block height */
+  overflow-wrap: anywhere;
 }
 
 .column-card label {
@@ -713,7 +736,31 @@ h4 { font-size: 0.95rem; }
 
 .cross-tab-table tr:hover,
 .scorecard-table tr:hover {
-  background: rgba(46, 160, 67, 0.05);
+  /* stronger hover: darker green overlay and subtle left accent for emphasis */
+  background: rgba(46, 160, 67, 0.12);
+  color: var(--fg-primary);
+  box-shadow: inset 6px 0 0 rgba(46, 160, 67, 0.12);
+  transition: background 160ms var(--transition-smooth), box-shadow 160ms var(--transition-smooth);
+}
+
+/* Make table rows feel like clickable buttons in the binning workspace */
+.cross-tab-table tbody tr {
+  cursor: pointer;
+}
+.cross-tab-table tbody tr td {
+  user-select: none; /* avoid accidental text selection when clicking rows */
+}
+
+/* Visual highlight for selected rows in binning table */
+.cross-tab-table tbody tr.selected {
+  background: rgba(46, 160, 67, 0.18) !important;
+  color: var(--fg-primary) !important;
+  box-shadow: inset 6px 0 0 rgba(46, 160, 67, 0.18) !important;
+  transition: background 160ms var(--transition-smooth), box-shadow 160ms var(--transition-smooth);
+}
+
+.cross-tab-table tbody tr.selected td {
+  color: var(--fg-primary) !important;
 }
 
 .cross-tab-table input[type="checkbox"] {
@@ -727,6 +774,31 @@ h4 { font-size: 0.95rem; }
 tr[style*="21262d"] {
   background: var(--merged-bin-bg) !important;
   font-weight: 500;
+}
+
+/* Make merged bin rows respond to hover like other table rows.
+   The base merged-row uses !important for its background, so add
+   a :hover selector with !important to override it and provide
+   a visible, subtle highlight and ensure text remains readable. */
+tr[style*="21262d"]:hover {
+  background: rgba(46, 160, 67, 0.12) !important; /* stronger green hover */
+  color: var(--fg-primary) !important;
+  box-shadow: inset 6px 0 0 rgba(46, 160, 67, 0.12) !important;
+  cursor: default;
+}
+
+/* More general rule: if any table row has an inline style (for example server-rendered
+   merged/annotated rows), make sure :hover still applies. This targets rows inside the
+   tables used by this page and uses !important to override inline backgrounds. */
+.cross-tab-table tr[style]:hover,
+.scorecard-table tr[style]:hover,
+.cross-tab-table tr[style] td:hover,
+.scorecard-table tr[style] td:hover {
+  /* Ensure inline-styled rows also show the stronger hover and accent */
+  background: rgba(46, 160, 67, 0.12) !important;
+  color: var(--fg-primary) !important;
+  box-shadow: inset 6px 0 0 rgba(46, 160, 67, 0.12) !important;
+  cursor: default;
 }
 
 /* Variable Separator */
@@ -799,6 +871,86 @@ tr[style*="21262d"] {
   border: none;
   box-shadow: none;
   cursor: pointer;
+}
+
+/* IV summary shown under the fine-binning table */
+/* Modern IV summary card */
+.iv-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.28rem 0.4rem; /* reduced padding for compactness */
+  margin: 0.32rem 0 0.4rem 0; /* smaller vertical margin */
+  background: linear-gradient(180deg, rgba(255,255,255,0.015), rgba(255,255,255,0.008));
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.02);
+  backdrop-filter: blur(4px) saturate(110%);
+  box-shadow: 0 4px 12px rgba(2,6,9,0.5);
+}
+.iv-summary-accent {
+  width: 4px;
+  height: 28px; /* shorter accent bar */
+  border-radius: 4px;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.01);
+}
+.iv-summary-main {
+  display: flex;
+  flex-direction: row; /* keep title and values on one line */
+  align-items: center;
+  gap: 0.6rem;
+  white-space: nowrap; /* prevent wrapping to the next line */
+}
+.iv-summary-title {
+  font-size: 15px; /* match numeric IV size */
+  color: var(--fg-secondary);
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  margin-right: 0.35rem;
+}
+.iv-summary-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.iv-summary-value {
+  padding: 0.14rem 0.45rem; /* slightly reduce padding to keep container size */
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 15px; /* increased font size for better readability */
+  color: var(--fg-primary);
+  background: linear-gradient(90deg, rgba(255,255,255,0.015), rgba(255,255,255,0.008));
+  border: 1px solid rgba(255,255,255,0.02);
+  min-width: 44px; /* keep compact width while allowing larger font */
+  text-align: center;
+}
+.iv-summary-category {
+  padding: 0.1rem 0.35rem; /* compact padding */
+  border-radius: 999px;
+  font-size: 12px; /* slightly larger category text */
+  font-weight: 700;
+  color: var(--fg-primary);
+  background: rgba(255,255,255,0.01);
+  border: 1px solid rgba(255,255,255,0.02);
+}
+
+/* Per-level visual accents (left bar color + subtle glow) */
+.iv-summary.weak .iv-summary-accent { background: linear-gradient(180deg, var(--iv-badge-weak), rgba(218,54,51,0.9)); }
+.iv-summary.medium .iv-summary-accent { background: linear-gradient(180deg, var(--iv-badge-medium), rgba(237,137,54,0.95)); }
+.iv-summary.strong .iv-summary-accent { background: linear-gradient(180deg, var(--iv-badge-strong), rgba(72,187,120,0.95)); }
+.iv-summary.weak { box-shadow: 0 8px 28px rgba(218,54,51,0.06); border-left: 4px solid rgba(218,54,51,0.12); }
+.iv-summary.medium { box-shadow: 0 8px 28px rgba(237,137,54,0.06); border-left: 4px solid rgba(237,137,54,0.12); }
+.iv-summary.strong { box-shadow: 0 8px 28px rgba(72,187,120,0.06); border-left: 4px solid rgba(72,187,120,0.12); }
+
+/* Slightly emphasize the Reset Binning button */
+.reset-bin-btn {
+  box-shadow: 0 4px 12px rgba(218, 54, 51, 0.12);
+  border: 1px solid rgba(218, 54, 51, 0.12);
+}
+.reset-bin-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(218, 54, 51, 0.18);
 }
 .unmerge-btn.compact span {
   padding: 2px 8px;

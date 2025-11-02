@@ -49,8 +49,7 @@ const SelectedColumnsPage = () => {
   const [testScoreKS, setTestScoreKS] = useState<number | null>(null);
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortBy, setSortBy] = useState<'name' | 'iv' | 'type'>('name');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  // Removed UI sorting controls per request; keep search only
 
   // Get IV badge class based on IV value
   const getIVBadgeClass = (iv: number) => {
@@ -60,40 +59,12 @@ const SelectedColumnsPage = () => {
   };
 
   // Filtered and sorted columns
+  // Filter columns by search term and sort alphabetically by name
   const filteredColumns = selectedColumns
     .filter(col => col.toLowerCase().includes(searchTerm.toLowerCase()))
-    .sort((a, b) => {
-      let valA: any, valB: any;
-      if (sortBy === 'iv') {
-        valA = woeIvResults[a]?.iv || 0;
-        valB = woeIvResults[b]?.iv || 0;
-      } else if (sortBy === 'type') {
-        valA = (discreteColumns || []).includes(a) ? 'Discrete' : 'Continuous';
-        valB = (discreteColumns || []).includes(b) ? 'Discrete' : 'Continuous';
-      } else {
-        valA = a;
-        valB = b;
-      }
-      if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
-      if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
-      return 0;
-    });
+    .sort((a, b) => a.localeCompare(b));
 
-  // Recommend top columns
-  const recommendTopColumns = async (topN: number = 5) => {
-    try {
-      const missing = selectedColumns.filter(col => !woeIvResults[col]);
-      for (const col of missing) {
-        await fetchWoeIv(col, undefined, false);
-      }
-      const sortedByIV = [...selectedColumns].sort((a, b) => (woeIvResults[b]?.iv || 0) - (woeIvResults[a]?.iv || 0));
-      const top = sortedByIV.slice(0, topN);
-      // Recommend top columns but do not auto-select them; let user confirm
-      showNotification(`Recommended top ${topN} columns by IV: ${top.join(', ')}`);
-    } catch (e) {
-      console.error('Recommendation failed', e);
-    }
-  };
+  // Recommend functionality removed (UI buttons removed per request)
 
 
   // Initialize component state from navigation state
@@ -850,9 +821,9 @@ const SelectedColumnsPage = () => {
 
         {notification && <div className="notification" role="alert">{notification}</div>}
 
-        <div className="main-content-wrapper" style={{ display: 'flex', gap: '20px' }}>
+        <div className={`main-content-wrapper ${currentStep === 2 || currentStep === 3 ? 'full-width' : ''}`}>
           {(currentStep !== 2 && currentStep !== 3) && (
-            <aside className="column-selection-section" aria-label="Scrollable column selection panel" style={{ width: '30%', minWidth: '250px' }}>
+            <aside className="column-selection-section" aria-label="Scrollable column selection panel">
               <h3>Columns Dashboard</h3>
               <div className="sidebar-controls">
                 <input
@@ -862,19 +833,7 @@ const SelectedColumnsPage = () => {
                   onChange={(e) => setSearchTerm(e.target.value)}
                   className="search-input"
                 />
-                <select
-                  value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value as 'name' | 'iv' | 'type')}
-                  className="sort-select"
-                >
-                  <option value="name">Sort by Name</option>
-                  <option value="iv">Sort by IV</option>
-                  <option value="type">Sort by Type</option>
-                </select>
-                <button onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')} className="sort-order-btn">
-                  {sortOrder === 'asc' ? '↑' : '↓'}
-                </button>
-                <button onClick={() => recommendTopColumns(5)} className="recommend-btn">Recommend Top 5</button>
+                {/* Sorting controls and recommendation button removed */}
               </div>
               <div className="columns-grid" aria-label="List of selectable columns">
                 {(() => {
@@ -915,11 +874,7 @@ const SelectedColumnsPage = () => {
                         <h4 className="column-name">{col}</h4>
                         <small>{(discreteColumns || []).includes(col) ? 'Discrete' : 'Continuous'}</small>
                       </div>
-                      {woeIvResults[col] && (
-                        <span className={`iv-badge ${getIVBadgeClass(woeIvResults[col].iv)}`}>
-                          IV: {formatToFourDecimals(woeIvResults[col].iv)}
-                        </span>
-                      )}
+                      {/* IV badge removed from column cards; moved into binning area */}
                       {/* Drop button removed as requested */}
                       {/* Compare button removed with WOE/IV section */}
                     </div>
@@ -930,13 +885,7 @@ const SelectedColumnsPage = () => {
             </aside>
           )}
 
-          <section
-            className="content-section"
-            style={{
-              width: (currentStep === 2 || currentStep === 3) ? '100%' : '70%',
-              transition: 'width 0.3s'
-            }}
-          >
+          <section className="content-section">
             {currentStep === 1 && activeColumn && (() => {
               const isContinuousColumn = (continuousColumns || []).includes(activeColumn);
               const coarseRows = coarseBinResults[activeColumn] || [];
@@ -980,7 +929,7 @@ const SelectedColumnsPage = () => {
                 <div className="binning-section" aria-label="Binning controls and results">
                   <div className="results-container">
                     <h3>Binning - {activeColumn}</h3>
-                    <p className="binning-helper-text">Select adjacent bins below and click Fine Binning on Selected to merge them.</p>
+                    {/* <p className="binning-helper-text">Select adjacent bins below and click Fine Binning on Selected to merge them.</p> */}
                     <div className="table-container">
                       <table className="cross-tab-table" aria-label={`Fine binning workspace for ${activeColumn}`}>
                         <thead>
@@ -1025,15 +974,35 @@ const SelectedColumnsPage = () => {
                               return (
                                 <tr
                                   key={`${labelVal}-${idx}`}
+                                  className={`bin-row ${isSelected ? 'selected' : ''}`}
                                   style={{
                                     backgroundColor: isMergedLabel ? 'var(--merged-bin-bg, #21262d)' : 'transparent',
+                                  }}
+                                  role="button"
+                                  tabIndex={0}
+                                  onClick={(e) => {
+                                    // If the user clicked the checkbox or a button inside the row, don't double-handle
+                                    const target = e.target as HTMLElement;
+                                    if (target.closest('button') || target.closest('input') || target.closest('a')) return;
+                                    toggleFineBinSelection(activeColumn, labelVal);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                      const target = e.target as HTMLElement;
+                                      if (target.closest('button') || target.closest('input') || target.closest('a')) return;
+                                      e.preventDefault();
+                                      toggleFineBinSelection(activeColumn, labelVal);
+                                    }
                                   }}
                                 >
                                   <td>
                                     <input
                                       type="checkbox"
                                       checked={isSelected}
-                                      onChange={() => toggleFineBinSelection(activeColumn, labelVal)}
+                                      onChange={(ev) => {
+                                        ev.stopPropagation();
+                                        toggleFineBinSelection(activeColumn, labelVal);
+                                      }}
                                       aria-label={`Select bin ${labelVal} for ${activeColumn}`}
                                     />
                                   </td>
@@ -1068,6 +1037,25 @@ const SelectedColumnsPage = () => {
                         </tbody>
                       </table>
                     </div>
+
+                    {/* IV summary moved here (under the table, above the binning controls) */}
+                    {woeIvResults[activeColumn] && (() => {
+                      const ivVal = Number(woeIvResults[activeColumn].iv || 0);
+                      const ivClass = getIVBadgeClass(ivVal); // 'weak' | 'medium' | 'strong'
+                      const ivLabel = ivVal < 0.1 ? 'Weak' : ivVal < 0.3 ? 'Medium' : 'Strong';
+                      return (
+                        <div className={`iv-summary ${ivClass}`} aria-live="polite" aria-label={`Information Value ${ivVal}, ${ivLabel}`}>
+                          <div className="iv-summary-accent" aria-hidden="true" />
+                          <div className="iv-summary-main">
+                            <div className="iv-summary-title">Information Value</div>
+                            <div className="iv-summary-row">
+                              <span className="iv-summary-value">{formatToFourDecimals(ivVal)}</span>
+                              <span className="iv-summary-category">{ivLabel}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     <div className="binning-controls">
                       <button
