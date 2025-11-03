@@ -1119,7 +1119,7 @@ const SelectedColumnsPage = () => {
                               totalTotal: number;
                               badRatePercent: number;
                               freqPercent: number;
-                              weightedWoe: number;
+                              weightedWoe: number | null;
                               totalIv: number;
                             } => {
                               let totalBad = 0;
@@ -1127,7 +1127,6 @@ const SelectedColumnsPage = () => {
                               let totalTotal = 0;
                               let sumFreq = 0;
                               let freqProvided = false;
-                              let sumWoeWeighted = 0;
                               let sumIv = 0;
                               sortedRows.forEach((bin: any, idx: number) => {
                                 const bad = Number(bin.Bad ?? bin['Bad'] ?? 0) || 0;
@@ -1144,15 +1143,14 @@ const SelectedColumnsPage = () => {
                                 const labelRaw = bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? `Bin_${idx + 1}`;
                                 const label = String(labelRaw);
                                 const entry = chartValueMap.get(label) || chartValueMap.get(label.replace(/\s+/g, ' ')) || { woe: 0, iv: 0 };
-                                const woeNum = Number(entry.woe) || 0;
                                 const ivNum = Number(entry.iv) || 0;
-                                sumWoeWeighted += woeNum * total; // weight by count
                                 sumIv += ivNum;
                               });
 
                               const badRatePercent = totalTotal > 0 ? (totalBad / totalTotal) * 100 : 0;
                               const freqPercent = freqProvided ? sumFreq : (totalTotal > 0 ? 100 : 0);
-                              const weightedWoe = totalTotal > 0 ? (sumWoeWeighted / totalTotal) : 0;
+                              // Do NOT calculate WOE total per request; leave as null
+                              const weightedWoe = null;
                               // prefer authoritative IV if available from woeIvResults
                               const totalIv = Number(woeIvResults[activeColumn]?.iv ?? sumIv) || 0;
 
@@ -1170,7 +1168,7 @@ const SelectedColumnsPage = () => {
                                 <td>{totals.totalTotal}</td>
                                 <td>{totals.badRatePercent.toFixed(2)}</td>
                                 <td>{totals.freqPercent.toFixed(2)}</td>
-                                <td>{formatToFourDecimals(totals.weightedWoe)}</td>
+                                <td>{totals.weightedWoe !== null ? formatToFourDecimals(totals.weightedWoe) : ' '}</td>
                                 <td className="iv-total">{formatToFourDecimals(totals.totalIv)}</td>
                                 <td />
                               </tr>
