@@ -16,7 +16,6 @@ import {
   Line,
   Legend,
 } from 'recharts';
-
 const SelectedColumnsPage = () => {
   const { state } = useLocation();
   const {
@@ -27,7 +26,6 @@ const SelectedColumnsPage = () => {
     recordId: initialRecordId,
   } = state || {};
   console.log('Page state:', state);
-
   // State declarations
   const [selectedColumns, setSelectedColumns] = useState<string[]>(navSelectedColumns || []);
   const [activeColumn, setActiveColumn] = useState<string>('');
@@ -50,19 +48,14 @@ const SelectedColumnsPage = () => {
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   // Removed UI sorting controls per request; keep search only
-
   // Helper to format IV class if needed later
   // (kept here for possible future IV badge usage)
-
   // Filtered and sorted columns
   // Filter columns by search term and sort alphabetically by name
   const filteredColumns = selectedColumns
     .filter(col => col.toLowerCase().includes(searchTerm.toLowerCase()))
     .sort((a, b) => a.localeCompare(b));
-
   // Recommend functionality removed (UI buttons removed per request)
-
-
   // Initialize component state from navigation state
   useEffect(() => {
     if (!state) return;
@@ -73,14 +66,13 @@ const SelectedColumnsPage = () => {
     if (anyUnivariate) setUnivariateResults(anyUnivariate);
     if (anyFine) setFineBinResults(anyFine);
     if (anyCross) setCoarseBinResults(anyCross);
-    if (anyWoe) { 
+    if (anyWoe) {
       setWoeIvResults(anyWoe);
       setWoeReadyColumns(new Set(Object.keys(anyWoe)));
     }
     if (navSelectedColumns) setSelectedColumns(navSelectedColumns);
     if ((state as any).recordId) setRecordId((state as any).recordId);
   }, [state]);
-
   // Sync WOE/IV states and selectedForModeling when selectedColumns changes
   useEffect(() => {
     const currentWoeKeys = Object.keys(woeIvResults);
@@ -100,15 +92,12 @@ const SelectedColumnsPage = () => {
       showNotification(`WOE/IV data cleaned for dropped columns: ${columnsToRemove.join(', ')}`);
     }
   }, [selectedColumns, woeIvResults, woeReadyColumns]);
-
   // Utility functions
   const formatToFourDecimals = (value: any) => (typeof value === 'number' ? value.toFixed(4) : String(value));
-
   const showNotification = (message: string) => {
     setNotification(message);
     setTimeout(() => setNotification(null), 3000);
   };
-
   const generateScoreCard = async () => {
     setGeneratingScoreCard(true);
     try {
@@ -121,23 +110,19 @@ const SelectedColumnsPage = () => {
           woe_transformed_data: woeIvResults
         })
       });
-      
       const data = await response.json();
       if (data.success) {
         setScoreCardData(data);
-        
         if (data.scorecard_bins) {
           const totalBins = data.scorecard_bins.length;
           const variableCounts = selectedForModeling.map(variable => {
             const variableBins = data.scorecard_bins.filter((bin: any) => bin.variable === variable);
             return { variable, count: variableBins.length };
           });
-          
           console.log(`Scorecard generated with ${totalBins} total bins:`);
           variableCounts.forEach(({ variable, count }) => {
-            console.log(`  ${variable}: ${count} bins`);
+            console.log(` ${variable}: ${count} bins`);
           });
-          
           showNotification(`Score card generated with ${totalBins} bins across ${selectedForModeling.length} variables`);
         } else {
           showNotification('Score card generated successfully!');
@@ -151,14 +136,12 @@ const SelectedColumnsPage = () => {
       setGeneratingScoreCard(false);
     }
   };
-
   const gotoScoreCardAndGenerate = () => {
     setCurrentStep(3);
     setTimeout(() => {
       generateScoreCard();
     }, 50);
   };
-
   // API calls
   const loadSavedFineBins = async (col: string, varType: string): Promise<{ merges: Record<string, any[]> | undefined }> => {
     if (!recordId) return { merges: undefined };
@@ -168,7 +151,6 @@ const SelectedColumnsPage = () => {
       if (!Array.isArray(details) || details.length === 0) {
         return { merges: undefined };
       }
-
       const savedMerges: Record<string, any[]> = {};
       details.forEach((row: any) => {
         let bins: any[];
@@ -184,7 +166,6 @@ const SelectedColumnsPage = () => {
       if (Object.keys(savedMerges).length === 0) {
         return { merges: undefined };
       }
-
       const res = await fetch('http://localhost:5000/api/fine-bin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -212,7 +193,6 @@ const SelectedColumnsPage = () => {
     }
     return { merges: undefined };
   };
-
   const loadSavedData = async () => {
     if (!recordId) return;
     try {
@@ -253,7 +233,6 @@ const SelectedColumnsPage = () => {
       console.error('Failed to load saved record data', e);
     }
   };
-
   const handleColumnClick = async (col: string) => {
     if (col === activeColumn) return; // Prevent re-fetching if already active
     setActiveColumn(col);
@@ -286,7 +265,6 @@ const SelectedColumnsPage = () => {
       alert('Error fetching coarse bin results');
     }
   };
-
   const toggleFineBinSelection = (col: string, binLabel: string) => {
     const normalized = String(binLabel);
     setSelectedFineBins((prev) => {
@@ -296,7 +274,6 @@ const SelectedColumnsPage = () => {
       return { ...prev, [col]: updated };
     });
   };
-
   const runBinning = async (col: string) => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
     const selectedLabels = Array.from(new Set((selectedFineBins[col] || []).map((label) => String(label))));
@@ -308,19 +285,16 @@ const SelectedColumnsPage = () => {
       }
       return [label];
     })));
-
     if (expandedSelection.length < 2) {
       showNotification('Select at least two bins to merge.');
       return;
     }
-
     try {
       const previousHistory = history ? JSON.parse(JSON.stringify(history)) : {};
       setBinMergeStack((prev) => ({
         ...prev,
         [col]: previousHistory as any,
       }));
-
       // Step 1: Run coarse binning to refresh stats
       const coarseRes = await fetch('http://localhost:5000/api/univariate-analysis', {
         method: 'POST',
@@ -335,7 +309,6 @@ const SelectedColumnsPage = () => {
       const coarseStats = coarseData[col]?.stats || [];
       setUnivariateResults((prev) => ({ ...prev, [col]: coarseData[col] || coarseData }));
       setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
-
       const currentRows = (fineBinResults[col] && fineBinResults[col].length > 0)
         ? fineBinResults[col]
         : coarseStats;
@@ -346,13 +319,11 @@ const SelectedColumnsPage = () => {
           orderMap.set(label, index);
         }
       });
-
       const filteredHistoryEntries = Object.entries(history).filter(([, bins]) => {
         const normalizedBins = Array.isArray(bins) ? bins.map((b) => String(b)) : [];
         return normalizedBins.every((b) => !expandedSelection.includes(b));
       });
       const filteredHistory = Object.fromEntries(filteredHistoryEntries);
-
       const sortedExpanded = [...expandedSelection].sort((a, b) => {
         const orderA = orderMap.has(a) ? orderMap.get(a)! : Number.MAX_SAFE_INTEGER;
         const orderB = orderMap.has(b) ? orderMap.get(b)! : Number.MAX_SAFE_INTEGER;
@@ -361,14 +332,11 @@ const SelectedColumnsPage = () => {
         }
         return orderA - orderB;
       });
-
       const nextMergeIndex = Object.keys(filteredHistory).length + 1;
       const mergeKey = varType === 'continuous'
         ? `Merged_${nextMergeIndex}`
         : sortedExpanded.join(', ');
-
       const payloadMerges = { ...filteredHistory, [mergeKey]: sortedExpanded };
-
       const fineRes = await fetch('http://localhost:5000/api/fine-bin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -385,7 +353,6 @@ const SelectedColumnsPage = () => {
       if (!fineData.success) {
         throw new Error(fineData.error || 'Fine binning failed');
       }
-
       const mergesReturned = fineData.bin_merges || payloadMerges;
       setFineBinResults((prev) => ({ ...prev, [col]: fineData.stats || [] }));
       setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
@@ -399,41 +366,36 @@ const SelectedColumnsPage = () => {
       alert('Error running binning');
     }
   };
-
   // const undoBinMerge = (col: string) => {
-  //   if (binMergeStack[col]) {
-  //     setBinMergeHistory((prev) => ({
-  //       ...prev,
-  //       [col]: typeof binMergeStack[col] === 'object' && !Array.isArray(binMergeStack[col]) ? binMergeStack[col] : {},
-  //     }));
-  //     setBinMergeStack((prev) => {
-  //       const newStack = { ...prev };
-  //       delete newStack[col];
-  //       return newStack;
-  //     });
-  //     showNotification(`Undo last merge for ${col}`);
-  //     // Re-run fine binning with previous history
-  //     runBinning(col);
-  //   } else {
-  //     showNotification(`No undo available for ${col}`);
-  //   }
+  // if (binMergeStack[col]) {
+  // setBinMergeHistory((prev) => ({
+  // ...prev,
+  // [col]: typeof binMergeStack[col] === 'object' && !Array.isArray(binMergeStack[col]) ? binMergeStack[col] : {},
+  // }));
+  // setBinMergeStack((prev) => {
+  // const newStack = { ...prev };
+  // delete newStack[col];
+  // return newStack;
+  // });
+  // showNotification(`Undo last merge for ${col}`);
+  // // Re-run fine binning with previous history
+  // runBinning(col);
+  // } else {
+  // showNotification(`No undo available for ${col}`);
+  // }
   // };
-
   // Unmerge a specific merged fine bin for a column and refresh results
   const unmergeFineBin = async (col: string, mergedLabelRaw: any) => {
     try {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
       const history = binMergeHistory[col] || {};
       const mergedLabel = String(mergedLabelRaw || '');
-
       if (!history || Object.keys(history).length === 0) {
         showNotification(`No merges to unmerge for ${col}.`);
         return;
       }
-
       // Helper to compare label against history keys regardless of spacing
       const normalizeParts = (s: string) => s.split(',').map(p => p.trim()).filter(Boolean).sort();
-
       let keyToRemove: string | null = null;
       if (varType === 'continuous') {
         // For continuous merges we used keys like 'Merged_1', 'Merged_2', ...
@@ -457,15 +419,12 @@ const SelectedColumnsPage = () => {
         // Also try direct match when label matches key exactly
         if (!keyToRemove && history[mergedLabel]) keyToRemove = mergedLabel;
       }
-
       if (!keyToRemove) {
         showNotification(`Could not find a matching merge for '${mergedLabel}'.`);
         return;
       }
-
       const newHistory = { ...history } as Record<string, any[]>;
       delete newHistory[keyToRemove];
-
       // For continuous: ensure merges reference existing coarse bins only
       if (varType === 'continuous') {
         const coarseRows = (coarseBinResults[col] || []) as any[];
@@ -481,7 +440,6 @@ const SelectedColumnsPage = () => {
           }
         });
       }
-
       // Always re-run fine binning and WOE/IV after unmerge
       let fineBinStats = [];
       let mergesReturned = {};
@@ -534,14 +492,12 @@ const SelectedColumnsPage = () => {
       // Always trigger fresh WOE/IV calculation with latest merges (do not auto-select)
       await fetchWoeIv(col, mergesReturned, false);
       setWoeReadyColumns((prev) => new Set(prev).add(col));
-
       showNotification(`Unmerged '${mergedLabel}' for ${col}.`);
     } catch (err) {
       console.error('Error unmerging fine bin:', err);
       alert('Error unmerging fine bin');
     }
   };
-
   const resetFineBinning = async (col: string) => {
     try {
       // Reset fine binning results and history
@@ -551,7 +507,6 @@ const SelectedColumnsPage = () => {
       // Keep existing WOE/IV graphs intact when resetting bins so users
       // can still view WOE by Bin and IV Contribution even after a reset.
       // (Do not delete woeIvResults[col] or remove from woeReadyColumns.)
-
       // Re-run coarse binning to restore original bins
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
       const res = await fetch('http://localhost:5000/api/univariate-analysis', {
@@ -568,24 +523,20 @@ const SelectedColumnsPage = () => {
       setUnivariateResults((prev) => ({ ...prev, [col]: data[col] || data }));
       setFineBinResults((prev) => ({ ...prev, [col]: data[col]?.stats || [] }));
       setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
-
-        // Persist the reset state (save empty merges) before requesting WOE
-        // so the backend has the authoritative merge state if it looks up by record.
-        await persistFineBinColumn(col, {});
-
-        // Recompute WOE/IV based on the restored coarse bins so graphs reflect the reset.
-        // Pass an explicit empty merges object to ensure the backend computes
-        // WOE using no merges rather than relying on persisted state timing.
-        await fetchWoeIv(col, {}, false);
-        setWoeReadyColumns((prev) => new Set(prev).add(col));
-
-        showNotification(`Binning for ${col} reset to original coarse bins.`);
+      // Persist the reset state (save empty merges) before requesting WOE
+      // so the backend has the authoritative merge state if it looks up by record.
+      await persistFineBinColumn(col, {});
+      // Recompute WOE/IV based on the restored coarse bins so graphs reflect the reset.
+      // Pass an explicit empty merges object to ensure the backend computes
+      // WOE using no merges rather than relying on persisted state timing.
+      await fetchWoeIv(col, {}, false);
+      setWoeReadyColumns((prev) => new Set(prev).add(col));
+      showNotification(`Binning for ${col} reset to original coarse bins.`);
     } catch (err) {
       console.error('Error resetting binning:', err);
       alert('Error resetting binning');
     }
   };
-
   const persistFineBinColumn = async (col: string, merges: Record<string, any[]>) => {
     try {
       let current = recordId;
@@ -621,7 +572,6 @@ const SelectedColumnsPage = () => {
       console.error('Persist column failed', e);
     }
   };
-
   const persistDashboardSelectedColumns = async (newSelection: string[]) => {
     try {
       console.debug('[SelectedColumnsPage] persistDashboardSelectedColumns ->', newSelection);
@@ -651,7 +601,6 @@ const SelectedColumnsPage = () => {
       console.error('Persist dashboard selections failed', e);
     }
   };
-
   const toggleSelectedForModeling = (col: string) => {
     setSelectedForModeling((prev) => {
       console.debug('[SelectedColumnsPage] toggleSelectedForModeling before:', prev);
@@ -665,12 +614,10 @@ const SelectedColumnsPage = () => {
       return newSelection;
     });
   };
-
   // Debug render mapping of checkbox state to columns
   useEffect(() => {
     console.debug('[SelectedColumnsPage] render: selectedForModeling ->', selectedForModeling);
   }, [selectedForModeling]);
-
   const fetchWoeIv = async (
     col: string,
     merges?: Record<string, any[]>,
@@ -680,7 +627,6 @@ const SelectedColumnsPage = () => {
       const body: any = { variables: [col], target: targetVariable };
       if (recordId) body.record_id = recordId;
       if (merges) body.bin_merges = merges;
-
       const res = await fetch('http://localhost:5000/api/woe-iv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -708,7 +654,6 @@ const SelectedColumnsPage = () => {
     }
     return false;
   };
-
   const canGoToStep = (step: number) => {
     switch (step) {
       case 1:
@@ -721,7 +666,6 @@ const SelectedColumnsPage = () => {
         return false;
     }
   };
-
   const canGoNext = () => {
     switch (currentStep) {
       case 1:
@@ -732,7 +676,6 @@ const SelectedColumnsPage = () => {
         return false;
     }
   };
-
   const handleSave = async () => {
     if (!window.confirm('Are you sure you want to save the current analysis?')) return;
     try {
@@ -766,13 +709,11 @@ const SelectedColumnsPage = () => {
       alert(`Error saving analysis: ${error}`);
     }
   };
-
   useEffect(() => {
     // Only fetch record when recordId changes, not in every render or loop
     loadSavedData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordId]);
-
   useEffect(() => {
     // Only trigger WOE/IV fetch when entering step 2 or 3, not in a loop
     if (currentStep === 2 || currentStep === 3) {
@@ -783,7 +724,6 @@ const SelectedColumnsPage = () => {
       }
     }
   }, [currentStep]);
-
   return (
     <div>
       <Navbar />
@@ -793,9 +733,8 @@ const SelectedColumnsPage = () => {
             {['Column Selection & Binning', 'Logistic Regression', 'Score Card'].map((step, index) => (
               <button
                 key={step}
-                className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${
-                  currentStep > index + 1 ? 'completed' : ''
-                }`}
+                className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${currentStep > index + 1 ? 'completed' : ''
+                  }`}
                 disabled={!canGoToStep(index + 1)}
                 onClick={() => canGoToStep(index + 1) && setCurrentStep(index + 1)}
                 aria-current={currentStep === index + 1 ? 'step' : undefined}
@@ -826,9 +765,7 @@ const SelectedColumnsPage = () => {
             </button>
           </div>
         </div>
-
         {notification && <div className="notification" role="alert">{notification}</div>}
-
         <div className={`main-content-wrapper ${currentStep === 2 || currentStep === 3 ? 'full-width' : ''}`}>
           {(currentStep !== 2 && currentStep !== 3) && (
             <aside className="column-selection-section" aria-label="Scrollable column selection panel">
@@ -848,51 +785,50 @@ const SelectedColumnsPage = () => {
                   try {
                     console.debug('[SelectedColumnsPage] render: filteredColumns ->', filteredColumns);
                     console.debug('[SelectedColumnsPage] render: selectedColumns ->', selectedColumns);
-                  } catch {}
+                  } catch { }
                   return null;
                 })()}
                 {filteredColumns.map((col: string) => {
                   const isChecked = selectedForModeling.includes(col);
                   try {
                     console.debug('[SelectedColumnsPage] render checkbox', { col, isChecked });
-                  } catch {}
+                  } catch { }
                   return (
-                  <div
-                    key={col}
-                    className={`column-card ${col === activeColumn ? 'active' : ''}`}
-                    onClick={() => handleColumnClick(col)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => e.key === 'Enter' && handleColumnClick(col)}
-                    aria-label={`Select column ${col}`}
-                  >
-                    <div className="column-card-content">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={(e) => {
-                          e.stopPropagation();
-                          toggleSelectedForModeling(col);
-                        }}
-                        className="column-checkbox"
-                        id={`checkbox-${col}`}
-                        aria-label={`Include ${col} in modeling`}
-                      />
-                      <div className="column-info">
-                        <h4 className="column-name">{col}</h4>
-                        <small>{(discreteColumns || []).includes(col) ? 'Discrete' : 'Continuous'}</small>
+                    <div
+                      key={col}
+                      className={`column-card ${col === activeColumn ? 'active' : ''}`}
+                      onClick={() => handleColumnClick(col)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => e.key === 'Enter' && handleColumnClick(col)}
+                      aria-label={`Select column ${col}`}
+                    >
+                      <div className="column-card-content">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            toggleSelectedForModeling(col);
+                          }}
+                          className="column-checkbox"
+                          id={`checkbox-${col}`}
+                          aria-label={`Include ${col} in modeling`}
+                        />
+                        <div className="column-info">
+                          <h4 className="column-name">{col}</h4>
+                          <small>{(discreteColumns || []).includes(col) ? 'Discrete' : 'Continuous'}</small>
+                        </div>
+                        {/* IV badge removed from column cards; moved into binning area */}
+                        {/* Drop button removed as requested */}
+                        {/* Compare button removed with WOE/IV section */}
                       </div>
-                      {/* IV badge removed from column cards; moved into binning area */}
-                      {/* Drop button removed as requested */}
-                      {/* Compare button removed with WOE/IV section */}
                     </div>
-                  </div>
                   );
                 })}
               </div>
             </aside>
           )}
-
           <section className="content-section">
             {currentStep === 1 && activeColumn && (() => {
               const isContinuousColumn = (continuousColumns || []).includes(activeColumn);
@@ -913,15 +849,26 @@ const SelectedColumnsPage = () => {
                 }
                 return undefined;
               };
-              const woeMap = new Map<string, { woe: number; iv: number; index: number }>();
-              woeStats.forEach((row: any, index: number) => {
-                const label = String(row.Bin || row.temp_bin || row.Range || `Bin_${index + 1}`);
+
+              // === RECALCULATE TOTAL GOOD/BAD FROM CURRENT BINS (fineRows) ===
+              const eps = 0.5;
+              const totalGoodRaw = fineRows.reduce((sum: number, row: any) => sum + (getFirstNumeric(row.Good, row['Good'], 0) ?? 0), 0);
+              const totalBadRaw = fineRows.reduce((sum: number, row: any) => sum + (getFirstNumeric(row.Bad, row['Bad'], 0) ?? 0), 0);
+              const nBins = fineRows.length;
+              const adjTotalGood = totalGoodRaw + eps * nBins;
+              const adjTotalBad = totalBadRaw + eps * nBins;
+
+              // === MAP WOE/IV FROM woeIvResults (authoritative) ===
+              const woeMap = new Map<string, { woe: number; iv: number }>();
+              woeStats.forEach((row: any) => {
+                const label = String(row.Bin || row.temp_bin || row.Range || '');
                 const normalizedLabel = normalizeLabel(label);
                 const woeVal = getFirstNumeric(row.WOE, row.woe, row.WoE, row.Woe, row.woe_value, row.WOEValue) ?? 0;
                 const ivVal = getFirstNumeric(row.IV, row.iv, row.Iv, row.iv_contribution, row.IVContribution) ?? 0;
-                woeMap.set(normalizedLabel, { woe: woeVal, iv: ivVal, index });
+                woeMap.set(normalizedLabel, { woe: woeVal, iv: ivVal });
               });
 
+              // === SORT BINS (same as before) ===
               const sortedRows = [...fineRows].sort((a: any, b: any) => {
                 const getMin = (row: any) => {
                   const candidate = row.Min ?? row.min ?? row.MinValue ?? row.minValue ?? null;
@@ -943,78 +890,52 @@ const SelectedColumnsPage = () => {
                 return labelA.localeCompare(labelB);
               });
 
+              // === CHART DATA (WOE/IV from woeIvResults) ===
               const chartValueMap = new Map<string, { woe: number; iv: number }>();
               const chartRows = sortedRows.map((row: any, idx: number) => {
                 const labelRaw = row[`${activeColumn}_fine_binned`] ?? row[`${activeColumn}_binned`] ?? row.Bin ?? row.bin ?? `Bin_${idx + 1}`;
                 const label = String(labelRaw);
                 const normalizedLabel = normalizeLabel(label);
-                const mapped = woeMap.get(normalizedLabel);
-                const fallbackStat = woeStats[mapped?.index ?? idx];
-                const rowWoe = getFirstNumeric(
-                  row.WOE,
-                  row.woe,
-                  row.WoE,
-                  row.Woe,
-                  row.woe_value,
-                  row.WOEValue,
-                  row['WOE'],
-                  row['woe']
-                );
-                const rowIv = getFirstNumeric(
-                  row.IV,
-                  row.iv,
-                  row.Iv,
-                  row.iv_contribution,
-                  row.IVContribution,
-                  row['IV'],
-                  row['iv']
-                );
-                const fallbackWoe = getFirstNumeric(
-                  fallbackStat?.WOE,
-                  fallbackStat?.woe,
-                  fallbackStat?.WoE,
-                  fallbackStat?.woe_value,
-                  fallbackStat?.WOEValue
-                );
-                const fallbackIv = getFirstNumeric(
-                  fallbackStat?.IV,
-                  fallbackStat?.iv,
-                  fallbackStat?.Iv,
-                  fallbackStat?.iv_contribution,
-                  fallbackStat?.IVContribution
-                );
-                const resolvedWoe = getFirstNumeric(rowWoe, mapped?.woe, fallbackWoe, 0) ?? 0;
-                const resolvedIv = getFirstNumeric(rowIv, mapped?.iv, fallbackIv, 0) ?? 0;
-                const resolved = { woe: resolvedWoe, iv: resolvedIv };
-                chartValueMap.set(label, resolved);
+
+                // Try to get WOE/IV from original stats (fallback to 0)
+                const mapped = woeMap.get(normalizedLabel) || woeMap.get(label);
+                const resolvedWoe = mapped?.woe ?? 0;
+                const resolvedIv = mapped?.iv ?? 0;
+
+                chartValueMap.set(label, { woe: resolvedWoe, iv: resolvedIv });
                 if (normalizedLabel !== label) {
-                  chartValueMap.set(normalizedLabel, resolved);
+                  chartValueMap.set(normalizedLabel, { woe: resolvedWoe, iv: resolvedIv });
                 }
-                return {
-                  Bin: label,
-                  WOE: resolvedWoe,
-                  IV: resolvedIv,
-                };
+
+                return { Bin: label, WOE: resolvedWoe, IV: resolvedIv };
               });
 
               return (
                 <div className="binning-section" aria-label="Binning controls and results">
                   <div className="results-container">
                     <h3>Binning - {activeColumn}</h3>
-                    {/* <p className="binning-helper-text">Select adjacent bins below and click Fine Binning on Selected to merge them.</p> */}
+
                     <div className="table-container">
                       <table className="cross-tab-table" aria-label={`Fine binning workspace for ${activeColumn}`}>
                         <thead>
                           <tr>
                             <th>Select</th>
                             <th>Bin</th>
-                            <th>Min</th>
-                            <th>Max</th>
+                            {isContinuousColumn ? (
+                              <>
+                                <th>Min</th>
+                                <th>Max</th>
+                              </>
+                            ) : (
+                              <th>Range</th>
+                            )}
                             <th>Bad</th>
                             <th>Good</th>
                             <th>Total</th>
                             <th>Bad Rate (%)</th>
                             <th>Freq%</th>
+                            <th>Dist Good (%)</th>
+                            <th>Dist Bad (%)</th>
                             <th>WOE</th>
                             <th>IV</th>
                             <th>Actions</th>
@@ -1023,7 +944,9 @@ const SelectedColumnsPage = () => {
                         <tbody>
                           {sortedRows.length === 0 ? (
                             <tr>
-                              <td colSpan={12} style={{ textAlign: 'center', padding: '16px' }}>No binning results available.</td>
+                              <td colSpan={isContinuousColumn ? 14 : 13} style={{ textAlign: 'center', padding: '16px' }}>
+                                No binning results available.
+                              </td>
                             </tr>
                           ) : (
                             sortedRows.map((bin: any, idx: number) => {
@@ -1034,8 +957,8 @@ const SelectedColumnsPage = () => {
                               const maxVal = bin.Max ?? bin.max ?? bin.MaxValue ?? bin.maxValue ?? null;
                               const minDisplay = minVal !== null && minVal !== undefined ? minVal : (isContinuousColumn ? 'N/A' : '—');
                               const maxDisplay = maxVal !== null && maxVal !== undefined ? maxVal : (isContinuousColumn ? 'N/A' : '—');
-                              const badValue = bin.Bad ?? bin['Bad'] ?? 0;
-                              const goodValue = bin.Good ?? bin['Good'] ?? 0;
+                              const badValue = getFirstNumeric(bin.Bad, bin['Bad'], 0) ?? 0;
+                              const goodValue = getFirstNumeric(bin.Good, bin['Good'], 0) ?? 0;
                               const totalValue = bin.Total ?? bin['Total'] ?? (badValue + goodValue);
                               const badRateRaw = typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'] : (typeof bin.BadRate === 'number' ? bin.BadRate : null);
                               const freqRaw = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
@@ -1043,6 +966,10 @@ const SelectedColumnsPage = () => {
                               const woeData = chartValueMap.get(labelVal) || chartValueMap.get(normalizedLabel) || { woe: 0, iv: 0 };
                               const isMergedLabel = Boolean(history[labelVal]);
                               const isSelected = selectedLabels.includes(labelVal);
+
+                              // === RECALCULATE Dist Good / Dist Bad from current bin counts ===
+                              const distGood = ((goodValue + eps) / adjTotalGood) * 100;
+                              const distBad = ((badValue + eps) / adjTotalBad) * 100;
 
                               return (
                                 <tr
@@ -1054,7 +981,6 @@ const SelectedColumnsPage = () => {
                                   role="button"
                                   tabIndex={0}
                                   onClick={(e) => {
-                                    // If the user clicked the checkbox or a button inside the row, don't double-handle
                                     const target = e.target as HTMLElement;
                                     if (target.closest('button') || target.closest('input') || target.closest('a')) return;
                                     toggleFineBinSelection(activeColumn, labelVal);
@@ -1082,13 +1008,23 @@ const SelectedColumnsPage = () => {
                                   <td title={rangeValue.length > 0 ? rangeValue : undefined} style={{ maxWidth: '160px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                     {labelVal}
                                   </td>
-                                  <td>{minDisplay}</td>
-                                  <td>{maxDisplay}</td>
+                                  {isContinuousColumn ? (
+                                    <>
+                                      <td>{minDisplay}</td>
+                                      <td>{maxDisplay}</td>
+                                    </>
+                                  ) : (
+                                    <td title={rangeValue.length > 0 ? rangeValue : undefined}>
+                                      {rangeValue || '—'}
+                                    </td>
+                                  )}
                                   <td>{badValue}</td>
                                   <td>{goodValue}</td>
                                   <td>{totalValue}</td>
                                   <td>{badRateRaw !== null && badRateRaw !== undefined ? badRateRaw.toFixed(4) : '0.0000'}</td>
                                   <td>{freqRaw !== null && freqRaw !== undefined ? freqRaw.toFixed(2) : '0.00'}</td>
+                                  <td>{distGood.toFixed(4)}</td>
+                                  <td>{distBad.toFixed(4)}</td>
                                   <td>{formatToFourDecimals(woeData.woe)}</td>
                                   <td>{formatToFourDecimals(woeData.iv)}</td>
                                   <td>
@@ -1099,7 +1035,9 @@ const SelectedColumnsPage = () => {
                                         aria-label={`Unmerge ${labelVal}`}
                                         title="Unmerge"
                                       >
-                                        <span style={{ fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s' }}>Unmerge</span>
+                                        <span style={{ fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s' }}>
+                                          Unmerge
+                                        </span>
                                       </button>
                                     ) : null}
                                   </td>
@@ -1108,67 +1046,64 @@ const SelectedColumnsPage = () => {
                             })
                           )}
                         </tbody>
-                      
-                        {/* Attach a one-row totals footer inside the same table so columns align */}
+
+                        {/* === TOTALS ROW (Updated) === */}
                         <tfoot>
                           {(() => {
-                            // compute totals from the sortedRows and chartValueMap
-                            const totals = ((): {
-                              totalBad: number;
-                              totalGood: number;
-                              totalTotal: number;
-                              badRatePercent: number;
-                              freqPercent: number;
-                              weightedWoe: number | null;
-                              totalIv: number;
-                            } => {
+                            const totals = (() => {
                               let totalBad = 0;
                               let totalGood = 0;
                               let totalTotal = 0;
                               let sumFreq = 0;
                               let freqProvided = false;
                               let sumIv = 0;
-                              sortedRows.forEach((bin: any, idx: number) => {
-                                const bad = Number(bin.Bad ?? bin['Bad'] ?? 0) || 0;
-                                const good = Number(bin.Good ?? bin['Good'] ?? 0) || 0;
-                                const total = Number(bin.Total ?? bin['Total'] ?? (bad + good)) || (bad + good);
+
+                              sortedRows.forEach((bin: any) => {
+                                const bad = getFirstNumeric(bin.Bad, bin['Bad'], 0) ?? 0;
+                                const good = getFirstNumeric(bin.Good, bin['Good'], 0) ?? 0;
+                                const total = getFirstNumeric(bin.Total, bin['Total']) ?? (bad + good);
                                 totalBad += bad;
                                 totalGood += good;
                                 totalTotal += total;
-                                const freq = (typeof bin['Freq%'] === 'number') ? Number(bin['Freq%']) : (typeof bin.Freq === 'number' ? Number(bin.Freq) : null);
+
+                                const freq = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : typeof bin.Freq === 'number' ? bin.Freq : null;
                                 if (freq !== null) {
                                   sumFreq += freq;
                                   freqProvided = true;
                                 }
-                                const labelRaw = bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? `Bin_${idx + 1}`;
-                                const label = String(labelRaw);
-                                const entry = chartValueMap.get(label) || chartValueMap.get(label.replace(/\s+/g, ' ')) || { woe: 0, iv: 0 };
-                                const ivNum = Number(entry.iv) || 0;
-                                sumIv += ivNum;
+
+                                const label = String(bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? '');
+                                const entry = chartValueMap.get(label) || chartValueMap.get(normalizeLabel(label)) || { iv: 0 };
+                                sumIv += Number(entry.iv) || 0;
                               });
 
                               const badRatePercent = totalTotal > 0 ? (totalBad / totalTotal) * 100 : 0;
                               const freqPercent = freqProvided ? sumFreq : (totalTotal > 0 ? 100 : 0);
-                              // Do NOT calculate WOE total per request; leave as null
-                              const weightedWoe = null;
-                              // prefer authoritative IV if available from woeIvResults
                               const totalIv = Number(woeIvResults[activeColumn]?.iv ?? sumIv) || 0;
 
-                              return { totalBad, totalGood, totalTotal, badRatePercent, freqPercent, weightedWoe, totalIv };
+                              return { totalBad, totalGood, totalTotal, badRatePercent, freqPercent, totalIv };
                             })();
 
                             return (
                               <tr className="totals-row">
                                 <td><strong>Total</strong></td>
                                 <td />
-                                <td />
-                                <td />
+                                {isContinuousColumn ? (
+                                  <>
+                                    <td />
+                                    <td />
+                                  </>
+                                ) : (
+                                  <td />
+                                )}
                                 <td>{totals.totalBad}</td>
                                 <td>{totals.totalGood}</td>
                                 <td>{totals.totalTotal}</td>
                                 <td>{totals.badRatePercent.toFixed(2)}</td>
                                 <td>{totals.freqPercent.toFixed(2)}</td>
-                                <td>{totals.weightedWoe !== null ? formatToFourDecimals(totals.weightedWoe) : ' '}</td>
+                                <td />
+                                <td />
+                                <td />
                                 <td className="iv-total">{formatToFourDecimals(totals.totalIv)}</td>
                                 <td />
                               </tr>
@@ -1198,42 +1133,36 @@ const SelectedColumnsPage = () => {
                     </div>
                   </div>
 
+                  {/* WOE/IV Charts */}
                   {woeIvResults[activeColumn] && (
                     <div className="woe-iv-embedded" style={{ marginTop: '24px' }}>
-                          <h3>WOE by Bin</h3>
-                          <ResponsiveContainer width="100%" height={300}>
-                            <LineChart
-                                data={chartRows}
-                              margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
-                            >
-                              <CartesianGrid strokeDasharray="3 3" />
-                              <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-                              <YAxis />
-                              <Tooltip />
-                              <Legend />
-                              <Line type="monotone" dataKey="WOE" stroke="#39ff14" strokeWidth={2} dot={{ r: 3, fill: '#39ff14', stroke: '#39ff14' }} />
-                            </LineChart>
-                          </ResponsiveContainer>
+                      <h3>WOE by Bin</h3>
+                      <ResponsiveContainer width="100%" height={300}>
+                        <LineChart data={chartRows} margin={{ top: 20, right: 30, bottom: 40, left: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                          <YAxis />
+                          <Tooltip />
+                          <Legend />
+                          <Line type="monotone" dataKey="WOE" stroke="#39ff14" strokeWidth={2} dot={{ r: 3, fill: '#39ff14' }} />
+                        </LineChart>
+                      </ResponsiveContainer>
 
-                          <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
-                          <ResponsiveContainer width="100%" height={300}>
-                            <BarChart
-                              data={chartRows}
-                              margin={{ top: 20, right: 30, bottom: 40, left: 0 }}
-                            >
-                              <CartesianGrid strokeDasharray="3 3" />
-                              <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
-                              <YAxis />
-                              <Tooltip />
-                              <Bar dataKey="IV" fill="#8884d8" />
-                            </BarChart>
-                          </ResponsiveContainer>
+                      <h3 style={{ marginTop: '20px' }}>IV Contribution by Bin</h3>
+                      <ResponsiveContainer width="100%" height={300}>
+                        <BarChart data={chartRows} margin={{ top: 20, right: 30, bottom: 40, left: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="Bin" angle={-30} textAnchor="end" interval={0} />
+                          <YAxis />
+                          <Tooltip />
+                          <Bar dataKey="IV" fill="#8884d8" />
+                        </BarChart>
+                      </ResponsiveContainer>
                     </div>
                   )}
                 </div>
               );
             })()}
-
             {currentStep === 2 && (
               <LogisticRegressionResults
                 selectedVariables={selectedForModeling}
@@ -1248,7 +1177,6 @@ const SelectedColumnsPage = () => {
                 onGotoScoreCard={gotoScoreCardAndGenerate}
               />
             )}
-
             {currentStep === 3 && (
               <div className="scorecard-section">
                 <h3>Score Card</h3>
@@ -1262,7 +1190,6 @@ const SelectedColumnsPage = () => {
                     {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                   </button>
                 </div>
-
                 {/* Show loading skeleton while generating */}
                 {generatingScoreCard && (
                   <div className="scorecard-results-loading">
@@ -1292,45 +1219,43 @@ const SelectedColumnsPage = () => {
                           </tr>
                         </thead>
                         <tbody>
-                            {scoreCardData.scorecard_bins && (() => {
-                              const grouped: Record<string, any[]> = {};
-                              scoreCardData.scorecard_bins.forEach((b: any) => {
-                                if (selectedForModeling.includes(b.variable)) {
-                                  grouped[b.variable] = grouped[b.variable] || [];
-                                  grouped[b.variable].push(b);
-                                }
-                              });
-
-                              const rows: any[] = [];
-                              Object.keys(grouped).forEach((variable, varIndex) => {
-                                const bins = grouped[variable];
-                                if (varIndex > 0) {
-                                  rows.push(
-                                    <tr key={`sep-${variable}`} className="variable-separator">
-                                      <td colSpan={6} />
-                                    </tr>
-                                  );
-                                }
-                                for (let i = 0; i < bins.length; i++) {
-                                  const bin = bins[i];
-                                  rows.push(
-                                    <tr key={`${variable}-${i}-${String(bin.bin_range)}`}>
-                                      <td>{i + 1}</td>
-                                      <td>{bin.variable}</td>
-                                      <td>{bin.bin_range}</td>
-                                      <td>{formatToFourDecimals(bin.woe)}</td>
-                                      <td>{formatToFourDecimals(bin.coefficient)}</td>
-                                      <td>{Math.round(bin.score)}</td>
-                                    </tr>
-                                  );
-                                }
-                              });
-                              return rows;
-                            })()}
+                          {scoreCardData.scorecard_bins && (() => {
+                            const grouped: Record<string, any[]> = {};
+                            scoreCardData.scorecard_bins.forEach((b: any) => {
+                              if (selectedForModeling.includes(b.variable)) {
+                                grouped[b.variable] = grouped[b.variable] || [];
+                                grouped[b.variable].push(b);
+                              }
+                            });
+                            const rows: any[] = [];
+                            Object.keys(grouped).forEach((variable, varIndex) => {
+                              const bins = grouped[variable];
+                              if (varIndex > 0) {
+                                rows.push(
+                                  <tr key={`sep-${variable}`} className="variable-separator">
+                                    <td colSpan={6} />
+                                  </tr>
+                                );
+                              }
+                              for (let i = 0; i < bins.length; i++) {
+                                const bin = bins[i];
+                                rows.push(
+                                  <tr key={`${variable}-${i}-${String(bin.bin_range)}`}>
+                                    <td>{i + 1}</td>
+                                    <td>{bin.variable}</td>
+                                    <td>{bin.bin_range}</td>
+                                    <td>{formatToFourDecimals(bin.woe)}</td>
+                                    <td>{formatToFourDecimals(bin.coefficient)}</td>
+                                    <td>{Math.round(bin.score)}</td>
+                                  </tr>
+                                );
+                              }
+                            });
+                            return rows;
+                          })()}
                         </tbody>
                       </table>
                     </div>
-
                     {scoreCardData.score_parameters && (
                       <div className="score-parameters">
                         <h5>Score Card Parameters</h5>
@@ -1354,7 +1279,6 @@ const SelectedColumnsPage = () => {
                         </div>
                       </div>
                     )}
-
                     {/* Test Score Button and Results Table */}
                     <div style={{ marginTop: '32px' }}>
                       <button
@@ -1392,7 +1316,6 @@ const SelectedColumnsPage = () => {
                       >
                         {testScoreLoading ? 'Testing...' : 'Test Score Card'}
                       </button>
-
                       {testScoreResults && (
                         <div className="scorecard-test-results">
                           <h5>Score Card Test Results (Sorted by Score)</h5>
@@ -1432,11 +1355,9 @@ const SelectedColumnsPage = () => {
             )}
           </section>
         </div>
-
         {/* Footer navigation removed per request: Next and Save moved beside progress bar */}
       </div>
     </div>
   );
 };
-
 export default SelectedColumnsPage;
