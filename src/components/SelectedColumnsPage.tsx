@@ -276,26 +276,38 @@ const SelectedColumnsPage = () => {
   };
   const runBinning = async (col: string) => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-    const selectedLabels = Array.from(new Set((selectedFineBins[col] || []).map((label) => String(label))));
+    const selectedLabels = Array.from(new Set((selectedFineBins[col] || []).map(String)));
     const history = binMergeHistory[col] || {};
-    const expandedSelection = Array.from(new Set(selectedLabels.flatMap((label) => {
-      const underlying = history[label];
-      if (Array.isArray(underlying) && underlying.length > 0) {
-        return underlying.map((item) => String(item));
-      }
-      return [label];
-    })));
-    if (expandedSelection.length < 2) {
+
+    if (selectedLabels.length < 2) {
       showNotification('Select at least two bins to merge.');
       return;
     }
+
+    // Expand selected labels using history
+    const expandedSelection = Array.from(new Set(
+      selectedLabels.flatMap(label => {
+        const underlying = history[label];
+        return Array.isArray(underlying) ? underlying.map(String) : [label];
+      })
+    ));
+
+    // Remove any old merges that overlap
+    const filteredHistoryEntries = Object.entries(history).filter(([, bins]) => {
+      return !bins.some(b => expandedSelection.includes(String(b)));
+    });
+    const filteredHistory = Object.fromEntries(filteredHistoryEntries);
+
+    // Create merge key
+    const sortedExpanded = [...expandedSelection].sort((a, b) => a.localeCompare(b));
+    const mergeKey = varType === 'continuous'
+      ? `Merged_${Object.keys(filteredHistory).length + 1}`
+      : sortedExpanded.join(', ');  // This is critical for discrete!
+
+    const payloadMerges = { ...filteredHistory, [mergeKey]: sortedExpanded };
+
     try {
-      const previousHistory = history ? JSON.parse(JSON.stringify(history)) : {};
-      setBinMergeStack((prev) => ({
-        ...prev,
-        [col]: previousHistory as any,
-      }));
-      // Step 1: Run coarse binning to refresh stats
+      // Re-run coarse binning to get latest stats
       const coarseRes = await fetch('http://localhost:5000/api/univariate-analysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -306,37 +318,10 @@ const SelectedColumnsPage = () => {
         }),
       });
       const coarseData = await coarseRes.json();
-      const coarseStats = coarseData[col]?.stats || [];
-      setUnivariateResults((prev) => ({ ...prev, [col]: coarseData[col] || coarseData }));
-      setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
-      const currentRows = (fineBinResults[col] && fineBinResults[col].length > 0)
-        ? fineBinResults[col]
-        : coarseStats;
-      const orderMap = new Map<string, number>();
-      currentRows.forEach((row: any, index: number) => {
-        const label = String(row[`${col}_fine_binned`] ?? row[`${col}_binned`] ?? row.Bin ?? row.bin ?? row.Range ?? `Bin_${index + 1}`);
-        if (!orderMap.has(label)) {
-          orderMap.set(label, index);
-        }
-      });
-      const filteredHistoryEntries = Object.entries(history).filter(([, bins]) => {
-        const normalizedBins = Array.isArray(bins) ? bins.map((b) => String(b)) : [];
-        return normalizedBins.every((b) => !expandedSelection.includes(b));
-      });
-      const filteredHistory = Object.fromEntries(filteredHistoryEntries);
-      const sortedExpanded = [...expandedSelection].sort((a, b) => {
-        const orderA = orderMap.has(a) ? orderMap.get(a)! : Number.MAX_SAFE_INTEGER;
-        const orderB = orderMap.has(b) ? orderMap.get(b)! : Number.MAX_SAFE_INTEGER;
-        if (orderA === orderB) {
-          return a.localeCompare(b);
-        }
-        return orderA - orderB;
-      });
-      const nextMergeIndex = Object.keys(filteredHistory).length + 1;
-      const mergeKey = varType === 'continuous'
-        ? `Merged_${nextMergeIndex}`
-        : sortedExpanded.join(', ');
-      const payloadMerges = { ...filteredHistory, [mergeKey]: sortedExpanded };
+      setUnivariateResults(prev => ({ ...prev, [col]: coarseData[col] || coarseData }));
+      setCoarseBinResults(prev => ({ ...prev, [col]: coarseData[col]?.stats || [] }));
+
+      // Run fine binning
       const fineRes = await fetch('http://localhost:5000/api/fine-bin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -346,20 +331,24 @@ const SelectedColumnsPage = () => {
           type: varType,
           bin_merges: payloadMerges,
           record_id: recordId,
-          dashboard_selected_columns: Array.from(selectedForModeling),
+          dashboard_selected_columns: selectedForModeling,
         }),
       });
       const fineData = await fineRes.json();
-      if (!fineData.success) {
-        throw new Error(fineData.error || 'Fine binning failed');
-      }
+
+      if (!fineData.success) throw new Error(fineData.error);
+
       const mergesReturned = fineData.bin_merges || payloadMerges;
-      setFineBinResults((prev) => ({ ...prev, [col]: fineData.stats || [] }));
-      setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
-      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
+      setFineBinResults(prev => ({ ...prev, [col]: fineData.stats || [] }));
+      setBinMergeHistory(prev => ({ ...prev, [col]: mergesReturned }));
+      setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
+
       await persistFineBinColumn(col, mergesReturned);
+
+      // Recompute WOE/IV with correct merges
       await fetchWoeIv(col, mergesReturned, false);
-      setWoeReadyColumns((prev) => new Set(prev).add(col));
+      setWoeReadyColumns(prev => new Set(prev).add(col));
+
       showNotification(`Binning completed for ${col}`);
     } catch (err) {
       console.error('Error in runBinning:', err);
@@ -386,156 +375,86 @@ const SelectedColumnsPage = () => {
   // };
   // Unmerge a specific merged fine bin for a column and refresh results
   const unmergeFineBin = async (col: string, mergedLabelRaw: any) => {
-    try {
-      const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-      const history = binMergeHistory[col] || {};
-      const mergedLabel = String(mergedLabelRaw || '');
-      if (!history || Object.keys(history).length === 0) {
-        showNotification(`No merges to unmerge for ${col}.`);
-        return;
-      }
-      // Helper to compare label against history keys regardless of spacing
-      const normalizeParts = (s: string) => s.split(',').map(p => p.trim()).filter(Boolean).sort();
-      let keyToRemove: string | null = null;
-      if (varType === 'continuous') {
-        // For continuous merges we used keys like 'Merged_1', 'Merged_2', ...
-        if (history[mergedLabel]) {
-          keyToRemove = mergedLabel;
-        } else {
-          // fallback: find any key that startsWith 'Merged_' and whose value array contains the label's parts (unlikely)
-          keyToRemove = Object.keys(history).find(k => k === mergedLabel) || null;
-        }
-      } else {
-        // Discrete: keys are a sorted joined list like 'A, B, C'
-        const targetParts = normalizeParts(mergedLabel);
-        keyToRemove = Object.keys(history).find(k => {
-          const kParts = normalizeParts(k);
-          if (kParts.length !== targetParts.length) return false;
-          for (let i = 0; i < kParts.length; i++) {
-            if (kParts[i] !== targetParts[i]) return false;
-          }
-          return true;
-        }) || null;
-        // Also try direct match when label matches key exactly
-        if (!keyToRemove && history[mergedLabel]) keyToRemove = mergedLabel;
-      }
-      if (!keyToRemove) {
-        showNotification(`Could not find a matching merge for '${mergedLabel}'.`);
-        return;
-      }
-      const newHistory = { ...history } as Record<string, any[]>;
-      delete newHistory[keyToRemove];
-      // For continuous: ensure merges reference existing coarse bins only
-      if (varType === 'continuous') {
-        const coarseRows = (coarseBinResults[col] || []) as any[];
-        const binLabelKey = `${col}_binned`;
-        const existingBins = new Set(
-          coarseRows.map((r) => String(r[binLabelKey])).filter((v) => v !== undefined)
-        );
-        // filter each merge's old_bins values
-        Object.keys(newHistory).forEach((k) => {
-          newHistory[k] = (newHistory[k] || []).map(String).filter((b) => existingBins.has(String(b)));
-          if (!newHistory[k] || newHistory[k].length === 0) {
-            delete newHistory[k];
-          }
-        });
-      }
-      // Always re-run fine binning and WOE/IV after unmerge
-      let fineBinStats = [];
-      let mergesReturned = {};
-      if (varType === 'continuous' && Object.keys(newHistory).length === 0) {
-        // Revert to coarse bins
-        const coarseRes = await fetch('http://localhost:5000/api/univariate-analysis', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            discrete: [],
-            continuous: [col],
-            target: targetVariable,
-          }),
-        });
-        const coarseData = await coarseRes.json();
-        setCoarseBinResults((prev) => ({ ...prev, [col]: (coarseData[col]?.stats || []) }));
-        setUnivariateResults((prev) => ({ ...prev, [col]: coarseData[col] || coarseData }));
-        const coarseStats = coarseData[col]?.stats || [];
-        const binLabelKey = `${col}_binned`;
-        fineBinStats = coarseStats.map((row: any) => ({
-          ...row,
-          Bin: row.Bin ?? row[binLabelKey] ?? '',
-        }));
-        mergesReturned = {};
-      } else {
-        // Re-run fine binning with updated merges
-        const res = await fetch('http://localhost:5000/api/fine-bin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            variable: col,
-            target: targetVariable,
-            type: varType,
-            bin_merges: newHistory,
-            record_id: recordId,
-            dashboard_selected_columns: Array.from(selectedForModeling),
-          }),
-        });
-        const data = await res.json();
-        if (!data.success) {
-          throw new Error(data.error || 'Fine binning failed during unmerge');
-        }
-        fineBinStats = data.stats || [];
-        mergesReturned = data.bin_merges || newHistory;
-      }
-      setFineBinResults((prev) => ({ ...prev, [col]: fineBinStats }));
-      setBinMergeHistory((prev) => ({ ...prev, [col]: mergesReturned }));
-      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
-      await persistFineBinColumn(col, mergesReturned);
-      // Always trigger fresh WOE/IV calculation with latest merges (do not auto-select)
-      await fetchWoeIv(col, mergesReturned, false);
-      setWoeReadyColumns((prev) => new Set(prev).add(col));
-      showNotification(`Unmerged '${mergedLabel}' for ${col}.`);
-    } catch (err) {
-      console.error('Error unmerging fine bin:', err);
-      alert('Error unmerging fine bin');
+    const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+    const history = binMergeHistory[col] || {};
+    const mergedLabel = String(mergedLabelRaw);
+
+    let keyToRemove: string | null = null;
+
+    if (varType === 'discrete') {
+      // Match exactly on the merged key (e.g., "A, B, C")
+      const normalizedTarget = mergedLabel.split(',').map(s => s.trim()).sort().join(', ');
+      keyToRemove = Object.keys(history).find(k => {
+        const normalizedKey = k.split(',').map(s => s.trim()).sort().join(', ');
+        return normalizedKey === normalizedTarget;
+      }) || (history[mergedLabel] ? mergedLabel : null);
+    } else {
+      keyToRemove = mergedLabel;
     }
+
+    if (!keyToRemove || !history[keyToRemove]) {
+      showNotification(`Could not find merge for '${mergedLabel}'`);
+      return;
+    }
+
+    const newHistory = { ...history };
+    delete newHistory[keyToRemove];
+
+    // Re-run fine binning
+    const res = await fetch('http://localhost:5000/api/fine-bin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        variable: col,
+        target: targetVariable,
+        type: varType,
+        bin_merges: newHistory,
+        record_id: recordId,
+        dashboard_selected_columns: selectedForModeling,
+      }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error);
+
+    setFineBinResults(prev => ({ ...prev, [col]: data.stats || [] }));
+    setBinMergeHistory(prev => ({ ...prev, [col]: data.bin_merges || newHistory }));
+    setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
+
+    await persistFineBinColumn(col, data.bin_merges || newHistory);
+    await fetchWoeIv(col, data.bin_merges || newHistory, false);
+    setWoeReadyColumns(prev => new Set(prev).add(col));
+
+    showNotification(`Unmerged '${mergedLabel}'`);
   };
   const resetFineBinning = async (col: string) => {
-    try {
-      // Reset fine binning results and history
-      setFineBinResults((prev) => ({ ...prev, [col]: [] }));
-      setBinMergeHistory((prev) => ({ ...prev, [col]: {} }));
-      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
-      // Keep existing WOE/IV graphs intact when resetting bins so users
-      // can still view WOE by Bin and IV Contribution even after a reset.
-      // (Do not delete woeIvResults[col] or remove from woeReadyColumns.)
-      // Re-run coarse binning to restore original bins
-      const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-      const res = await fetch('http://localhost:5000/api/univariate-analysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          discrete: varType === 'discrete' ? [col] : [],
-          continuous: varType === 'continuous' ? [col] : [],
-          target: targetVariable,
-        }),
-      });
-      const data = await res.json();
-      setCoarseBinResults((prev) => ({ ...prev, [col]: (data[col]?.stats || []) }));
-      setUnivariateResults((prev) => ({ ...prev, [col]: data[col] || data }));
-      setFineBinResults((prev) => ({ ...prev, [col]: data[col]?.stats || [] }));
-      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
-      // Persist the reset state (save empty merges) before requesting WOE
-      // so the backend has the authoritative merge state if it looks up by record.
-      await persistFineBinColumn(col, {});
-      // Recompute WOE/IV based on the restored coarse bins so graphs reflect the reset.
-      // Pass an explicit empty merges object to ensure the backend computes
-      // WOE using no merges rather than relying on persisted state timing.
-      await fetchWoeIv(col, {}, false);
-      setWoeReadyColumns((prev) => new Set(prev).add(col));
-      showNotification(`Binning for ${col} reset to original coarse bins.`);
-    } catch (err) {
-      console.error('Error resetting binning:', err);
-      alert('Error resetting binning');
-    }
+    const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+
+    // Reset UI state
+    setFineBinResults(prev => ({ ...prev, [col]: [] }));
+    setBinMergeHistory(prev => ({ ...prev, [col]: {} }));
+    setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
+
+    // Re-run coarse
+    const res = await fetch('http://localhost:5000/api/univariate-analysis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        discrete: varType === 'discrete' ? [col] : [],
+        continuous: varType === 'continuous' ? [col] : [],
+        target: targetVariable,
+      }),
+    });
+    const data = await res.json();
+    setCoarseBinResults(prev => ({ ...prev, [col]: data[col]?.stats || [] }));
+    setFineBinResults(prev => ({ ...prev, [col]: data[col]?.stats || [] }));
+
+    await persistFineBinColumn(col, {});
+
+    // Recompute WOE with NO merges
+    await fetchWoeIv(col, {}, false);
+    setWoeReadyColumns(prev => new Set(prev).add(col));
+
+    showNotification(`Binning reset for ${col}`);
   };
   const persistFineBinColumn = async (col: string, merges: Record<string, any[]>) => {
     try {
@@ -624,30 +543,32 @@ const SelectedColumnsPage = () => {
     addToModeling: boolean = true,
   ): Promise<boolean> => {
     try {
-      const body: any = { variables: [col], target: targetVariable };
+      const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+      const body: any = {
+        variables: [col],
+        target: targetVariable,
+        type: varType  // Add this!
+      };
       if (recordId) body.record_id = recordId;
-      if (merges) body.bin_merges = merges;
+      if (merges && Object.keys(merges).length > 0) {
+        body.bin_merges = merges;
+      }
+
       const res = await fetch('http://localhost:5000/api/woe-iv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       const data = await res.json();
-      if (!data.error) {
-        // The backend may return an object keyed by column name (e.g. { colName: { stats: [...] } })
-        // or it may return the column payload directly. Normalize so woeIvResults[col] is set.
-        if (data && typeof data === 'object' && Object.prototype.hasOwnProperty.call(data, col)) {
-          // Merge other columns (if any) but ensure the returned column is assigned
-          setWoeIvResults((prev) => ({ ...prev, ...data }));
-        } else {
-          // Put the returned payload under the column key
-          setWoeIvResults((prev) => ({ ...prev, [col]: data }));
-        }
-        // Only auto-add to "selected for modeling" when allowed by caller
+
+      if (!data.error && data[col]) {
+        setWoeIvResults((prev) => ({ ...prev, [col]: data[col] }));
         if (addToModeling) {
-          setSelectedForModeling((prev) => [...new Set([...prev, col])]); // Add to modeling
+          setSelectedForModeling((prev) => [...new Set([...prev, col])]);
         }
         return true;
+      } else {
+        console.warn('WOE/IV failed:', data.error);
       }
     } catch (e) {
       console.error('WOE/IV fetch failed', e);

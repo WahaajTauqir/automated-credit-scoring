@@ -888,186 +888,247 @@ def ai_classify_columns():
         return jsonify({"error": str(e)}), 500
 
 # ----------- WOE/IV Calculation -----------
-def calculate_woe_iv(df, variable, target, bin_merges=None):
-    app.logger.debug(f"calculate_woe_iv called for {variable}, bin_merges: {bin_merges is not None}")
-    
-    # Apply fine bin merges if available
-    if bin_merges:
-        app.logger.debug(f"Applying fine bin merges for {variable}: {list(bin_merges.keys())}")
-        def map_bin(val):
-            for label, bins in bin_merges.items():
-                if val in bins:
-                    return label
-            return str(val)
-        df["final_bin"] = df[f"{variable}_binned"].apply(map_bin)
+def calculate_woe_iv(df, variable, target, bin_merges=None, var_type=None):
+    """
+    df          : DataFrame with raw column `variable` and target
+    variable    : column name
+    target      : target column (0 = good, 1 = bad)
+    bin_merges  : {merge_key: [original_bin, ...]}   (optional)
+    var_type    : 'continuous' or 'discrete' (optional – inferred if None)
+    """
+    import numpy as np
+    import pandas as pd
+    from flask import current_app as app
+
+    app.logger.debug(
+        f"calculate_woe_iv → {variable} | merges: {bool(bin_merges)} | type: {var_type}"
+    )
+
+    # --------------------------------------------------------------
+    # 1. Determine type
+    # --------------------------------------------------------------
+    if var_type is None:
+        is_numeric = pd.api.types.is_numeric_dtype(df[variable])
+        var_type = "continuous" if (is_numeric and df[variable].nunique(dropna=True) > 20) else "discrete"
+
+    binned_col = f"{variable}_binned"
+
+    # --------------------------------------------------------------
+    # 2. Build **final_bin** – merge on **coarse bin labels**
+    # --------------------------------------------------------------
+    if var_type == "discrete" and bin_merges:
+        coarse_to_merge = {}
+        for merge_key, coarse_labels in bin_merges.items():
+            for lbl in coarse_labels:
+                key = str(lbl).strip()
+                coarse_to_merge[key] = str(merge_key).strip()
+        if binned_col not in df.columns:
+            raise ValueError(f"Discrete variable {variable} missing {binned_col}")
+        df["final_bin"] = (
+            df[binned_col]
+            .astype(str)
+            .str.strip()
+            .map(coarse_to_merge)
+            .fillna(df[binned_col].astype(str).str.strip())
+        )
+
+    elif var_type == "continuous" and bin_merges:
+        interval_to_merge = {}
+        for merge_key, intervals in bin_merges.items():
+            for iv in intervals:
+                interval_to_merge[str(iv).strip()] = str(merge_key).strip()
+        if binned_col not in df.columns:
+            raise ValueError(f"Continuous variable {variable} missing {binned_col}")
+        df["final_bin"] = (
+            df[binned_col]
+            .astype(str)
+            .str.strip()
+            .map(interval_to_merge)
+            .fillna(df[binned_col].astype(str).str.strip())
+        )
+
     else:
-        if f"{variable}_binned" in df.columns:
-            app.logger.debug(f"Using existing {variable}_binned column")
-            df["final_bin"] = df[f"{variable}_binned"]
-        else:
-            app.logger.debug(f"No {variable}_binned column found, creating coarse bins")
-            # If no binned column exists, create coarse bins first
-            var_series = df[variable]
-            if pd.api.types.is_numeric_dtype(var_series):
-                if var_series.nunique(dropna=True) <= 20:
-                    # Discrete numeric
-                    _, df[f"{variable}_binned"], _ = coarse_bin_discrete(df.copy(), variable, target)
-                else:
-                    # Continuous numeric
-                    _, df[f"{variable}_binned"] = coarse_bin_continuous(df.copy(), variable, target)
-            else:
-                # Non-numeric => discrete
-                _, df[f"{variable}_binned"], _ = coarse_bin_discrete(df.copy(), variable, target)
-            df["final_bin"] = df[f"{variable}_binned"]
-    
-    unique_final_bins = df["final_bin"].nunique()
-    app.logger.debug(f"{variable} final_bin has {unique_final_bins} unique values")
-    
-    # Determine if variable is continuous or discrete
-    is_continuous = pd.api.types.is_numeric_dtype(df[variable]) and df[variable].nunique(dropna=True) > 20
-    
-    # Compute bin ranges
+        if binned_col not in df.columns:
+            raise ValueError(f"Column {binned_col} missing – coarse binning must be performed first.")
+        df["final_bin"] = df[binned_col].astype(str)
+
+    # --------------------------------------------------------------
+    # 3. Build range info
+    # --------------------------------------------------------------
     bin_ranges = {}
-    if is_continuous:
-        for bin_label in df["final_bin"].unique():
-            mask = df["final_bin"] == bin_label
-            if mask.any():
-                values = df.loc[mask, variable]
-                # Preserve precise numeric min/max (do not round)
-                min_val = float(values.min()) if not values.empty else None
-                max_val = float(values.max()) if not values.empty else None
-                bin_ranges[bin_label] = (min_val, max_val)
+    if var_type == "continuous":
+        for lbl in df["final_bin"].unique():
+            mask = df["final_bin"] == lbl
+            vals = df.loc[mask, variable]
+            mn = vals.min() if not vals.empty else None
+            mx = vals.max() if not vals.empty else None
+            bin_ranges[lbl] = (float(mn), float(mx)) if mn is not None else (None, None)
     else:
-        for bin_label in df["final_bin"].unique():
-            mask = df["final_bin"] == bin_label
-            if mask.any():
-                values = df.loc[mask, variable].unique()
-                bin_ranges[bin_label] = sorted([str(val) for val in values])
-    
-    # Build ordered labels for output (continuous: order by Min; discrete: preserve insertion/order)
+        for lbl in df["final_bin"].unique():
+            mask = df["final_bin"] == lbl
+            uniq = df.loc[mask, variable].unique()
+            bin_ranges[lbl] = sorted([str(v) for v in uniq])
+
+    # --------------------------------------------------------------
+    # 4. Order bins
+    # --------------------------------------------------------------
     ordered_labels = None
     try:
-        if is_continuous:
-            ordered_bins = sorted(list(bin_ranges.items()), key=lambda kv: (kv[1][0] if kv[1][0] is not None else float('inf')))
-            ordered_labels = [label for label, _ in ordered_bins]
+        if var_type == "continuous":
+            def _min_val(iv):
+                if iv.startswith("(-inf,"): return float('-inf')
+                if iv.startswith("["): return float(iv.split(",")[0].replace("[", ""))
+                return float(iv.split(",")[0].replace("(", ""))
+            ordered = sorted(
+                [(lbl, bin_ranges[lbl]) for lbl in df["final_bin"].unique()],
+                key=lambda x: _min_val(x[0])
+            )
+            ordered_labels = [lbl for lbl, _ in ordered]
         else:
-            # For discrete, preserve the order found in final_bin unique (insertion order), fallback to sorted
             ordered_labels = list(dict.fromkeys(df["final_bin"].astype(str).tolist()))
-    except Exception:
-        ordered_labels = None
+    except Exception as e:
+        app.logger.warning(f"Ordering failed for {variable}: {e}")
 
-    # Aggregate counts (preserve bin order using sort=False and reindex later)
-    grouped = df.groupby("final_bin", observed=True, sort=False).agg(
-        Total=(target, "count"),
-        Good=(target, lambda x: (x == 0).sum()),
-        Bad=(target, lambda x: (x == 1).sum())
-    ).reset_index()
-    # Reindex grouped by ordered_labels when available
-    try:
-        if ordered_labels:
-            present = [lbl for lbl in ordered_labels if lbl in grouped['final_bin'].astype(str).tolist()]
-            if present:
-                grouped = grouped.set_index('final_bin').reindex(present).reset_index()
-    except Exception:
-        pass
+    # --------------------------------------------------------------
+    # 5. Aggregate counts
+    # --------------------------------------------------------------
+    grouped = (
+        df.groupby("final_bin", observed=True, sort=False)
+        .agg(
+            Total=(target, "count"),
+            Good=(target, lambda x: (x == 0).sum()),
+            Bad=(target, lambda x: (x == 1).sum()),
+        )
+        .reset_index()
+    )
+
+    if ordered_labels:
+        present = [lbl for lbl in ordered_labels if lbl in grouped["final_bin"].astype(str).tolist()]
+        if present:
+            grouped = grouped.set_index("final_bin").reindex(present).reset_index()
+
+    # --------------------------------------------------------------
+    # 6. **ROBUST WOE/IV** – handles 99.9% dominance
+    # --------------------------------------------------------------
     total_good = grouped["Good"].sum()
-    total_bad = grouped["Bad"].sum()
-    n_bins = len(grouped)
-    stats = []
-    iv_total = 0.0
+    total_bad  = grouped["Bad"].sum()
+    n_bins     = len(grouped)
+
+    if n_bins == 0:
+        return 0.0, []
+
+    # ---- Global Laplace smoothing (prevents 0/0) ----
     eps = 0.5
     adj_total_good = total_good + eps * n_bins
-    adj_total_bad = total_bad + eps * n_bins
-    for _, row in grouped.iterrows():
-        dist_good = (row["Good"] + eps) / adj_total_good
-        dist_bad = (row["Bad"] + eps) / adj_total_bad
-        woe = np.log(dist_good / dist_bad)
-        iv = (dist_good - dist_bad) * woe
-        iv_total += iv
-        bin_label = str(row["final_bin"])
-        if is_continuous and "Interval" in bin_label:
-            bin_label = bin_label.replace("Interval", "").replace("(", "").replace("]", "")
-        # Add range information
-        range_info = bin_ranges.get(row["final_bin"], (None, None) if is_continuous else [])
-        stats.append({
-            "Bin": bin_label,
-            "Good": int(row["Good"]),
-            "Bad": int(row["Bad"]),
-            "Total": int(row["Total"]),
-            "WOE": round(float(woe), 4),
-            "IV": round(float(iv), 4),
-            "Range": ', '.join(map(str, range_info)) if not is_continuous else f"{range_info[0]} - {range_info[1]}"
-        })
-    return round(float(iv_total), 4), stats
+    adj_total_bad  = total_bad  + eps * n_bins
 
+    stats = []
+    iv_total = 0.0
+
+    for _, row in grouped.iterrows():
+        g = row["Good"]
+        b = row["Bad"]
+        total_in_bin = row["Total"]
+
+        # ---- Per-bin smoothing (even if bin has 0 good or bad) ----
+        dist_g = (g + eps) / adj_total_good
+        dist_b = (b + eps) / adj_total_bad
+
+        # ---- Safe log: avoid log(0) and log(inf) ----
+        if dist_g <= 0 or dist_b <= 0:
+            woe = 0.0
+        else:
+            ratio = dist_g / dist_b
+            if ratio <= 0:
+                woe = 0.0
+            elif not np.isfinite(ratio):
+                woe = 0.0
+            else:
+                woe = np.log(ratio)
+
+        iv = (dist_g - dist_b) * woe
+        iv_total += iv
+
+        bin_label = str(row["final_bin"])
+        range_info = bin_ranges.get(row["final_bin"], (None, None) if var_type == "continuous" else [])
+        range_str = (
+            f"{range_info[0]} - {range_info[1]}" if var_type == "continuous"
+            else ', '.join(map(str, range_info))
+        )
+
+        stats.append({
+            "Bin":   bin_label,
+            "Good":  int(g),
+            "Bad":   int(b),
+            "Total": int(total_in_bin),
+            "WOE":   round(float(woe), 4),
+            "IV":    round(float(iv), 4),
+            "Range": range_str,
+        })
+
+    return round(float(iv_total), 4), stats
 # ----------- WOE/IV API -----------
 @app.route("/api/woe-iv", methods=["POST"])
 def woe_iv_api():
     try:
         data = request.get_json()
         variables = data.get("variables", [])
-        target = data.get("target")
+        target    = data.get("target")
         record_id = data.get("record_id")
-        csv_path = get_csv_path()
+        var_type  = data.get("type")                # <-- NEW: frontend tells us
+        csv_path  = get_csv_path()
         df = pd.read_csv(csv_path)
         df[target] = df[target].fillna(0).astype(int)
+
         results = {}
-        
-        # First, check if we have a record with existing univariate results
+
+        # ------------------------------------------------------------------
+        # 1. Load *saved* coarse bins (univariate_results) – keep your logic
+        # ------------------------------------------------------------------
         existing_binned_columns = {}
         if record_id:
             try:
                 record_data = get_record_db(record_id)
                 if record_data and record_data.get('univariate_results'):
                     univariate_results = json.loads(record_data['univariate_results'])
-                    app.logger.debug(f"Found existing univariate results for record {record_id}")
-                    
-                    # Re-create the binned columns from univariate results
                     for var in variables:
                         if var in univariate_results:
                             var_data = univariate_results[var]
-                            var_type = var_data.get('type', 'unknown')
-                            app.logger.debug(f"Re-creating {var} binning from saved results (type: {var_type})")
-                            
-                            if var_type == 'discrete':
+                            saved_type = var_data.get('type', 'unknown')
+                            app.logger.debug(f"Re-creating {var} coarse binning from saved type: {saved_type}")
+                            if saved_type == 'discrete':
                                 _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
-                            elif var_type == 'continuous':
+                            else:   # continuous
                                 _, df[f"{var}_binned"] = coarse_bin_continuous(df.copy(), var, target)
                             existing_binned_columns[var] = True
             except Exception as e:
-                app.logger.debug(f"Could not load existing univariate results: {e}")
-        
+                app.logger.debug(f"Could not load saved univariate results: {e}")
+
+        # ------------------------------------------------------------------
+        # 2. Create coarse bins for variables that are *new* to this request
+        # ------------------------------------------------------------------
         for var in variables:
-            app.logger.debug(f"Processing WOE/IV for variable: {var}")
-            
-            # Only create binned column if we don't already have it
-            if var not in existing_binned_columns:
-                var_series = df[var]
-                
-                # Better logic for determining discrete vs continuous
-                # Check if variable name suggests it's an ID or categorical
-                is_likely_id = any(keyword in var.lower() for keyword in ['id', 'key', 'code', 'no', 'num'])
-                unique_count = var_series.nunique(dropna=True)
-                
-                if pd.api.types.is_numeric_dtype(var_series):
-                    # For numeric data, consider multiple factors
-                    if is_likely_id or unique_count <= 50:  # Increased threshold for IDs
-                        app.logger.debug(f"{var} treated as discrete (nunique={unique_count}, is_likely_id={is_likely_id})")
-                        _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
-                    else:
-                        app.logger.debug(f"{var} treated as continuous (nunique={unique_count})")
-                        _, df[f"{var}_binned"] = coarse_bin_continuous(df.copy(), var, target)
-                else:
-                    app.logger.debug(f"{var} treated as discrete (non-numeric)")
+            if var in existing_binned_columns:
+                continue
+
+            var_series = df[var]
+            is_likely_id = any(k in var.lower() for k in ['id', 'key', 'code', 'no', 'num'])
+            unique_cnt   = var_series.nunique(dropna=True)
+
+            if pd.api.types.is_numeric_dtype(var_series):
+                if is_likely_id or unique_cnt <= 50:
                     _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
-            
-            # Check how many bins were created
-            unique_bins = df[f"{var}_binned"].nunique()
-            app.logger.debug(f"{var} coarse binning has {unique_bins} bins")
-            
-            # Load saved merges (if any) for this var
-            merges = None
-            if record_id:
+                else:
+                    _, df[f"{var}_binned"] = coarse_bin_continuous(df.copy(), var, target)
+            else:
+                _, df[f"{var}_binned"], _ = coarse_bin_discrete(df.copy(), var, target)
+
+        # ------------------------------------------------------------------
+        # 3. Load *saved fine-bin merges* for every variable (if any)
+        # ------------------------------------------------------------------
+        merges_per_var = {}
+        if record_id:
+            for var in variables:
                 finebin_details = get_finebin_details_db(record_id, var)
                 if finebin_details:
                     merges = {}
@@ -1077,40 +1138,50 @@ def woe_iv_api():
                             merges[str(row["group_id"])] = bins
                         except Exception:
                             pass
-                    app.logger.debug(f"{var} has {len(merges)} fine bin merges")
-            
-            # Compute WOE/IV on the (possibly) merged final bins
-            iv, stats = calculate_woe_iv(df.copy(), var, target, bin_merges=merges)
-            app.logger.debug(f"{var} WOE/IV calculation produced {len(stats)} bins (IV={iv})")
+                    if merges:
+                        merges_per_var[var] = merges
+                        app.logger.debug(f"{var} → {len(merges)} fine-bin merges loaded")
+        # ------------------------------------------------------------------
+        # 4. Compute WOE/IV (now receives explicit type & merges)
+        # ------------------------------------------------------------------
+        for var in variables:
+            merges = merges_per_var.get(var)          # may be None
+            iv, stats = calculate_woe_iv(
+                df.copy(),
+                variable=var,
+                target=target,
+                bin_merges=merges,
+                var_type=var_type                 # <-- pass the frontend type
+            )
             results[var] = {"iv": iv, "stats": stats}
-        # 4) Save WOE/IV results to the records table
+            app.logger.debug(f"{var} → IV={iv}, {len(stats)} bins")
+
+        # ------------------------------------------------------------------
+        # 5. Persist the new WOE/IV results back to the record
+        # ------------------------------------------------------------------
         if record_id:
             conn = get_db_connection()
-            cur = conn.cursor()
+            cur  = conn.cursor()
             cur.execute("SELECT woe_iv_results FROM records WHERE id = %s", (record_id,))
             row = cur.fetchone()
-            existing_woe_iv = {}
+            existing_woe = {}
             if row and row[0]:
                 try:
-                    loaded = json.loads(row[0])
-                    if isinstance(loaded, dict):
-                        existing_woe_iv = loaded
-                    else:
-                        # If it's a list or anything else, replace with empty dict
-                        existing_woe_iv = {}
+                    existing_woe = json.loads(row[0])
                 except json.JSONDecodeError:
-                    existing_woe_iv = {}
-            # Update with new results
-            existing_woe_iv.update(results)
+                    existing_woe = {}
+            existing_woe.update(results)
             cur.execute(
                 "UPDATE records SET woe_iv_results = %s WHERE id = %s",
-                (json.dumps(existing_woe_iv), record_id)
+                (json.dumps(existing_woe), record_id)
             )
             conn.commit()
             conn.close()
+
         return jsonify(results)
+
     except Exception as e:
-        print("woe_iv_api failed:", str(e))
+        app.logger.error(f"woe_iv_api failed: {e}")
         return jsonify({"error": str(e)}), 500
 
 # ----------- Save Record -----------
