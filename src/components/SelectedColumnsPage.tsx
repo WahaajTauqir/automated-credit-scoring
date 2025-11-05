@@ -771,25 +771,7 @@ const SelectedColumnsPage = () => {
                 return undefined;
               };
 
-              // === RECALCULATE TOTAL GOOD/BAD FROM CURRENT BINS (fineRows) ===
-              const eps = 0.5;
-              const totalGoodRaw = fineRows.reduce((sum: number, row: any) => sum + (getFirstNumeric(row.Good, row['Good'], 0) ?? 0), 0);
-              const totalBadRaw = fineRows.reduce((sum: number, row: any) => sum + (getFirstNumeric(row.Bad, row['Bad'], 0) ?? 0), 0);
-              const nBins = fineRows.length;
-              const adjTotalGood = totalGoodRaw + eps * nBins;
-              const adjTotalBad = totalBadRaw + eps * nBins;
-
-              // === MAP WOE/IV FROM woeIvResults (authoritative) ===
-              const woeMap = new Map<string, { woe: number; iv: number }>();
-              woeStats.forEach((row: any) => {
-                const label = String(row.Bin || row.temp_bin || row.Range || '');
-                const normalizedLabel = normalizeLabel(label);
-                const woeVal = getFirstNumeric(row.WOE, row.woe, row.WoE, row.Woe, row.woe_value, row.WOEValue) ?? 0;
-                const ivVal = getFirstNumeric(row.IV, row.iv, row.Iv, row.iv_contribution, row.IVContribution) ?? 0;
-                woeMap.set(normalizedLabel, { woe: woeVal, iv: ivVal });
-              });
-
-              // === SORT BINS (same as before) ===
+              // === SORT BINS ===
               const sortedRows = [...fineRows].sort((a: any, b: any) => {
                 const getMin = (row: any) => {
                   const candidate = row.Min ?? row.min ?? row.MinValue ?? row.minValue ?? null;
@@ -811,24 +793,13 @@ const SelectedColumnsPage = () => {
                 return labelA.localeCompare(labelB);
               });
 
-              // === CHART DATA (WOE/IV from woeIvResults) ===
-              const chartValueMap = new Map<string, { woe: number; iv: number }>();
-              const chartRows = sortedRows.map((row: any, idx: number) => {
-                const labelRaw = row[`${activeColumn}_fine_binned`] ?? row[`${activeColumn}_binned`] ?? row.Bin ?? row.bin ?? `Bin_${idx + 1}`;
-                const label = String(labelRaw);
-                const normalizedLabel = normalizeLabel(label);
-
-                // Try to get WOE/IV from original stats (fallback to 0)
-                const mapped = woeMap.get(normalizedLabel) || woeMap.get(label);
-                const resolvedWoe = mapped?.woe ?? 0;
-                const resolvedIv = mapped?.iv ?? 0;
-
-                chartValueMap.set(label, { woe: resolvedWoe, iv: resolvedIv });
-                if (normalizedLabel !== label) {
-                  chartValueMap.set(normalizedLabel, { woe: resolvedWoe, iv: resolvedIv });
-                }
-
-                return { Bin: label, WOE: resolvedWoe, IV: resolvedIv };
+              // === CHART DATA (WOE/IV from backend) ===
+              const chartRows = woeStats.map((row: any) => {
+                return {
+                  Bin: row.Bin || row.temp_bin || row.Range || '',
+                  WOE: row.WOE || row.woe || row.WoE || row.Woe || row.woe_value || row.WOEValue || 0,
+                  IV: row.IV || row.iv || row.Iv || row.iv_contribution || row.IVContribution || 0
+                };
               });
 
               return (
@@ -878,19 +849,31 @@ const SelectedColumnsPage = () => {
                               const maxVal = bin.Max ?? bin.max ?? bin.MaxValue ?? bin.maxValue ?? null;
                               const minDisplay = minVal !== null && minVal !== undefined ? minVal : (isContinuousColumn ? 'N/A' : '—');
                               const maxDisplay = maxVal !== null && maxVal !== undefined ? maxVal : (isContinuousColumn ? 'N/A' : '—');
-                              const badValue = getFirstNumeric(bin.Bad, bin['Bad'], 0) ?? 0;
-                              const goodValue = getFirstNumeric(bin.Good, bin['Good'], 0) ?? 0;
-                              const totalValue = bin.Total ?? bin['Total'] ?? (badValue + goodValue);
+
+                              // Get authoritative values from backend WOE/IV results
+                              const normalizedLabel = normalizeLabel(labelVal);
+                              const woeData = woeStats.find((row: any) => 
+                                (row.Bin || row.temp_bin || row.Range || '') === (labelVal || normalizedLabel)
+                              ) || {
+                                WOE: 0,
+                                IV: 0,
+                                'Dist_Good_%': 0,
+                                'Dist_Bad_%': 0,
+                                Good: 0,
+                                Bad: 0,
+                                Total: 0
+                              };
+
+                              // FIXED: Properly handle the logical OR and nullish coalescing with parentheses
+                              const badValue = (woeData.bad || (getFirstNumeric(bin.Bad, bin['Bad'], 0) ?? 0));
+                              const goodValue = (woeData.good || (getFirstNumeric(bin.Good, bin['Good'], 0) ?? 0));
+                              const totalValue = (woeData.total || (bin.Total ?? (bin['Total'] ?? (badValue + goodValue))));
+
                               const badRateRaw = typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'] : (typeof bin.BadRate === 'number' ? bin.BadRate : null);
                               const freqRaw = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
-                              const normalizedLabel = normalizeLabel(labelVal);
-                              const woeData = chartValueMap.get(labelVal) || chartValueMap.get(normalizedLabel) || { woe: 0, iv: 0 };
+
                               const isMergedLabel = Boolean(history[labelVal]);
                               const isSelected = selectedLabels.includes(labelVal);
-
-                              // === RECALCULATE Dist Good / Dist Bad from current bin counts ===
-                              const distGood = ((goodValue + eps) / adjTotalGood) * 100;
-                              const distBad = ((badValue + eps) / adjTotalBad) * 100;
 
                               return (
                                 <tr
@@ -944,10 +927,12 @@ const SelectedColumnsPage = () => {
                                   <td>{totalValue}</td>
                                   <td>{badRateRaw !== null && badRateRaw !== undefined ? badRateRaw.toFixed(4) : '0.0000'}</td>
                                   <td>{freqRaw !== null && freqRaw !== undefined ? freqRaw.toFixed(2) : '0.00'}</td>
-                                  <td>{distGood.toFixed(4)}</td>
-                                  <td>{distBad.toFixed(4)}</td>
-                                  <td>{formatToFourDecimals(woeData.woe)}</td>
-                                  <td>{formatToFourDecimals(woeData.iv)}</td>
+                                  {/* Use authoritative Dist Good/Bad from backend */}
+                                  <td>{formatToFourDecimals(woeData['Dist_Good_%'] || 0)}</td>
+                                  <td>{formatToFourDecimals(woeData['Dist_Bad_%'] || 0)}</td>
+                                  {/* Use authoritative WOE/IV from backend */}
+                                  <td>{formatToFourDecimals(woeData.WOE || 0)}</td>
+                                  <td>{formatToFourDecimals(woeData.IV || 0)}</td>
                                   <td>
                                     {isMergedLabel ? (
                                       <button
@@ -968,42 +953,42 @@ const SelectedColumnsPage = () => {
                           )}
                         </tbody>
 
-                        {/* === TOTALS ROW (Updated) === */}
+                        {/* === TOTALS ROW (Use authoritative data from backend) === */}
                         <tfoot>
                           {(() => {
-                            const totals = (() => {
-                              let totalBad = 0;
-                              let totalGood = 0;
-                              let totalTotal = 0;
-                              let sumFreq = 0;
-                              let freqProvided = false;
-                              let sumIv = 0;
+                            // Calculate totals from authoritative backend data
+                            let totalBad = 0;
+                            let totalGood = 0;
+                            let totalTotal = 0;
+                            let sumFreq = 0;
+                            let freqProvided = false;
 
-                              sortedRows.forEach((bin: any) => {
-                                const bad = getFirstNumeric(bin.Bad, bin['Bad'], 0) ?? 0;
-                                const good = getFirstNumeric(bin.Good, bin['Good'], 0) ?? 0;
-                                const total = getFirstNumeric(bin.Total, bin['Total']) ?? (bad + good);
-                                totalBad += bad;
-                                totalGood += good;
-                                totalTotal += total;
+                            sortedRows.forEach((bin: any) => {
+                              const labelValRaw = bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? '';
+                              const labelVal = String(labelValRaw);
+                              const normalizedLabel = normalizeLabel(labelVal);
 
-                                const freq = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : typeof bin.Freq === 'number' ? bin.Freq : null;
-                                if (freq !== null) {
-                                  sumFreq += freq;
-                                  freqProvided = true;
-                                }
+                              // Get authoritative counts from backend
+                              const woeData = woeStats.find((row: any) => 
+                                (row.Bin || row.temp_bin || row.Range || '') === (labelVal || normalizedLabel)
+                              ) || { Good: 0, Bad: 0, Total: 0 };
 
-                                const label = String(bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? '');
-                                const entry = chartValueMap.get(label) || chartValueMap.get(normalizeLabel(label)) || { iv: 0 };
-                                sumIv += Number(entry.iv) || 0;
-                              });
+                              totalBad += woeData.Bad || 0;
+                              totalGood += woeData.Good || 0;
+                              totalTotal += woeData.Total || 0;
 
-                              const badRatePercent = totalTotal > 0 ? (totalBad / totalTotal) * 100 : 0;
-                              const freqPercent = freqProvided ? sumFreq : (totalTotal > 0 ? 100 : 0);
-                              const totalIv = Number(woeIvResults[activeColumn]?.iv ?? sumIv) || 0;
+                              const freq = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
+                              if (freq !== null) {
+                                sumFreq += freq;
+                                freqProvided = true;
+                              }
+                            });
 
-                              return { totalBad, totalGood, totalTotal, badRatePercent, freqPercent, totalIv };
-                            })();
+                            const badRatePercent = totalTotal > 0 ? (totalBad / totalTotal) * 100 : 0;
+                            const freqPercent = freqProvided ? sumFreq : (totalTotal > 0 ? 100 : 0);
+
+                            // Use authoritative total IV from backend
+                            const totalIv = Number(woeIvResults[activeColumn]?.iv ?? 0) || 0;
 
                             return (
                               <tr className="totals-row">
@@ -1017,15 +1002,15 @@ const SelectedColumnsPage = () => {
                                 ) : (
                                   <td />
                                 )}
-                                <td>{totals.totalBad}</td>
-                                <td>{totals.totalGood}</td>
-                                <td>{totals.totalTotal}</td>
-                                <td>{totals.badRatePercent.toFixed(2)}</td>
-                                <td>{totals.freqPercent.toFixed(2)}</td>
+                                <td>{totalBad}</td>
+                                <td>{totalGood}</td>
+                                <td>{totalTotal}</td>
+                                <td>{badRatePercent.toFixed(2)}</td>
+                                <td>{freqPercent.toFixed(2)}</td>
                                 <td />
                                 <td />
                                 <td />
-                                <td className="iv-total">{formatToFourDecimals(totals.totalIv)}</td>
+                                <td className="iv-total">{formatToFourDecimals(totalIv)}</td>
                                 <td />
                               </tr>
                             );
