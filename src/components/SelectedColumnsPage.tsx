@@ -47,6 +47,8 @@ const SelectedColumnsPage = () => {
   const [testScoreKS, setTestScoreKS] = useState<number | null>(null);
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  // Add to your existing state declarations
+  const [binScoringMetrics, setBinScoringMetrics] = useState<Record<string, any[]>>({});
   // Removed UI sorting controls per request; keep search only
   // Helper to format IV class if needed later
   // (kept here for possible future IV badge usage)
@@ -93,6 +95,108 @@ const SelectedColumnsPage = () => {
     }
   }, [selectedColumns, woeIvResults, woeReadyColumns]);
   // Utility functions
+
+  // Calculate metrics for all bins of a column
+  // Calculate metrics for all bins of a column
+  const calculateAllBinMetrics = async (columnName: string, bins: any[]) => {
+    try {
+      const binsData = bins.map(bin => {
+        const good = bin.Good || bin.good || 0;
+        const bad = bin.Bad || bin.bad || 0;
+        const total = bin.Total || bin.total || (good + bad);
+        const binRange = bin.Range || bin.range || '';
+
+        // Use the same bin identifier that will be used in the table
+        const binName = bin[`${columnName}_fine_binned`] || bin[`${columnName}_binned`] || bin.Bin || bin.bin || 'Unknown';
+
+        return {
+          bin_name: String(binName), // Ensure it's a string
+          bin_range: binRange,
+          good_count: good,
+          bad_count: bad,
+          total_count: total
+        };
+      });
+
+      const response = await fetch('http://localhost:5000/api/calculate-bin-metrics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bins: binsData })
+      });
+
+      // Some backend responses may include non-standard tokens (Infinity, -Infinity, NaN)
+      // which JSON.parse in the browser will reject. Read as text first and sanitize
+      // those tokens before parsing.
+      const text = await response.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch (parseErr) {
+        try {
+          const sanitized = text
+            // unquoted Infinity/-Infinity/NaN (common from some JSON serializers)
+            .replace(/:\s*Infinity(,|\s|})/g, ': null$1')
+            .replace(/:\s*-Infinity(,|\s|})/g, ': null$1')
+            .replace(/:\s*NaN(,|\s|})/g, ': null$1');
+          data = JSON.parse(sanitized);
+        } catch (e2) {
+          console.error('Failed to parse calculate-bin-metrics response:', parseErr, e2, text);
+          return null;
+        }
+      }
+      if (data.success) {
+        setBinScoringMetrics(prev => ({
+          ...prev,
+          [columnName]: data.bin_metrics
+        }));
+        return data.bin_metrics;
+      } else {
+        console.error('Error calculating bin metrics:', data.error);
+        return null;
+      }
+    } catch (error) {
+      console.error('Failed to calculate bin metrics:', error);
+      return null;
+    }
+  };
+
+  // Call this when bin data changes
+  // Add this useEffect to debug bin matching
+  useEffect(() => {
+    if (activeColumn && binScoringMetrics[activeColumn] && fineBinResults[activeColumn]) {
+      console.log('=== BIN MATCHING DEBUG ===');
+      console.log('Active Column:', activeColumn);
+      console.log('Bin Scoring Metrics:', binScoringMetrics[activeColumn]);
+      console.log('Fine Bin Results:', fineBinResults[activeColumn]);
+
+      // Check if we can match the first bin
+      const firstBin = fineBinResults[activeColumn][0];
+      if (firstBin) {
+        const firstBinLabel = firstBin[`${activeColumn}_fine_binned`] || firstBin[`${activeColumn}_binned`] || firstBin.Bin || firstBin.bin;
+        console.log('First bin label:', firstBinLabel);
+        const matchedMetric = binScoringMetrics[activeColumn]?.find(m => m.bin_name === String(firstBinLabel));
+        console.log('Matched metric for first bin:', matchedMetric);
+      }
+    }
+  }, [activeColumn, binScoringMetrics, fineBinResults]);
+  // Ensure bin scoring metrics are calculated whenever fine bin results load for the active column
+  useEffect(() => {
+    const tryCompute = async () => {
+      try {
+        if (!activeColumn) return;
+        const bins = fineBinResults[activeColumn];
+        if (!Array.isArray(bins) || bins.length === 0) return;
+        // Only request metrics if we don't already have them
+        if (!binScoringMetrics[activeColumn] || binScoringMetrics[activeColumn].length === 0) {
+          await calculateAllBinMetrics(activeColumn, bins);
+        }
+      } catch (e) {
+        console.error('Failed to calculate bin scoring metrics for', activeColumn, e);
+      }
+    };
+    tryCompute();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeColumn, fineBinResults]);
   const formatToFourDecimals = (value: any) => (typeof value === 'number' ? value.toFixed(4) : String(value));
   const showNotification = (message: string) => {
     setNotification(message);
@@ -182,6 +286,12 @@ const SelectedColumnsPage = () => {
       const data = await res.json();
       if (data.success && !data.error) {
         setFineBinResults((prev) => ({ ...prev, [col]: data.stats || [] }));
+        // Recompute scoring metrics for the restored bins
+        try {
+          await calculateAllBinMetrics(col, data.stats || []);
+        } catch (e) {
+          console.warn('Failed to calculate bin scoring metrics after loading saved fine bins for', col, e);
+        }
         setBinMergeHistory((prev) => ({ ...prev, [col]: data.bin_merges || savedMerges }));
         setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
         return { merges: data.bin_merges || savedMerges };
@@ -252,6 +362,12 @@ const SelectedColumnsPage = () => {
       setUnivariateResults((prev) => ({ ...prev, [col]: data[col] || data }));
       setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
       setFineBinResults((prev) => ({ ...prev, [col]: coarseStats }));
+      // Precompute bin scoring metrics for the initial fine/coarse bins
+      try {
+        await calculateAllBinMetrics(col, coarseStats || []);
+      } catch (e) {
+        console.warn('Failed to calculate initial bin scoring metrics for', col, e);
+      }
       setBinMergeHistory((prev) => ({ ...prev, [col]: prev[col] || {} }));
       setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
       // Load any saved fine bins but do NOT auto-select the column for modeling when clicking the card
@@ -343,12 +459,18 @@ const SelectedColumnsPage = () => {
       setBinMergeHistory(prev => ({ ...prev, [col]: mergesReturned }));
       setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
 
+      // Recalculate bin scoring metrics (G/B odd, index, combined index, etc.) for the updated bins
+      try {
+        await calculateAllBinMetrics(col, fineData.stats || []);
+      } catch (e) {
+        console.warn('Failed to recalculate bin scoring metrics after merge for', col, e);
+      }
+
       await persistFineBinColumn(col, mergesReturned);
 
       // Recompute WOE/IV with correct merges
       await fetchWoeIv(col, mergesReturned, false);
       setWoeReadyColumns(prev => new Set(prev).add(col));
-
       showNotification(`Binning completed for ${col}`);
     } catch (err) {
       console.error('Error in runBinning:', err);
@@ -420,6 +542,13 @@ const SelectedColumnsPage = () => {
     setBinMergeHistory(prev => ({ ...prev, [col]: data.bin_merges || newHistory }));
     setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
 
+    // Recalculate metrics for the updated bins
+    try {
+      await calculateAllBinMetrics(col, data.stats || []);
+    } catch (e) {
+      console.warn('Failed to recalculate bin scoring metrics after unmerge for', col, e);
+    }
+
     await persistFineBinColumn(col, data.bin_merges || newHistory);
     await fetchWoeIv(col, data.bin_merges || newHistory, false);
     setWoeReadyColumns(prev => new Set(prev).add(col));
@@ -446,7 +575,15 @@ const SelectedColumnsPage = () => {
     });
     const data = await res.json();
     setCoarseBinResults(prev => ({ ...prev, [col]: data[col]?.stats || [] }));
-    setFineBinResults(prev => ({ ...prev, [col]: data[col]?.stats || [] }));
+    const newStats = data[col]?.stats || [];
+    setFineBinResults(prev => ({ ...prev, [col]: newStats }));
+
+    // Recompute metrics for reset bins
+    try {
+      await calculateAllBinMetrics(col, newStats);
+    } catch (e) {
+      console.warn('Failed to recalculate bin scoring metrics after reset for', col, e);
+    }
 
     await persistFineBinColumn(col, {});
 
@@ -762,14 +899,7 @@ const SelectedColumnsPage = () => {
               const selectedCount = selectedLabels.length;
               const woeStats = woeIvResults[activeColumn]?.stats || [];
               const normalizeLabel = (value: string) => value.replace(/\s+/g, ' ').trim();
-              const getFirstNumeric = (...values: any[]): number | undefined => {
-                for (const val of values) {
-                  if (val === null || val === undefined || val === '') continue;
-                  const num = Number(val);
-                  if (Number.isFinite(num)) return num;
-                }
-                return undefined;
-              };
+              
 
               // === SORT BINS ===
               const sortedRows = [...fineRows].sort((a: any, b: any) => {
@@ -821,11 +951,15 @@ const SelectedColumnsPage = () => {
                             ) : (
                               <th>Range</th>
                             )}
-                            <th>Bad</th>
-                            <th>Good</th>
+                            <th>0 (Good)</th>
+                            <th>1 (Bad)</th>
                             <th>Total</th>
+                            <th>0/1 (G/B)</th>
                             <th>Bad Rate (%)</th>
                             <th>Freq%</th>
+                            <th>G/B Odd</th>
+                            <th>Index</th>
+                            <th>G/B Index</th>
                             <th>Dist Good (%)</th>
                             <th>Dist Bad (%)</th>
                             <th>WOE</th>
@@ -836,7 +970,7 @@ const SelectedColumnsPage = () => {
                         <tbody>
                           {sortedRows.length === 0 ? (
                             <tr>
-                              <td colSpan={isContinuousColumn ? 14 : 13} style={{ textAlign: 'center', padding: '16px' }}>
+                              <td colSpan={isContinuousColumn ? 17 : 16} style={{ textAlign: 'center', padding: '16px' }}>
                                 No binning results available.
                               </td>
                             </tr>
@@ -852,7 +986,7 @@ const SelectedColumnsPage = () => {
 
                               // Get authoritative values from backend WOE/IV results
                               const normalizedLabel = normalizeLabel(labelVal);
-                              const woeData = woeStats.find((row: any) => 
+                              const woeData = woeStats.find((row: any) =>
                                 (row.Bin || row.temp_bin || row.Range || '') === (labelVal || normalizedLabel)
                               ) || {
                                 WOE: 0,
@@ -864,10 +998,10 @@ const SelectedColumnsPage = () => {
                                 Total: 0
                               };
 
-                              // FIXED: Properly handle the logical OR and nullish coalescing with parentheses
-                              const badValue = (woeData.bad || (getFirstNumeric(bin.Bad, bin['Bad'], 0) ?? 0));
-                              const goodValue = (woeData.good || (getFirstNumeric(bin.Good, bin['Good'], 0) ?? 0));
-                              const totalValue = (woeData.total || (bin.Total ?? (bin['Total'] ?? (badValue + goodValue))));
+                              // FIXED: Get Good/Bad counts - use authoritative data from backend
+                              const goodValue = woeData.Good || bin.Good || bin.good || 0;
+                              const badValue = woeData.Bad || bin.Bad || bin.bad || 0;
+                              const totalValue = woeData.Total || bin.Total || bin.total || (goodValue + badValue);
 
                               const badRateRaw = typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'] : (typeof bin.BadRate === 'number' ? bin.BadRate : null);
                               const freqRaw = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
@@ -922,15 +1056,69 @@ const SelectedColumnsPage = () => {
                                       {rangeValue || '—'}
                                     </td>
                                   )}
-                                  <td>{badValue}</td>
-                                  <td>{goodValue}</td>
+
+                                  {/* 0/1 Columns - Good/Bad counts */}
+                                  <td style={{ color: 'green', fontWeight: 'bold' }}>{goodValue}</td>
+                                  <td style={{ color: 'red', fontWeight: 'bold' }}>{badValue}</td>
                                   <td>{totalValue}</td>
+
+                                  {/* 0/1 Ratio Column (Good/Bad) */}
+                                  <td>
+                                    {(() => {
+                                      const binMetrics = binScoringMetrics[activeColumn]?.find(
+                                        (m: any) => m.bin_name === String(labelValRaw)
+                                      );
+                                      return binMetrics?.zero_one_ratio || '—';
+                                    })()}
+                                  </td>
+
                                   <td>{badRateRaw !== null && badRateRaw !== undefined ? badRateRaw.toFixed(4) : '0.0000'}</td>
                                   <td>{freqRaw !== null && freqRaw !== undefined ? freqRaw.toFixed(2) : '0.00'}</td>
-                                  {/* Use authoritative Dist Good/Bad from backend */}
+
+                                  {/* G/B Metrics Columns */}
+                                  <td>
+                                    {(() => {
+                                      const binMetrics = binScoringMetrics[activeColumn]?.find(
+                                        (m: any) => m.bin_name === String(labelValRaw)
+                                      );
+                                      return binMetrics?.gb_odd || '—';
+                                    })()}
+                                  </td>
+                                  <td>
+                                    {(() => {
+                                      const binMetrics = binScoringMetrics[activeColumn]?.find(
+                                        (m: any) => m.bin_name === String(labelValRaw)
+                                      );
+                                      return (
+                                        <span style={{
+                                          color: binMetrics?.gb_index === 'G' ? 'green' : 'red',
+                                          fontWeight: 'bold'
+                                        }}>
+                                          {binMetrics?.gb_index || '—'}
+                                        </span>
+                                      );
+                                    })()}
+                                  </td>
+
+                                  {/* Combined Index Column */}
+                                  <td>
+                                    {(() => {
+                                      const binMetrics = binScoringMetrics[activeColumn]?.find(
+                                        (m: any) => m.bin_name === String(labelValRaw)
+                                      );
+                                      return (
+                                        <span style={{
+                                          color: binMetrics?.gb_index === 'G' ? 'green' : 'red',
+                                          fontWeight: 'bold'
+                                        }}>
+                                          {binMetrics?.combined_index || '—'}
+                                        </span>
+                                      );
+                                    })()}
+                                  </td>
+
                                   <td>{formatToFourDecimals(woeData['Dist_Good_%'] || 0)}</td>
                                   <td>{formatToFourDecimals(woeData['Dist_Bad_%'] || 0)}</td>
-                                  {/* Use authoritative WOE/IV from backend */}
                                   <td>{formatToFourDecimals(woeData.WOE || 0)}</td>
                                   <td>{formatToFourDecimals(woeData.IV || 0)}</td>
                                   <td>
@@ -952,7 +1140,6 @@ const SelectedColumnsPage = () => {
                             })
                           )}
                         </tbody>
-
                         {/* === TOTALS ROW (Use authoritative data from backend) === */}
                         <tfoot>
                           {(() => {
@@ -969,7 +1156,7 @@ const SelectedColumnsPage = () => {
                               const normalizedLabel = normalizeLabel(labelVal);
 
                               // Get authoritative counts from backend
-                              const woeData = woeStats.find((row: any) => 
+                              const woeData = woeStats.find((row: any) =>
                                 (row.Bin || row.temp_bin || row.Range || '') === (labelVal || normalizedLabel)
                               ) || { Good: 0, Bad: 0, Total: 0 };
 
@@ -987,6 +1174,9 @@ const SelectedColumnsPage = () => {
                             const badRatePercent = totalTotal > 0 ? (totalBad / totalTotal) * 100 : 0;
                             const freqPercent = freqProvided ? sumFreq : (totalTotal > 0 ? 100 : 0);
 
+                            // Calculate overall 0/1 ratio (Good/Bad)
+                            const overallZeroOneRatio = totalBad > 0 ? totalGood / totalBad : 'Inf';
+
                             // Use authoritative total IV from backend
                             const totalIv = Number(woeIvResults[activeColumn]?.iv ?? 0) || 0;
 
@@ -1002,11 +1192,18 @@ const SelectedColumnsPage = () => {
                                 ) : (
                                   <td />
                                 )}
-                                <td>{totalBad}</td>
-                                <td>{totalGood}</td>
+                                <td style={{ color: 'green', fontWeight: 'bold' }}>{totalGood}</td>
+                                <td style={{ color: 'red', fontWeight: 'bold' }}>{totalBad}</td>
                                 <td>{totalTotal}</td>
+                                <td>{overallZeroOneRatio === 'Inf' ? 'Inf' : overallZeroOneRatio.toFixed(4)}</td>
                                 <td>{badRatePercent.toFixed(2)}</td>
                                 <td>{freqPercent.toFixed(2)}</td>
+
+                                {/* 3 empty cells for G/B Odd, G/B Index, and Index */}
+                                <td />
+                                <td />
+                                <td />
+
                                 <td />
                                 <td />
                                 <td />

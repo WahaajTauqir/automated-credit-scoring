@@ -887,6 +887,155 @@ def ai_classify_columns():
         print('ai_classify_columns error:', traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
+# ----------- Credit Scoring Metrics Calculation -----------
+@app.route('/api/calculate-scoring-metrics', methods=['POST'])
+def calculate_scoring_metrics():
+    """
+    Calculate credit scoring metrics including:
+    - 0/1 (Good/Bad ratio)
+    - G/B Odd (based on 0/1 ratio and total 0/1)
+    - G/B Index (B/G label)
+    - Index (Combined rounded G/B Odd + G/B Index)
+    """
+    try:
+        data = request.get_json()
+        good_count = data.get('good_count', 0)
+        bad_count = data.get('bad_count', 0)
+        total_count = data.get('total_count', 0)
+        total_zero_one_ratio = data.get('total_zero_one_ratio', 0)
+        
+        # Validate inputs
+        if good_count < 0 or bad_count < 0 or total_count < 0:
+            return jsonify({"error": "Counts cannot be negative"}), 400
+        
+        # Calculate 0/1 ratio - Based on your image, it seems to be total/bad
+        # But you want 716/9 = 79.5556, so let's use good/bad
+        if bad_count > 0:
+            zero_one_ratio = good_count / bad_count
+        else:
+            zero_one_ratio = float('inf')
+        
+        # G/B Odd calculation
+        if zero_one_ratio < total_zero_one_ratio:
+            if zero_one_ratio > 0:
+                gb_odd = (total_zero_one_ratio / zero_one_ratio) * 100
+            else:
+                gb_odd = float('inf')
+        else:
+            if total_zero_one_ratio > 0:
+                gb_odd = (zero_one_ratio / total_zero_one_ratio) * 100
+            else:
+                gb_odd = float('inf')
+        
+        # G/B Index
+        gb_index = "B" if zero_one_ratio < total_zero_one_ratio else "G"
+        
+        # Combined Index
+        rounded_gb_odd = round(gb_odd) if gb_odd != float('inf') else 0
+        combined_index = f"{int(rounded_gb_odd)}{gb_index}"
+        
+        results = {
+            'good_count': good_count,
+            'bad_count': bad_count,
+            'total_count': total_count,
+            'zero_one_ratio': round(zero_one_ratio, 4) if zero_one_ratio != float('inf') else 'Inf',
+            'gb_odd': round(gb_odd, 0) if gb_odd != float('inf') else 'Inf',
+            'gb_index': gb_index,
+            'combined_index': combined_index,
+            'bad_rate': round((bad_count / total_count * 100), 2) if total_count > 0 else 0
+        }
+        
+        return jsonify({
+            "success": True,
+            "metrics": results
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Failed to calculate scoring metrics: {str(e)}"}), 500
+
+# ----------- Batch Calculate Scoring Metrics for Bins -----------
+@app.route('/api/calculate-bin-metrics', methods=['POST'])
+def calculate_bin_metrics():
+    """
+    Calculate scoring metrics for multiple bins at once
+    """
+    try:
+        data = request.get_json()
+        bins_data = data.get('bins', [])
+        
+        if not bins_data:
+            return jsonify({"error": "No bin data provided"}), 400
+        
+        # Calculate totals for overall ratio
+        total_good = sum(bin_data.get('good_count', 0) for bin_data in bins_data)
+        total_bad = sum(bin_data.get('bad_count', 0) for bin_data in bins_data)
+        
+        # Calculate overall 0/1 ratio
+        if total_bad > 0:
+            total_zero_one_ratio = total_good / total_bad
+        else:
+            total_zero_one_ratio = float('inf')
+        
+        results = []
+        
+        for bin_data in bins_data:
+            good_count = bin_data.get('good_count', 0)
+            bad_count = bin_data.get('bad_count', 0)
+            total_count = bin_data.get('total_count', 0)
+            bin_name = bin_data.get('bin_name', 'Unknown')
+            bin_range = bin_data.get('bin_range', '')
+            
+            # Calculate 0/1 ratio - Using good/bad as requested
+            if bad_count > 0:
+                zero_one_ratio = good_count / bad_count
+            else:
+                zero_one_ratio = float('inf')
+            
+            # G/B Odd calculation
+            if zero_one_ratio < total_zero_one_ratio:
+                if zero_one_ratio > 0:
+                    gb_odd = (total_zero_one_ratio / zero_one_ratio) * 100
+                else:
+                    gb_odd = float('inf')
+            else:
+                if total_zero_one_ratio > 0:
+                    gb_odd = (zero_one_ratio / total_zero_one_ratio) * 100
+                else:
+                    gb_odd = float('inf')
+            
+            # G/B Index
+            gb_index = "B" if zero_one_ratio < total_zero_one_ratio else "G"
+            
+            # Combined Index
+            rounded_gb_odd = round(gb_odd) if gb_odd != float('inf') else 0
+            combined_index = f"{int(rounded_gb_odd)}{gb_index}"
+            
+            bin_metrics = {
+                'bin_name': bin_name,
+                'bin_range': bin_range,
+                'good_count': good_count,
+                'bad_count': bad_count,
+                'total_count': total_count,
+                'zero_one_ratio': round(zero_one_ratio, 4) if zero_one_ratio != float('inf') else 'Inf',
+                'gb_odd': round(gb_odd, 0) if gb_odd != float('inf') else 'Inf',
+                'gb_index': gb_index,
+                'combined_index': combined_index,
+                'bad_rate': round((bad_count / total_count * 100), 2) if total_count > 0 else 0
+            }
+            
+            results.append(bin_metrics)
+        
+        return jsonify({
+            "success": True,
+            "bin_metrics": results,
+            "total_zero_one_ratio": round(total_zero_one_ratio, 4) if total_zero_one_ratio != float('inf') else 'Inf',
+            "total_good": total_good,
+            "total_bad": total_bad
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Failed to calculate bin metrics: {str(e)}"}), 500
+
 # ----------- WOE/IV Calculation -----------
 def calculate_woe_iv(df, variable, target, bin_merges=None, var_type=None):
     """
