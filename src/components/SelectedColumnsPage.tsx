@@ -899,7 +899,59 @@ const SelectedColumnsPage = () => {
               const selectedCount = selectedLabels.length;
               const woeStats = woeIvResults[activeColumn]?.stats || [];
               const normalizeLabel = (value: string) => value.replace(/\s+/g, ' ').trim();
-              
+              const standardizeKey = (value: string) => normalizeLabel(value).toLowerCase();
+
+              const woeLookup = (() => {
+                const map = new Map<string, any>();
+                woeStats.forEach((row: any) => {
+                  const candidates = [
+                    row.Bin,
+                    row.bin,
+                    row.temp_bin,
+                    row.Range,
+                    row.range,
+                  ];
+                  candidates.forEach((candidate) => {
+                    if (candidate === null || candidate === undefined) return;
+                    const key = standardizeKey(String(candidate));
+                    if (!map.has(key)) {
+                      map.set(key, row);
+                    }
+                  });
+                });
+                return map;
+              })();
+
+              const getWoeRow = (label: string, range?: string) => {
+                const direct = woeLookup.get(standardizeKey(label));
+                if (direct) return direct;
+                if (range) {
+                  const rangeMatch = woeLookup.get(standardizeKey(range));
+                  if (rangeMatch) return rangeMatch;
+                }
+                return woeStats.find((row: any) => {
+                  const rowLabel = row.Bin || row.temp_bin || row.Range || '';
+                  return normalizeLabel(String(rowLabel)) === normalizeLabel(label);
+                }) || null;
+              };
+
+              const pickNumeric = (...values: any[]) => {
+                for (const value of values) {
+                  if (value === null || value === undefined || value === '') continue;
+                  const num = Number(value);
+                  if (Number.isFinite(num)) {
+                    return num;
+                  }
+                }
+                return 0;
+              };
+
+              const getBinIdentifiers = (bin: any, idx: number) => {
+                const raw = bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? bin.temp_bin ?? bin.Range ?? `Bin_${idx + 1}`;
+                const labelVal = String(raw);
+                const rangeValue = String(bin.Range ?? '');
+                return { labelValRaw: raw, labelVal, rangeValue };
+              };
 
               // === SORT BINS ===
               const sortedRows = [...fineRows].sort((a: any, b: any) => {
@@ -924,11 +976,38 @@ const SelectedColumnsPage = () => {
               });
 
               // === CHART DATA (WOE/IV from backend) ===
-              const chartRows = woeStats.map((row: any) => {
+              const chartRows = sortedRows.map((bin: any, idx: number) => {
+                const { labelVal, rangeValue } = getBinIdentifiers(bin, idx);
+                const woeData = getWoeRow(labelVal, rangeValue) || {};
+
                 return {
-                  Bin: row.Bin || row.temp_bin || row.Range || '',
-                  WOE: row.WOE || row.woe || row.WoE || row.Woe || row.woe_value || row.WOEValue || 0,
-                  IV: row.IV || row.iv || row.Iv || row.iv_contribution || row.IVContribution || 0
+                  Bin: labelVal,
+                  Range: rangeValue || (typeof woeData.Range === 'string' ? woeData.Range : ''),
+                  WOE: pickNumeric(
+                    woeData.WOE,
+                    woeData.woe,
+                    woeData.WoE,
+                    woeData.Woe,
+                    woeData.woe_value,
+                    woeData.WOEValue,
+                    bin.WOE,
+                    bin.woe,
+                    bin.WoE,
+                    bin.Woe
+                  ),
+                  IV: pickNumeric(
+                    woeData.IV,
+                    woeData.iv,
+                    woeData.Iv,
+                    woeData.iv_contribution,
+                    woeData.IVContribution,
+                    bin.IV,
+                    bin.iv,
+                    bin.Iv
+                  ),
+                  Good: pickNumeric(woeData.Good, bin.Good, bin.good),
+                  Bad: pickNumeric(woeData.Bad, bin.Bad, bin.bad),
+                  Total: pickNumeric(woeData.Total, bin.Total, bin.total),
                 };
               });
 
@@ -976,9 +1055,7 @@ const SelectedColumnsPage = () => {
                             </tr>
                           ) : (
                             sortedRows.map((bin: any, idx: number) => {
-                              const labelValRaw = bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? `Bin_${idx + 1}`;
-                              const labelVal = String(labelValRaw);
-                              const rangeValue = String(bin.Range ?? '');
+                              const { labelValRaw, labelVal, rangeValue } = getBinIdentifiers(bin, idx);
                               const minVal = bin.Min ?? bin.min ?? bin.MinValue ?? bin.minValue ?? null;
                               const maxVal = bin.Max ?? bin.max ?? bin.MaxValue ?? bin.maxValue ?? null;
                               const minDisplay = minVal !== null && minVal !== undefined ? minVal : (isContinuousColumn ? 'N/A' : '—');
@@ -986,9 +1063,7 @@ const SelectedColumnsPage = () => {
 
                               // Get authoritative values from backend WOE/IV results
                               const normalizedLabel = normalizeLabel(labelVal);
-                              const woeData = woeStats.find((row: any) =>
-                                (row.Bin || row.temp_bin || row.Range || '') === (labelVal || normalizedLabel)
-                              ) || {
+                              const woeData = getWoeRow(labelVal, rangeValue) || getWoeRow(normalizedLabel, rangeValue) || {
                                 WOE: 0,
                                 IV: 0,
                                 'Dist_Good_%': 0,
@@ -1119,8 +1194,8 @@ const SelectedColumnsPage = () => {
 
                                   <td>{formatToFourDecimals(woeData['Dist_Good_%'] || 0)}</td>
                                   <td>{formatToFourDecimals(woeData['Dist_Bad_%'] || 0)}</td>
-                                  <td>{formatToFourDecimals(woeData.WOE || 0)}</td>
-                                  <td>{formatToFourDecimals(woeData.IV || 0)}</td>
+                                  <td>{formatToFourDecimals(pickNumeric(woeData.WOE, woeData.woe, woeData.WoE, woeData.Woe, woeData.woe_value, woeData.WOEValue))}</td>
+                                  <td>{formatToFourDecimals(pickNumeric(woeData.IV, woeData.iv, woeData.Iv, woeData.iv_contribution, woeData.IVContribution))}</td>
                                   <td>
                                     {isMergedLabel ? (
                                       <button
@@ -1150,15 +1225,11 @@ const SelectedColumnsPage = () => {
                             let sumFreq = 0;
                             let freqProvided = false;
 
-                            sortedRows.forEach((bin: any) => {
-                              const labelValRaw = bin[`${activeColumn}_fine_binned`] ?? bin[`${activeColumn}_binned`] ?? bin.Bin ?? bin.bin ?? '';
-                              const labelVal = String(labelValRaw);
-                              const normalizedLabel = normalizeLabel(labelVal);
+                            sortedRows.forEach((bin: any, idx: number) => {
+                              const { labelVal, rangeValue } = getBinIdentifiers(bin, idx);
 
-                              // Get authoritative counts from backend
-                              const woeData = woeStats.find((row: any) =>
-                                (row.Bin || row.temp_bin || row.Range || '') === (labelVal || normalizedLabel)
-                              ) || { Good: 0, Bad: 0, Total: 0 };
+                              // Get authoritative counts from backend (aligned with table rows)
+                              const woeData = getWoeRow(labelVal, rangeValue) || { Good: 0, Bad: 0, Total: 0 };
 
                               totalBad += woeData.Bad || 0;
                               totalGood += woeData.Good || 0;
