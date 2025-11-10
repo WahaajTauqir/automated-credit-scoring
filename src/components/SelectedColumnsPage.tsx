@@ -35,7 +35,6 @@ const SelectedColumnsPage = () => {
   const [fineBinResults, setFineBinResults] = useState<Record<string, any[]>>({});
   const [selectedFineBins, setSelectedFineBins] = useState<Record<string, string[]>>({});
   const [binMergeHistory, setBinMergeHistory] = useState<Record<string, Record<string, any[]>>>({});
-  const [, setBinMergeStack] = useState<Record<string, any[]>>({}); // For undo (unused history for now)
   const [recordId, setRecordId] = useState<number | undefined>(initialRecordId);
   const [woeIvResults, setWoeIvResults] = useState<Record<string, any>>({});
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
@@ -466,10 +465,10 @@ const SelectedColumnsPage = () => {
         console.warn('Failed to recalculate bin scoring metrics after merge for', col, e);
       }
 
-      await persistFineBinColumn(col, mergesReturned);
+    const persistedRecordId = await persistFineBinColumn(col, mergesReturned);
 
-      // Recompute WOE/IV with correct merges
-      await fetchWoeIv(col, mergesReturned, false);
+    // Recompute WOE/IV with correct merges and persist using the latest record id
+    await fetchWoeIv(col, mergesReturned, false, { recordIdOverride: persistedRecordId });
       setWoeReadyColumns(prev => new Set(prev).add(col));
       showNotification(`Binning completed for ${col}`);
     } catch (err) {
@@ -549,8 +548,8 @@ const SelectedColumnsPage = () => {
       console.warn('Failed to recalculate bin scoring metrics after unmerge for', col, e);
     }
 
-    await persistFineBinColumn(col, data.bin_merges || newHistory);
-    await fetchWoeIv(col, data.bin_merges || newHistory, false);
+    const persistedRecordId = await persistFineBinColumn(col, data.bin_merges || newHistory);
+    await fetchWoeIv(col, data.bin_merges || newHistory, false, { recordIdOverride: persistedRecordId });
     setWoeReadyColumns(prev => new Set(prev).add(col));
 
     showNotification(`Unmerged '${mergedLabel}'`);
@@ -585,17 +584,78 @@ const SelectedColumnsPage = () => {
       console.warn('Failed to recalculate bin scoring metrics after reset for', col, e);
     }
 
-    await persistFineBinColumn(col, {});
+    const persistedRecordId = await persistFineBinColumn(col, {});
 
     // Recompute WOE with NO merges
-    await fetchWoeIv(col, {}, false);
+    await fetchWoeIv(col, {}, false, { recordIdOverride: persistedRecordId });
     setWoeReadyColumns(prev => new Set(prev).add(col));
 
     showNotification(`Binning reset for ${col}`);
   };
-  const persistFineBinColumn = async (col: string, merges: Record<string, any[]>) => {
+
+  const runAutoMonotonicBinning = async (col: string) => {
+    const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+    
     try {
-      let current = recordId;
+      showNotification(`Running auto-monotonic binning for ${col}...`);
+      
+      // Call the auto-monotonic-binning API
+      const response = await fetch('http://localhost:5000/api/auto-monotonic-binning', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          variable: col,
+          target: targetVariable,
+          type: varType,
+          direction: null,  // Auto-detect direction
+          method: 'greedy',  // Use greedy algorithm (faster)
+          record_id: recordId,
+          dashboard_selected_columns: selectedForModeling,
+        }),
+      });
+      
+      const data = await response.json();
+      
+      if (!data.success) {
+        throw new Error(data.error || 'Auto-binning failed');
+      }
+      
+      // Update UI with results
+      setFineBinResults(prev => ({ ...prev, [col]: data.stats || [] }));
+      setBinMergeHistory(prev => ({ ...prev, [col]: data.bin_merges || {} }));
+      setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
+      
+      // Recalculate bin scoring metrics
+      try {
+        await calculateAllBinMetrics(col, data.stats || []);
+      } catch (e) {
+        console.warn('Failed to recalculate bin scoring metrics after auto-binning for', col, e);
+      }
+      
+      const persistedRecordId = await persistFineBinColumn(col, data.bin_merges || {});
+
+      // Recompute WOE/IV
+      await fetchWoeIv(col, data.bin_merges || {}, false, { recordIdOverride: persistedRecordId });
+      setWoeReadyColumns(prev => new Set(prev).add(col));
+      
+      // Show success message with details
+      const message = `Auto-binning completed for ${col}: ${data.num_merges} merges performed, ` +
+                      `${data.num_bins_original} → ${data.num_bins_final} bins, ` +
+                      `WOE trend: ${data.direction}, monotonic: ${data.is_monotonic ? 'Yes' : 'No'}`;
+      showNotification(message);
+      
+      console.log('Auto-binning result:', data);
+      
+    } catch (err) {
+      console.error('Error in auto-monotonic binning:', err);
+      showNotification(`Error in auto-binning: ${err instanceof Error ? err.message : String(err)}`);
+      alert('Error running auto-monotonic binning');
+    }
+  };
+
+  const persistFineBinColumn = async (col: string, merges: Record<string, any[]>): Promise<number | undefined> => {
+    let current = recordId;
+    try {
       const upsertResp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -613,7 +673,7 @@ const SelectedColumnsPage = () => {
         }),
       });
       const up = await upsertResp.json();
-      if (!up.error) {
+      if (!up.error && typeof up.id !== 'undefined') {
         current = up.id;
         setRecordId(up.id);
       }
@@ -627,6 +687,7 @@ const SelectedColumnsPage = () => {
     } catch (e) {
       console.error('Persist column failed', e);
     }
+    return current;
   };
   const persistDashboardSelectedColumns = async (newSelection: string[]) => {
     try {
@@ -678,15 +739,17 @@ const SelectedColumnsPage = () => {
     col: string,
     merges?: Record<string, any[]>,
     addToModeling: boolean = true,
+    options?: { recordIdOverride?: number },
   ): Promise<boolean> => {
     try {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+      const resolvedRecordId = options?.recordIdOverride ?? recordId;
       const body: any = {
         variables: [col],
         target: targetVariable,
         type: varType  // Add this!
       };
-      if (recordId) body.record_id = recordId;
+      if (resolvedRecordId) body.record_id = resolvedRecordId;
       if (merges && Object.keys(merges).length > 0) {
         body.bin_merges = merges;
       }
@@ -1296,6 +1359,15 @@ const SelectedColumnsPage = () => {
                         title={selectedCount < 2 ? 'Select at least two bins to merge' : undefined}
                       >
                         Fine Binning on Selected
+                      </button>
+                      <button
+                        className="auto-monotonic-btn"
+                        onClick={() => runAutoMonotonicBinning(activeColumn)}
+                        aria-label={`Run auto-monotonic binning for ${activeColumn}`}
+                        title="Automatically merge bins to achieve monotonic WOE trend"
+                      >
+                        <span className="btn-icon">⚡</span>
+                        Auto Monotonic Binning
                       </button>
                       <button
                         className="reset-bin-btn"

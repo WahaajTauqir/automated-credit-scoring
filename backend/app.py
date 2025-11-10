@@ -24,6 +24,7 @@ from io import BytesIO
 from db import get_db_connection, init_db, save_record_db, upsert_single_record_db, get_records_db, get_latest_record_dataset_path_db, get_record_db, delete_record_db, save_finebin_details_db, get_finebin_details_db
 import traceback
 import logging
+from auto_monotonic_binning import auto_monotonic_binning, compute_woe
 
 # Optional: load environment variables from a .env file if present
 try:
@@ -582,6 +583,166 @@ def fine_bin_api():
     except Exception as e:
         import traceback
         print("ERROR:", traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+# ----------- Automated Monotonic Binning API -----------
+@app.route('/api/auto-monotonic-binning', methods=['POST'])
+def auto_monotonic_binning_api():
+    """
+    Automatically merge bins to achieve monotonic WOE (Weight of Evidence).
+    Uses deterministic algorithms to find the best bin merging strategy.
+    
+    Expects JSON payload:
+    {
+        "variable": "column_name",
+        "target": "target_column",
+        "type": "continuous" or "discrete",
+        "direction": "increasing", "decreasing", or null (auto-detect),
+        "method": "greedy" or "exhaustive",
+        "record_id": optional record ID,
+        "dashboard_selected_columns": optional list
+    }
+    """
+    try:
+        req = request.get_json()
+        print("Auto-binning request:", req)
+        
+        var = req.get('variable')
+        target = req.get('target')
+        var_type = req.get('type')
+        direction = req.get('direction')  # 'increasing', 'decreasing', or None
+        method = req.get('method', 'greedy')  # 'greedy' or 'exhaustive'
+        record_id = req.get('record_id')
+        
+        if not var or not target or not var_type:
+            return jsonify({"error": "Missing required fields: variable, target, type"}), 400
+        
+        # Load data
+        csv_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
+        df = pd.read_csv(csv_path)
+        df[target] = df[target].fillna(0).astype(int)
+        
+        # First perform coarse binning to get initial bins
+        if var_type == 'continuous':
+            coarse_stats, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
+        else:
+            coarse_stats, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
+        
+        # Extract good/bad counts and bin labels from coarse binning
+        bin_labels = []
+        good_counts = []
+        bad_counts = []
+        
+        for _, row in coarse_stats.iterrows():
+            # Get bin label
+            if var_type == 'continuous':
+                bin_label = row.get(f'{var}_binned', f'Bin_{len(bin_labels)+1}')
+            else:
+                bin_label = str(row.get(f'{var}_binned', len(bin_labels)+1))
+            
+            bin_labels.append(str(bin_label))
+            good_counts.append(int(row.get('Good', 0)))
+            bad_counts.append(int(row.get('Bad', 0)))
+        
+        # Convert to numpy arrays
+        good = np.array(good_counts)
+        bad = np.array(bad_counts)
+        
+        print(f"Auto-binning for {var}: {len(bin_labels)} bins, direction={direction}, method={method}")
+        print(f"Initial bins: {bin_labels}")
+        print(f"Initial Good: {good}")
+        print(f"Initial Bad: {bad}")
+        print(f"Initial WOE: {compute_woe(good, bad).tolist()}")
+        
+        # Run automated monotonic binning
+        result = auto_monotonic_binning(
+            good=good,
+            bad=bad,
+            bin_labels=bin_labels,
+            variable_type=var_type,
+            direction=direction,
+            method=method
+        )
+        
+        print(f"Auto-binning result: {result['num_merges']} merges, monotonic={result['is_monotonic']}")
+        print(f"Final bins: {result['merged_labels']}")
+        print(f"Final WOE: {result['woe_values']}")
+        
+        # Convert merge mapping to format expected by fine_bin API
+        # merge_mapping maps new labels to list of original labels
+        bin_merges = {}
+        for merged_label, original_labels in result['merge_mapping'].items():
+            if len(original_labels) > 1:  # Only include actual merges
+                bin_merges[merged_label] = original_labels
+        
+        print(f"Bin merges to apply: {bin_merges}")
+        
+        # Apply the merges using fine binning
+        if var_type == 'continuous':
+            _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
+            existing_bins = set(df[f'{var}_binned'].unique())
+            bin_merges = {k: [b for b in v if b in existing_bins] for k, v in bin_merges.items()}
+            bin_merges = {k: v for k, v in bin_merges.items() if v}
+            tab, _, adjusted_merges, _ = fine_bin_continuous(df, var, target, bin_merges)
+        else:
+            _, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
+            tab, _, adjusted_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
+        
+        if tab is None:
+            return jsonify({"error": "Auto-binning produced no results"}), 400
+        
+        # Save results to database
+        from db import get_records_db
+        records = get_records_db()
+        if records:
+            latest = records[0]
+            discrete_columns = latest.get('discrete_columns', '[]')
+            continuous_columns = latest.get('continuous_columns', '[]')
+            selected_columns = latest.get('selected_columns', '[]')
+        else:
+            discrete_columns = json.dumps([])
+            continuous_columns = json.dumps([])
+            selected_columns = json.dumps([])
+        
+        dataset_path = "uploaded.csv"
+        target_variable = target
+        univariate_results = json.dumps([])
+        finebin_results = json.dumps(tab.to_dict(orient='records'))
+        crosstab_results = json.dumps([])
+        woe_iv_results = json.dumps([])
+        dashboard_selected_columns = json.dumps(req.get('dashboard_selected_columns', []))
+        
+        if not record_id:
+            record_id = upsert_single_record_db(
+                dataset_path, discrete_columns, continuous_columns, selected_columns,
+                dashboard_selected_columns, target_variable, univariate_results,
+                finebin_results, crosstab_results, woe_iv_results
+            )
+        else:
+            upsert_single_record_db(
+                dataset_path, discrete_columns, continuous_columns, selected_columns,
+                dashboard_selected_columns, target_variable, univariate_results,
+                finebin_results, crosstab_results, woe_iv_results
+            )
+        
+        save_finebin_details_db(int(record_id), var, adjusted_merges)
+        
+        print(f"Auto-binning completed for {var}")
+        
+        return jsonify({
+            "success": True,
+            "stats": tab.to_dict(orient='records'),
+            "bin_merges": adjusted_merges,
+            "is_monotonic": result['is_monotonic'],
+            "direction": result['direction'],
+            "num_merges": result['num_merges'],
+            "num_bins_original": result['num_bins_original'],
+            "num_bins_final": result['num_bins_final']
+        })
+        
+    except Exception as e:
+        import traceback
+        print("ERROR in auto-monotonic-binning:", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 # ----------- Cross Tab View API -----------

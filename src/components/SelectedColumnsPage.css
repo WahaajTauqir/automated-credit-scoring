@@ -830,6 +830,7 @@ tr[style*="21262d"]:hover {
 
 .fine-bin-btn,
 .reset-bin-btn,
+.auto-monotonic-btn,
 /* Removed undo-btn styling */
 .run-regression-btn,
 .close-compare-btn {
@@ -853,6 +854,63 @@ tr[style*="21262d"]:hover {
   background: #26a641;
   transform: translateY(-2px);
   box-shadow: var(--shadow-glow);
+}
+
+/* Auto Monotonic Binning Button - Futuristic Style */
+.auto-monotonic-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: var(--fg-primary);
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 1rem;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+
+.auto-monotonic-btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+  transition: left 0.5s;
+}
+
+.auto-monotonic-btn:hover::before {
+  left: 100%;
+}
+
+.auto-monotonic-btn:hover {
+  background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+}
+
+.auto-monotonic-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+}
+
+.auto-monotonic-btn .btn-icon {
+  font-size: 1.1em;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.1);
+  }
 }
 
 .reset-bin-btn,
