@@ -9,9 +9,10 @@ interface LogisticRegressionResultsProps {
   onColumnSelect: (column: string) => void;
   selectedColumn: string;
   onToggleSelect?: (column: string) => void;
-  onGenerateScoreCard?: () => void;
+  onGenerateScoreCard?: (modelType: string) => void;
   generatingScoreCard?: boolean;
   onGotoScoreCard?: () => void;
+  onResultsUpdate?: (results: any) => void; // ADD THIS LINE
 }
 
 interface ModelStats {
@@ -80,8 +81,9 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   selectedColumn,
   onToggleSelect,
   onGenerateScoreCard,
-  generatingScoreCard
-  , onGotoScoreCard
+  generatingScoreCard,
+  onGotoScoreCard,
+  onResultsUpdate // ADD THIS LINE
 }) => {
   const [results, setResults] = useState<LogisticResults | null>(null);
   const [loading, setLoading] = useState(false);
@@ -110,6 +112,11 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
       const data = await response.json();
       if (data.success) {
         setResults(data);
+        
+        // ADD THIS: Call the callback to update parent state
+        if (onResultsUpdate) {
+          onResultsUpdate(data);
+        }
       } else {
         alert(`Error: ${data.error}`);
       }
@@ -120,6 +127,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
     }
   };
 
+  // ... rest of your existing code remains exactly the same ...
   const getSignificanceColor = (significance: string) => {
     switch (significance) {
       case 'Highly Significant': return '#52c41a';
@@ -140,6 +148,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   };
 
   const renderROCCurve = () => {
+    // ... your existing renderROCCurve function code ...
     if (!results?.roc_data) return null;
 
     const svgWidth = 400;
@@ -182,7 +191,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
               />
             </g>
           ))}
-          
+
           {/* Diagonal reference line */}
           <line
             x1={margin}
@@ -193,7 +202,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
             strokeWidth={1}
             strokeDasharray="5,5"
           />
-          
+
           {/* ROC Curve */}
           <path
             d={pathData}
@@ -201,11 +210,11 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
             stroke="#1890ff"
             strokeWidth={2}
           />
-          
+
           {/* Axes */}
           <line x1={margin} y1={margin} x2={margin} y2={margin + plotHeight} stroke="#f0f6fc" strokeWidth={2} />
           <line x1={margin} y1={margin + plotHeight} x2={margin + plotWidth} y2={margin + plotHeight} stroke="#f0f6fc" strokeWidth={2} />
-          
+
           {/* Labels */}
           <text x={svgWidth / 2} y={svgHeight - 5} textAnchor="middle" fill="#f0f6fc" fontSize="12">
             False Positive Rate
@@ -213,7 +222,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
           <text x={15} y={svgHeight / 2} textAnchor="middle" fill="#f0f6fc" fontSize="12" transform={`rotate(-90, 15, ${svgHeight / 2})`}>
             True Positive Rate
           </text>
-          
+
           {/* Tick labels */}
           {[0, 0.2, 0.4, 0.6, 0.8, 1.0].map(val => (
             <g key={val}>
@@ -235,6 +244,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   };
 
   const renderConfusionMatrix = () => {
+    // ... your existing renderConfusionMatrix function code ...
     const cm = results?.confusion_matrix;
     if (!cm || !Array.isArray(cm) || cm.length < 2) return <div style={{ color: '#f0f6fc' }}>No confusion matrix available</div>;
 
@@ -256,7 +266,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
 
     const labelFill = '#f0f6fc';
     const gridStroke = '#30363d';
-  const bg = 'transparent';
+    const bg = 'transparent';
 
     const getFill = (_count: number, norm: number) => {
       // stronger color for higher percent
@@ -281,12 +291,12 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
         <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
           {/* Labels */}
           <text x={pad + cell} y={pad - 6} textAnchor="middle" fill={labelFill} fontSize={12}>Predicted</text>
-          <text x={pad + cell / 2} y={pad + size + 14} textAnchor="middle" fill={labelFill} fontSize={12} transform={`rotate(-90, ${pad + cell / 2}, ${pad + size/2})`}>Actual</text>
+          <text x={pad + cell / 2} y={pad + size + 14} textAnchor="middle" fill={labelFill} fontSize={12} transform={`rotate(-90, ${pad + cell / 2}, ${pad + size / 2})`}>Actual</text>
 
           {/* Grid cells */}
           {[0, 1].map((r) =>
             [0, 1].map((c) => {
-              const count = [ [a00, a01], [a10, a11] ][r][c];
+              const count = [[a00, a01], [a10, a11]][r][c];
               const norm = normalized[r][c];
               const x = pad + c * cell;
               const y = pad + r * cell;
@@ -297,7 +307,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                     {confusionView === 'counts' ? String(count) : `${(norm * 100).toFixed(2)}%`}
                   </text>
                   <text x={x + cell / 2} y={y + cell / 2 + 14} textAnchor="middle" fill={labelFill} fontSize={11}>
-                    {confusionView === 'counts' ? `${((count/total)*100).toFixed(2)}%` : `(${String(count)})`}
+                    {confusionView === 'counts' ? `${((count / total) * 100).toFixed(2)}%` : `(${String(count)})`}
                   </text>
                 </g>
               );
@@ -324,14 +334,14 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
       <div className="lr-header">
         <div className="lr-title">
           <h3>Logistic Regression Analysis</h3>
-          <button 
+          <button
             className="legend-toggle"
             onClick={() => setShowLegend(!showLegend)}
           >
             {showLegend ? 'Hide Legend' : 'Show Legend'}
           </button>
         </div>
-        
+
         {showLegend && (
           <div className="legend-panel">
             <h4>Legend</h4>
@@ -377,7 +387,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
       <div className="lr-content">
         <div className="selected-variables-panel">
           <h4>Selected Variables ({(allSelectedVariables || selectedVariables).length})</h4>
-            <div className="variables-list">
+          <div className="variables-list">
             {(allSelectedVariables || selectedVariables).map((variable) => (
               <div
                 key={variable}
@@ -393,23 +403,23 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
               </div>
             ))}
           </div>
-          
-          <button 
+
+          <button
             className="run-regression-btn"
             onClick={runLogisticRegression}
             disabled={loading || selectedVariables.length === 0}
           >
             {loading ? 'Running...' : 'Run Logistic Regression'}
           </button>
-          
+
           {results && onGenerateScoreCard && (
-            <button 
+            <button
               className="run-regression-btn"
               onClick={() => {
                 try {
                   if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
-                } catch (e) {}
-                onGenerateScoreCard();
+                } catch (e) { }
+                onGenerateScoreCard('logistic'); // Add model type here
               }}
               disabled={generatingScoreCard || selectedVariables.length === 0}
               style={{ marginTop: '10px' }}
@@ -419,35 +429,35 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
           )}
         </div>
 
-  {results && (
+        {results && (
           <div className="results-panel">
             <div className="results-tabs">
-              <button 
+              <button
                 className={`tab-btn ${activeTab === 'coefficients' ? 'active' : ''}`}
                 onClick={() => setActiveTab('coefficients')}
               >
                 Coefficients
               </button>
               {/* P-Values merged into Coefficients table */}
-              <button 
+              <button
                 className={`tab-btn ${activeTab === 'vif' ? 'active' : ''}`}
                 onClick={() => setActiveTab('vif')}
               >
                 Multicollinearity
               </button>
-              <button 
+              <button
                 className={`tab-btn ${activeTab === 'roc' ? 'active' : ''}`}
                 onClick={() => setActiveTab('roc')}
               >
                 ROC Curve
               </button>
-              <button 
+              <button
                 className={`tab-btn ${activeTab === 'confusion' ? 'active' : ''}`}
                 onClick={() => setActiveTab('confusion')}
               >
                 Confusion Matrix
               </button>
-              <button 
+              <button
                 className={`tab-btn ${activeTab === 'ks' ? 'active' : ''}`}
                 onClick={() => setActiveTab('ks')}
               >
@@ -700,7 +710,7 @@ const KSChart: React.FC<{ ks_curve: KSCurvePoint[] | undefined; ks_stat: number 
           </g>
         )}
       </svg>
-  <div style={{ marginTop: 8, color: '#f0f6fc' }} />
+      <div style={{ marginTop: 8, color: '#f0f6fc' }} />
     </div>
   );
 };

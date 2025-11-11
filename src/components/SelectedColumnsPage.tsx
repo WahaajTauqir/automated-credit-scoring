@@ -2,6 +2,8 @@ import { useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import LogisticRegressionResults from './LogisticRegressionResults';
 import Navbar from './Navbar';
+import RandomForestResults from './RandomForestResults';
+import XGBoostResults from './XGBoostResults';
 // import WoeIvResults from './WoeIvResults';
 import './SelectedColumnsPage.css';
 import {
@@ -46,6 +48,13 @@ const SelectedColumnsPage = () => {
   const [testScoreKS, setTestScoreKS] = useState<number | null>(null);
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedModel, setSelectedModel] = useState<string>('logistic');
+  const [selectedModelForScorecard, setSelectedModelForScorecard] = useState<string>('logistic');
+  const [logisticResults, setLogisticResults] = useState<any>(null);
+  const [randomForestResults, setRandomForestResults] = useState<any>(null);
+  const [xgboostResults, setXgboostResults] = useState<any>(null);
+
+
   // Add to your existing state declarations
   const [binScoringMetrics, setBinScoringMetrics] = useState<Record<string, any[]>>({});
   // Removed UI sorting controls per request; keep search only
@@ -53,6 +62,20 @@ const SelectedColumnsPage = () => {
   // (kept here for possible future IV badge usage)
   // Filtered and sorted columns
   // Filter columns by search term and sort alphabetically by name
+  // Add these state setters to your component
+  const handleLogisticResults = (results: any) => {
+    setLogisticResults(results);
+  };
+
+  const handleRandomForestResults = (results: any) => {
+    setRandomForestResults(results);
+  };
+
+  const handleXGBoostResults = (results: any) => {
+    setXgboostResults(results);
+  };
+
+  // Update your model components to pass these handlers
   const filteredColumns = selectedColumns
     .filter(col => col.toLowerCase().includes(searchTerm.toLowerCase()))
     .sort((a, b) => a.localeCompare(b));
@@ -97,6 +120,59 @@ const SelectedColumnsPage = () => {
 
   // Calculate metrics for all bins of a column
   // Calculate metrics for all bins of a column
+  const handleTestScoreCard = async (modelType: string = selectedModelForScorecard) => {
+    setTestScoreLoading(true);
+    setTestScoreResults(null);
+    try {
+      // Get the appropriate model results based on the selected model
+      let modelResults: any = null;
+
+      switch (modelType) {
+        case 'logistic':
+          modelResults = logisticResults;
+          break;
+        case 'random_forest':
+          modelResults = randomForestResults;
+          break;
+        case 'xgboost':
+          modelResults = xgboostResults;
+          break;
+        default:
+          modelResults = logisticResults;
+      }
+
+      if (!modelResults) {
+        alert(`No results available for ${modelType}. Please run the model first.`);
+        setTestScoreLoading(false);
+        return;
+      }
+
+      const response = await fetch('http://localhost:5000/api/apply-scorecard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          selected_variables: selectedForModeling,
+          target: targetVariable,
+          woe_transformed_data: woeIvResults,
+          model_results: modelResults,
+          model_type: modelType
+        })
+      });
+
+      const data = await response.json();
+      if (data.success && data.results) {
+        setTestScoreResults(data.results);
+        setTestScoreKS(typeof data.ks_stat === 'number' ? data.ks_stat : null);
+        showNotification(`Score card tested using ${modelType} model`);
+      } else {
+        alert('Error applying score card: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      alert('Error applying score card: ' + err);
+    } finally {
+      setTestScoreLoading(false);
+    }
+  };
   const calculateAllBinMetrics = async (columnName: string, bins: any[]) => {
     try {
       const binsData = bins.map(bin => {
@@ -197,6 +273,27 @@ const SelectedColumnsPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeColumn, fineBinResults]);
   const formatToFourDecimals = (value: any) => (typeof value === 'number' ? value.toFixed(4) : String(value));
+  const canonicalModelType = (raw?: any): string => {
+    if (!raw) return 'logistic';
+
+    const r = String(raw).toLowerCase().replace(/_/g, '');
+
+    if (r.includes('log')) return 'logistic';
+    if (r.includes('random') || r.includes('forest') || r.includes('rf')) return 'random_forest';
+    if (r.includes('xg') || r.includes('xgb') || r.includes('boost')) return 'xgboost';
+
+    // Default mappings for common variations
+    const mappings: Record<string, string> = {
+      'logistic': 'logistic',
+      'logisticregression': 'logistic',
+      'randomforest': 'random_forest',
+      'rf': 'random_forest',
+      'xgboost': 'xgboost',
+      'xgb': 'xgboost'
+    };
+
+    return mappings[r] || r || 'logistic';
+  };
   const showNotification = (message: string) => {
     setNotification(message);
     setTimeout(() => setNotification(null), 3000);
@@ -204,15 +301,41 @@ const SelectedColumnsPage = () => {
   const generateScoreCard = async () => {
     setGeneratingScoreCard(true);
     try {
+      // Get the appropriate model results based on the selected model
+      let modelResults: any = null;
+
+      switch (selectedModelForScorecard) {
+        case 'logistic':
+          modelResults = logisticResults;
+          break;
+        case 'random_forest':
+          modelResults = randomForestResults;
+          break;
+        case 'xgboost':
+          modelResults = xgboostResults;
+          break;
+        default:
+          modelResults = logisticResults;
+      }
+
+      if (!modelResults) {
+        alert(`No results available for ${selectedModelForScorecard}. Please run the model first.`);
+        setGeneratingScoreCard(false);
+        return;
+      }
+
       const response = await fetch('http://localhost:5000/api/generate-scorecard', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           selected_variables: selectedForModeling,
           target: targetVariable,
-          woe_transformed_data: woeIvResults
+          woe_transformed_data: woeIvResults,
+          model_type: selectedModelForScorecard,
+          model_results: modelResults
         })
       });
+
       const data = await response.json();
       if (data.success) {
         setScoreCardData(data);
@@ -226,9 +349,9 @@ const SelectedColumnsPage = () => {
           variableCounts.forEach(({ variable, count }) => {
             console.log(` ${variable}: ${count} bins`);
           });
-          showNotification(`Score card generated with ${totalBins} bins across ${selectedForModeling.length} variables`);
+          showNotification(`Score card generated with ${totalBins} bins across ${selectedForModeling.length} variables using ${selectedModelForScorecard} model`);
         } else {
-          showNotification('Score card generated successfully!');
+          showNotification(`Score card generated successfully using ${selectedModelForScorecard} model!`);
         }
       } else {
         alert(`Error generating score card: ${data.error}`);
@@ -465,10 +588,10 @@ const SelectedColumnsPage = () => {
         console.warn('Failed to recalculate bin scoring metrics after merge for', col, e);
       }
 
-    const persistedRecordId = await persistFineBinColumn(col, mergesReturned);
+      const persistedRecordId = await persistFineBinColumn(col, mergesReturned);
 
-    // Recompute WOE/IV with correct merges and persist using the latest record id
-    await fetchWoeIv(col, mergesReturned, false, { recordIdOverride: persistedRecordId });
+      // Recompute WOE/IV with correct merges and persist using the latest record id
+      await fetchWoeIv(col, mergesReturned, false, { recordIdOverride: persistedRecordId });
       setWoeReadyColumns(prev => new Set(prev).add(col));
       showNotification(`Binning completed for ${col}`);
     } catch (err) {
@@ -595,10 +718,10 @@ const SelectedColumnsPage = () => {
 
   const runAutoMonotonicBinning = async (col: string) => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-    
+
     try {
       showNotification(`Running auto-monotonic binning for ${col}...`);
-      
+
       // Call the auto-monotonic-binning API
       const response = await fetch('http://localhost:5000/api/auto-monotonic-binning', {
         method: 'POST',
@@ -613,39 +736,39 @@ const SelectedColumnsPage = () => {
           dashboard_selected_columns: selectedForModeling,
         }),
       });
-      
+
       const data = await response.json();
-       
+
       if (!data.success) {
         throw new Error(data.error || 'Auto-binning failed');
       }
-      
+
       // Update UI with results
       setFineBinResults(prev => ({ ...prev, [col]: data.stats || [] }));
       setBinMergeHistory(prev => ({ ...prev, [col]: data.bin_merges || {} }));
       setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
-      
+
       // Recalculate bin scoring metrics
       try {
         await calculateAllBinMetrics(col, data.stats || []);
       } catch (e) {
         console.warn('Failed to recalculate bin scoring metrics after auto-binning for', col, e);
       }
-      
+
       const persistedRecordId = await persistFineBinColumn(col, data.bin_merges || {});
 
       // Recompute WOE/IV
       await fetchWoeIv(col, data.bin_merges || {}, false, { recordIdOverride: persistedRecordId });
       setWoeReadyColumns(prev => new Set(prev).add(col));
-      
+
       // Show success message with details
       const message = `Auto-binning completed for ${col}: ${data.num_merges} merges performed, ` +
-                      `${data.num_bins_original} → ${data.num_bins_final} bins, ` +
-                      `WOE trend: ${data.direction}, monotonic: ${data.is_monotonic ? 'Yes' : 'No'}`;
+        `${data.num_bins_original} → ${data.num_bins_final} bins, ` +
+        `WOE trend: ${data.direction}, monotonic: ${data.is_monotonic ? 'Yes' : 'No'}`;
       showNotification(message);
-      
+
       console.log('Auto-binning result:', data);
-      
+
     } catch (err) {
       console.error('Error in auto-monotonic binning:', err);
       showNotification(`Error in auto-binning: ${err instanceof Error ? err.message : String(err)}`);
@@ -731,6 +854,7 @@ const SelectedColumnsPage = () => {
       return newSelection;
     });
   };
+
   // Debug render mapping of checkbox state to columns
   useEffect(() => {
     console.debug('[SelectedColumnsPage] render: selectedForModeling ->', selectedForModeling);
@@ -851,7 +975,7 @@ const SelectedColumnsPage = () => {
       <div className="page-container">
         <div className="progress-header">
           <div className="progress-bar" role="navigation" aria-label="Analysis steps">
-            {['Column Selection & Binning', 'Logistic Regression', 'Score Card'].map((step, index) => (
+            {['Column Selection & Binning', 'Models', 'Score Card'].map((step, index) => (
               <button
                 key={step}
                 className={`progress-step ${currentStep === index + 1 ? 'active' : ''} ${currentStep > index + 1 ? 'completed' : ''
@@ -1410,22 +1534,105 @@ const SelectedColumnsPage = () => {
               );
             })()}
             {currentStep === 2 && (
-              <LogisticRegressionResults
-                selectedVariables={selectedForModeling}
-                allSelectedVariables={selectedColumns}
-                targetVariable={targetVariable}
-                woeTransformedData={woeIvResults}
-                onColumnSelect={(column) => setActiveColumn(column)}
-                onToggleSelect={toggleSelectedForModeling}
-                selectedColumn={activeColumn}
-                onGenerateScoreCard={generateScoreCard}
-                generatingScoreCard={generatingScoreCard}
-                onGotoScoreCard={gotoScoreCardAndGenerate}
-              />
+              <div className="model-selection">
+                <h3>Model Selection</h3>
+                <div className="model-buttons">
+                  <button
+                    className={`model-btn ${selectedModel === 'logistic' ? 'active' : ''}`}
+                    onClick={() => setSelectedModel('logistic')}
+                  >
+                    Logistic Regression
+                  </button>
+                  <button
+                    className={`model-btn ${selectedModel === 'random_forest' ? 'active' : ''}`}
+                    onClick={() => setSelectedModel('random_forest')}
+                  >
+                    Random Forest
+                  </button>
+                  <button
+                    className={`model-btn ${selectedModel === 'xgboost' ? 'active' : ''}`}
+                    onClick={() => setSelectedModel('xgboost')}
+                  >
+                    XGBoost
+                  </button>
+                </div>
+
+                {selectedModel === 'logistic' && (
+                  <LogisticRegressionResults
+                    selectedVariables={selectedForModeling}
+                    allSelectedVariables={selectedColumns}
+                    targetVariable={targetVariable}
+                    woeTransformedData={woeIvResults}
+                    onColumnSelect={(column) => setActiveColumn(column)}
+                    onToggleSelect={toggleSelectedForModeling}
+                    selectedColumn={activeColumn}
+                    onGenerateScoreCard={(modelType) => {
+                      setSelectedModelForScorecard(modelType);
+                      gotoScoreCardAndGenerate();
+                    }}
+                    generatingScoreCard={generatingScoreCard}
+                    onGotoScoreCard={gotoScoreCardAndGenerate}
+                    onResultsUpdate={handleLogisticResults} // Add this prop
+                  />
+                )}
+
+                {selectedModel === 'random_forest' && (
+                  <RandomForestResults
+                    selectedVariables={selectedForModeling}
+                    allSelectedVariables={selectedColumns}
+                    targetVariable={targetVariable}
+                    woeTransformedData={woeIvResults}
+                    onColumnSelect={(column) => setActiveColumn(column)}
+                    onToggleSelect={toggleSelectedForModeling}
+                    selectedColumn={activeColumn}
+                    onGenerateScoreCard={(modelType) => {
+                      setSelectedModelForScorecard(modelType);
+                      gotoScoreCardAndGenerate();
+                    }}
+                    generatingScoreCard={generatingScoreCard}
+                    onGotoScoreCard={gotoScoreCardAndGenerate}
+                    onResultsUpdate={handleRandomForestResults} // Add this prop
+                  />
+                )}
+
+                {selectedModel === 'xgboost' && (
+                  <XGBoostResults
+                    selectedVariables={selectedForModeling}
+                    allSelectedVariables={selectedColumns}
+                    targetVariable={targetVariable}
+                    woeTransformedData={woeIvResults}
+                    onColumnSelect={(column) => setActiveColumn(column)}
+                    onToggleSelect={toggleSelectedForModeling}
+                    selectedColumn={activeColumn}
+                    onGenerateScoreCard={(modelType) => {
+                      setSelectedModelForScorecard(modelType);
+                      gotoScoreCardAndGenerate();
+                    }}
+                    generatingScoreCard={generatingScoreCard}
+                    onGotoScoreCard={gotoScoreCardAndGenerate}
+                    onResultsUpdate={handleXGBoostResults} // Add this prop
+                  />
+                )}
+              </div>
             )}
             {currentStep === 3 && (
               <div className="scorecard-section">
                 <h3>Score Card</h3>
+                {/* Model Selection for Score Card */}
+                <div className="scorecard-model-selection" style={{ marginBottom: '16px' }}>
+                  <label htmlFor="scorecard-model-select">Select Model for Score Card: </label>
+                  <select
+                    id="scorecard-model-select"
+                    value={selectedModelForScorecard}
+                    onChange={(e) => setSelectedModelForScorecard(e.target.value)}
+                    style={{ marginLeft: '8px', padding: '4px 8px' }}
+                  >
+                    <option value="logistic">Logistic Regression</option>
+                    <option value="random_forest">Random Forest</option>
+                    <option value="xgboost">XGBoost</option>
+                  </select>
+                </div>
+
                 <div className="scorecard-controls">
                   <button
                     className="run-regression-btn"
@@ -1448,10 +1655,11 @@ const SelectedColumnsPage = () => {
                     </div>
                   </div>
                 )}
+
                 {/* Only show results when not generating and scoreCardData is loaded */}
                 {scoreCardData && !generatingScoreCard && (
                   <div className="scorecard-results">
-                    <h4>Score Card Results</h4>
+                    <h4>Score Card Results (Based on {selectedModelForScorecard} model)</h4>
                     <div className="table-container">
                       <table className="scorecard-table" aria-label="Score card results">
                         <thead>
@@ -1460,7 +1668,11 @@ const SelectedColumnsPage = () => {
                             <th>Variable</th>
                             <th>Bin Range</th>
                             <th>WOE</th>
-                            <th>Coefficient (β)</th>
+                            <th>
+                              {selectedModelForScorecard === 'logistic'
+                                ? 'Coefficient (β)'
+                                : 'Feature Importance'}
+                            </th>
                             <th>Score</th>
                           </tr>
                         </thead>
@@ -1491,7 +1703,12 @@ const SelectedColumnsPage = () => {
                                     <td>{bin.variable}</td>
                                     <td>{bin.bin_range}</td>
                                     <td>{formatToFourDecimals(bin.woe)}</td>
-                                    <td>{formatToFourDecimals(bin.coefficient)}</td>
+                                    <td>
+                                      {selectedModelForScorecard === 'logistic'
+                                        ? formatToFourDecimals(bin.coefficient)
+                                        : formatToFourDecimals(bin.feature_importance)
+                                      }
+                                    </td>
                                     <td>{Math.round(bin.score)}</td>
                                   </tr>
                                 );
@@ -1522,49 +1739,29 @@ const SelectedColumnsPage = () => {
                             <label>Score Range:</label>
                             <span>{scoreCardData.score_parameters.min_score} - {scoreCardData.score_parameters.max_score}</span>
                           </div>
+                          <div className="parameter-item">
+                            <label>Model Type:</label>
+                            <span>{selectedModelForScorecard.toUpperCase()}</span>
+                          </div>
                         </div>
                       </div>
                     )}
                     {/* Test Score Button and Results Table */}
                     <div style={{ marginTop: '32px' }}>
-                      <button
-                        className="run-regression-btn"
-                        onClick={async () => {
-                          setTestScoreLoading(true);
-                          setTestScoreResults(null);
-                          try {
-                            const response = await fetch('http://localhost:5000/api/apply-scorecard', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({
-                                selected_variables: selectedForModeling,
-                                target: targetVariable,
-                                woe_transformed_data: woeIvResults,
-                                scorecard_bins: scoreCardData.scorecard_bins
-                              })
-                            });
-                            const data = await response.json();
-                            if (data.success && data.results) {
-                              setTestScoreResults(data.results);
-                              setTestScoreKS(typeof data.ks_stat === 'number' ? data.ks_stat : null);
-                            } else {
-                              alert('Error applying score card: ' + (data.error || 'Unknown error'));
-                            }
-                          } catch (err) {
-                            alert('Error applying score card: ' + err);
-                          } finally {
-                            setTestScoreLoading(false);
-                          }
-                        }}
-                        disabled={testScoreLoading}
-                        aria-label="Test Score Card on Data"
-                        style={{ marginBottom: '16px' }}
-                      >
-                        {testScoreLoading ? 'Testing...' : 'Test Score Card'}
-                      </button>
+                      <div style={{ marginBottom: '16px' }}>
+                        <button
+                          className="run-regression-btn"
+                          onClick={() => handleTestScoreCard(selectedModelForScorecard)}
+                          disabled={testScoreLoading}
+                          aria-label="Test Score Card on Data"
+                        >
+                          {testScoreLoading ? 'Testing...' : `Test Score Card (${selectedModelForScorecard})`}
+                        </button>
+                      </div>
+
                       {testScoreResults && (
                         <div className="scorecard-test-results">
-                          <h5>Score Card Test Results (Sorted by Score)</h5>
+                          <h5>Score Card Test Results - {selectedModelForScorecard.toUpperCase()} Model (Sorted by Score)</h5>
                           {testScoreKS !== null && (
                             <div style={{ marginBottom: '12px', fontWeight: 'bold' }}>
                               Separation Number (KS Statistic): {testScoreKS.toFixed(4)}
@@ -1584,7 +1781,10 @@ const SelectedColumnsPage = () => {
                                   <tr key={idx}>
                                     <td>{idx + 1}</td>
                                     <td>{row.score}</td>
-                                    <td style={{ color: row.target === 0 ? 'green' : row.target === 1 ? 'red' : undefined }}>
+                                    <td style={{
+                                      color: row.target === 0 ? 'green' : row.target === 1 ? 'red' : undefined,
+                                      fontWeight: row.target === 1 ? 'bold' : 'normal'
+                                    }}>
                                       {row.target}
                                     </td>
                                   </tr>
@@ -1600,10 +1800,10 @@ const SelectedColumnsPage = () => {
               </div>
             )}
           </section>
-        </div>
+        </div >
         {/* Footer navigation removed per request: Next and Save moved beside progress bar */}
-      </div>
-    </div>
+      </div >
+    </div >
   );
 };
 export default SelectedColumnsPage;

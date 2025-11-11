@@ -2193,6 +2193,492 @@ def logistic_regression_analysis():
         traceback.print_exc()
         return jsonify({"error": f"Failed to perform logistic regression: {str(e)}"}), 500
 
+
+# ----------- Random Forest Analysis -----------
+@app.route('/api/random-forest', methods=['POST'])
+def random_forest_analysis():
+    """
+    Perform Random Forest analysis on selected variables.
+    Expects payload: { selected_variables: [list], target: string, woe_transformed_data: {} }
+    Returns: model metrics, feature importance, ROC data, etc.
+    """
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import roc_curve, auc, classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+
+    def sanitize_for_json(obj):
+        """Recursively replace NaN/inf with None for valid JSON."""
+        import numpy as np
+        if isinstance(obj, dict):
+            return {sanitize_for_json(k): sanitize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [sanitize_for_json(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.floating)):
+            if np.isnan(obj) or np.isinf(obj):
+                return None
+            return float(obj)
+        elif isinstance(obj, (int, float)):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        else:
+            return obj
+
+    try:
+        data = request.get_json()
+        selected_variables = data.get('selected_variables', [])
+        target = data.get('target')
+        woe_transformed_data = data.get('woe_transformed_data', {})
+
+        if not selected_variables or not target:
+            return jsonify({"error": "Missing selected_variables or target"}), 400
+
+        # Load CSV into df
+        try:
+            df = pd.read_csv(get_csv_path())
+        except Exception as e:
+            return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
+
+        if target not in df.columns:
+            return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
+
+        # Prepare WOE-transformed data (same logic as logistic regression)
+        modeling_data = {}
+        woe_columns = []  # Track the actual column names we create
+        
+        for var in selected_variables:
+            woe_data = woe_transformed_data.get(var)
+            if isinstance(woe_data, dict) and isinstance(woe_data.get('stats'), list):
+                bins_list = woe_data.get('stats')
+            elif isinstance(woe_data, list):
+                bins_list = woe_data
+            else:
+                print(f"RF DEBUG: No WOE data for {var}")
+                continue
+
+            if not bins_list:
+                print(f"RF DEBUG: Empty bins list for {var}")
+                continue
+
+            # Create WOE column name
+            woe_column_name = f'{var}_WOE'
+            woe_columns.append(woe_column_name)
+            modeling_data[woe_column_name] = np.zeros(len(df))
+            
+            assigned_count = 0
+            for bin_info in bins_list:
+                bin_range = bin_info.get('range') or bin_info.get('Range') or bin_info.get('Bin') or bin_info.get('bin')
+                woe_value = bin_info.get('woe') or bin_info.get('WOE')
+                if woe_value is None:
+                    continue
+                try:
+                    woe_value = float(woe_value)
+                except Exception:
+                    continue
+                
+                # Apply WOE mapping
+                mask = _create_woe_mask(df, var, bin_range)
+                modeling_data[woe_column_name][mask] = woe_value
+                assigned_count += mask.sum()
+
+            print(f"RF DEBUG: Assigned WOE values for {var}: {assigned_count} rows")
+
+        # Create DataFrame with WOE-transformed variables
+        woe_df = pd.DataFrame(modeling_data)
+        woe_df[target] = df[target].values
+
+        # Remove rows with missing target
+        mask = ~woe_df[target].isna()
+        X = woe_df[woe_columns].fillna(0)  # Use the actual WOE column names
+        y = woe_df[target][mask]
+        X = X[mask]
+
+        if len(X) == 0:
+            return jsonify({"error": "No valid data after preprocessing"}), 400
+
+        if len(woe_columns) == 0:
+            return jsonify({"error": "No valid WOE-transformed features created"}), 400
+
+        print(f"RF DEBUG: Final features: {woe_columns}")
+        print(f"RF DEBUG: X shape: {X.shape}, y shape: {y.shape}")
+
+        # Train Random Forest
+        rf_model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        rf_model.fit(X, y)
+        y_pred_proba = rf_model.predict_proba(X)[:, 1]
+        y_pred = rf_model.predict(X)
+
+        # Calculate metrics
+        fpr, tpr, thresholds = roc_curve(y, y_pred_proba)
+        roc_auc = auc(fpr, tpr)
+        gini_coefficient = 2 * roc_auc - 1
+
+        # Feature importance
+        feature_importance = []
+        for i, col in enumerate(woe_columns):
+            # Extract original variable name (remove _WOE suffix)
+            original_var = col.replace('_WOE', '')
+            feature_importance.append({
+                'variable': original_var,
+                'importance': float(rf_model.feature_importances_[i]),
+                'importance_percentage': float(rf_model.feature_importances_[i] * 100)
+            })
+
+        # Sort by importance
+        feature_importance.sort(key=lambda x: x['importance'], reverse=True)
+
+        # Confusion matrix and classification metrics
+        cm = confusion_matrix(y, y_pred)
+        accuracy = accuracy_score(y, y_pred)
+        precision = precision_score(y, y_pred, zero_division=0)
+        recall = recall_score(y, y_pred, zero_division=0)
+        f1 = f1_score(y, y_pred, zero_division=0)
+
+        # KS Statistic
+        try:
+            diffs = np.abs(tpr - fpr)
+            ks_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
+            ks_stat = float(diffs[ks_idx]) if len(diffs) > 0 else 0.0
+            ks_threshold = float(thresholds[ks_idx]) if len(thresholds) > 0 else 0.0
+            ks_curve = []
+            for f, t, th in zip(fpr, tpr, thresholds):
+                ks_curve.append({
+                    'threshold': float(th) if np.isfinite(th) else None,
+                    'tpr': float(t) if np.isfinite(t) else None,
+                    'fpr': float(f) if np.isfinite(f) else None,
+                    'diff': float(abs(t - f)) if np.isfinite(t) and np.isfinite(f) else None
+                })
+        except Exception as ks_err:
+            print(f"RF DEBUG: KS calculation error: {ks_err}")
+            ks_stat = None
+            ks_threshold = None
+            ks_curve = []
+
+        # ROC data
+        roc_data = []
+        for f, t, th in zip(fpr, tpr, thresholds):
+            roc_data.append({
+                'fpr': float(f) if np.isfinite(f) else None,
+                'tpr': float(t) if np.isfinite(t) else None,
+                'threshold': float(th) if np.isfinite(th) else None
+            })
+
+        # Model stats
+        model_stats = {
+            'n_estimators': rf_model.n_estimators,
+            'max_depth': rf_model.max_depth,
+            'n_observations': len(X),
+            'n_features': len(woe_columns),
+            'oob_score': float(getattr(rf_model, 'oob_score_', 0)) if hasattr(rf_model, 'oob_score_') else None
+        }
+
+        resp = {
+            'success': True,
+            'feature_importance': feature_importance,
+            'gini_coefficient': float(gini_coefficient) if np.isfinite(gini_coefficient) else None,
+            'auc': float(roc_auc) if np.isfinite(roc_auc) else None,
+            'roc_data': roc_data,
+            'model_stats': model_stats,
+            'confusion_matrix': cm.tolist(),
+            'accuracy': float(accuracy) if np.isfinite(accuracy) else None,
+            'precision': float(precision) if np.isfinite(precision) else None,
+            'recall': float(recall) if np.isfinite(recall) else None,
+            'f1': float(f1) if np.isfinite(f1) else None,
+            'ks_stat': ks_stat,
+            'ks_threshold': ks_threshold,
+            'ks_curve': ks_curve
+        }
+
+        # Sanitize for JSON
+        resp = sanitize_for_json(resp)
+        return jsonify(resp)
+
+    except Exception as e:
+        print(f"RANDOM FOREST ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to perform Random Forest analysis: {str(e)}"}), 500
+
+# ----------- XGBoost Analysis -----------
+@app.route('/api/xgboost', methods=['POST'])
+def xgboost_analysis():
+    """
+    Perform XGBoost analysis on selected variables.
+    Expects payload: { selected_variables: [list], target: string, woe_transformed_data: {} }
+    Returns: model metrics, feature importance, ROC data, etc.
+    """
+    try:
+        import xgboost as xgb
+    except ImportError:
+        return jsonify({"error": "XGBoost not installed. Please install with: pip install xgboost"}), 500
+
+    from sklearn.metrics import roc_curve, auc, classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+
+    def sanitize_for_json(obj):
+        """Recursively replace NaN/inf with None for valid JSON."""
+        import numpy as np
+        if isinstance(obj, dict):
+            return {sanitize_for_json(k): sanitize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [sanitize_for_json(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.floating)):
+            if np.isnan(obj) or np.isinf(obj):
+                return None
+            return float(obj)
+        elif isinstance(obj, (int, float)):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        else:
+            return obj
+
+    try:
+        data = request.get_json()
+        selected_variables = data.get('selected_variables', [])
+        target = data.get('target')
+        woe_transformed_data = data.get('woe_transformed_data', {})
+
+        if not selected_variables or not target:
+            return jsonify({"error": "Missing selected_variables or target"}), 400
+
+        # Load CSV into df
+        try:
+            df = pd.read_csv(get_csv_path())
+        except Exception as e:
+            return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
+
+        if target not in df.columns:
+            return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
+
+        # Prepare WOE-transformed data (same logic as logistic regression)
+        modeling_data = {}
+        woe_columns = []  # Track the actual column names we create
+        
+        for var in selected_variables:
+            woe_data = woe_transformed_data.get(var)
+            if isinstance(woe_data, dict) and isinstance(woe_data.get('stats'), list):
+                bins_list = woe_data.get('stats')
+            elif isinstance(woe_data, list):
+                bins_list = woe_data
+            else:
+                print(f"XGB DEBUG: No WOE data for {var}")
+                continue
+
+            if not bins_list:
+                print(f"XGB DEBUG: Empty bins list for {var}")
+                continue
+
+            # Create WOE column name
+            woe_column_name = f'{var}_WOE'
+            woe_columns.append(woe_column_name)
+            modeling_data[woe_column_name] = np.zeros(len(df))
+            
+            assigned_count = 0
+            for bin_info in bins_list:
+                bin_range = bin_info.get('range') or bin_info.get('Range') or bin_info.get('Bin') or bin_info.get('bin')
+                woe_value = bin_info.get('woe') or bin_info.get('WOE')
+                if woe_value is None:
+                    continue
+                try:
+                    woe_value = float(woe_value)
+                except Exception:
+                    continue
+                
+                # Apply WOE mapping
+                mask = _create_woe_mask(df, var, bin_range)
+                modeling_data[woe_column_name][mask] = woe_value
+                assigned_count += mask.sum()
+
+            print(f"XGB DEBUG: Assigned WOE values for {var}: {assigned_count} rows")
+
+        # Create DataFrame with WOE-transformed variables
+        woe_df = pd.DataFrame(modeling_data)
+        woe_df[target] = df[target].values
+
+        # Remove rows with missing target
+        mask = ~woe_df[target].isna()
+        X = woe_df[woe_columns].fillna(0)  # Use the actual WOE column names
+        y = woe_df[target][mask]
+        X = X[mask]
+
+        if len(X) == 0:
+            return jsonify({"error": "No valid data after preprocessing"}), 400
+
+        if len(woe_columns) == 0:
+            return jsonify({"error": "No valid WOE-transformed features created"}), 400
+
+        print(f"XGB DEBUG: Final features: {woe_columns}")
+        print(f"XGB DEBUG: X shape: {X.shape}, y shape: {y.shape}")
+
+        # Train XGBoost
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=100,
+            max_depth=6,
+            learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            eval_metric='logloss',
+            scale_pos_weight=10,
+            use_label_encoder=False
+        )
+        
+        xgb_model.fit(X, y)
+        y_pred_proba = xgb_model.predict_proba(X)[:, 1]
+        y_pred = xgb_model.predict(X)
+
+        # Calculate metrics
+        fpr, tpr, thresholds = roc_curve(y, y_pred_proba)
+        roc_auc = auc(fpr, tpr)
+        gini_coefficient = 2 * roc_auc - 1
+
+        # Feature importance
+        feature_importance = []
+        for i, col in enumerate(woe_columns):
+            # Extract original variable name (remove _WOE suffix)
+            original_var = col.replace('_WOE', '')
+            feature_importance.append({
+                'variable': original_var,
+                'importance': float(xgb_model.feature_importances_[i]),
+                'importance_percentage': float(xgb_model.feature_importances_[i] * 100)
+            })
+
+        # Sort by importance
+        feature_importance.sort(key=lambda x: x['importance'], reverse=True)
+
+        # Confusion matrix and classification metrics
+        cm = confusion_matrix(y, y_pred)
+        accuracy = accuracy_score(y, y_pred)
+        precision = precision_score(y, y_pred, zero_division=0)
+        recall = recall_score(y, y_pred, zero_division=0)
+        f1 = f1_score(y, y_pred, zero_division=0)
+
+        # KS Statistic
+        try:
+            diffs = np.abs(tpr - fpr)
+            ks_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
+            ks_stat = float(diffs[ks_idx]) if len(diffs) > 0 else 0.0
+            ks_threshold = float(thresholds[ks_idx]) if len(thresholds) > 0 else 0.0
+            ks_curve = []
+            for f, t, th in zip(fpr, tpr, thresholds):
+                ks_curve.append({
+                    'threshold': float(th) if np.isfinite(th) else None,
+                    'tpr': float(t) if np.isfinite(t) else None,
+                    'fpr': float(f) if np.isfinite(f) else None,
+                    'diff': float(abs(t - f)) if np.isfinite(t) and np.isfinite(f) else None
+                })
+        except Exception as ks_err:
+            print(f"XGB DEBUG: KS calculation error: {ks_err}")
+            ks_stat = None
+            ks_threshold = None
+            ks_curve = []
+
+        # ROC data
+        roc_data = []
+        for f, t, th in zip(fpr, tpr, thresholds):
+            roc_data.append({
+                'fpr': float(f) if np.isfinite(f) else None,
+                'tpr': float(t) if np.isfinite(t) else None,
+                'threshold': float(th) if np.isfinite(th) else None
+            })
+
+        # Model stats
+        model_stats = {
+            'n_estimators': xgb_model.n_estimators,
+            'max_depth': xgb_model.max_depth,
+            'learning_rate': float(xgb_model.learning_rate),
+            'n_observations': len(X),
+            'n_features': len(woe_columns)
+        }
+
+        resp = {
+            'success': True,
+            'feature_importance': feature_importance,
+            'gini_coefficient': float(gini_coefficient) if np.isfinite(gini_coefficient) else None,
+            'auc': float(roc_auc) if np.isfinite(roc_auc) else None,
+            'roc_data': roc_data,
+            'model_stats': model_stats,
+            'confusion_matrix': cm.tolist(),
+            'accuracy': float(accuracy) if np.isfinite(accuracy) else None,
+            'precision': float(precision) if np.isfinite(precision) else None,
+            'recall': float(recall) if np.isfinite(recall) else None,
+            'f1': float(f1) if np.isfinite(f1) else None,
+            'ks_stat': ks_stat,
+            'ks_threshold': ks_threshold,
+            'ks_curve': ks_curve
+        }
+
+        # Sanitize for JSON
+        resp = sanitize_for_json(resp)
+        return jsonify(resp)
+
+    except Exception as e:
+        print(f"XGBOOST ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to perform XGBoost analysis: {str(e)}"}), 500
+        
+# Helper function for WOE mapping (used by all models)
+def _create_woe_mask(df, var, bin_range):
+    """Create mask for WOE value assignment based on bin range."""
+    import re
+    import numpy as np
+    
+    if bin_range is None:
+        return np.zeros(len(df), dtype=bool)
+    
+    # Handle Missing/NaN
+    if isinstance(bin_range, str) and ('Missing' in bin_range or 'NaN' in bin_range):
+        return df[var].isna()
+    
+    # Numeric range parsing
+    if isinstance(bin_range, str) and any(ch in bin_range for ch in '(),[]'):
+        range_str = bin_range.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
+        parts = [p.strip() for p in range_str.split(',') if p.strip()]
+        if len(parts) == 2:
+            try:
+                lower = float(parts[0]) if parts[0].lower() not in ['-inf', 'inf'] else (float('-inf') if parts[0].lower() == '-inf' else float('inf'))
+                upper = float(parts[1]) if parts[1].lower() not in ['-inf', 'inf'] else (float('-inf') if parts[1].lower() == '-inf' else float('inf'))
+                if lower == float('-inf'):
+                    return df[var] <= upper
+                elif upper == float('inf'):
+                    return df[var] > lower
+                else:
+                    return (df[var] > lower) & (df[var] <= upper)
+            except (ValueError, TypeError):
+                pass
+    
+    # Hyphen-separated ranges
+    hyphen_match = re.match(r'^\s*-?\d+(?:\.\d+)?\s*-\s*-?\d+(?:\.\d+)?\s*$', str(bin_range))
+    if isinstance(bin_range, str) and hyphen_match:
+        try:
+            parts = [p.strip() for p in bin_range.split('-')]
+            lower, upper = float(parts[0]), float(parts[1])
+            return (df[var].astype(float) >= lower) & (df[var].astype(float) <= upper)
+        except (ValueError, TypeError):
+            pass
+    
+    # Categorical values
+    if isinstance(bin_range, str):
+        cat_vals = [v.strip() for v in bin_range.split(',') if v.strip()]
+        mask = np.zeros(len(df), dtype=bool)
+        for cat_val in cat_vals:
+            try:
+                mask |= (df[var].astype(str) == str(cat_val))
+            except Exception:
+                continue
+        return mask
+    
+    # Default: exact match
+    return df[var].astype(str) == str(bin_range)
+
 # ----------- Delete Record -----------
 @app.route('/api/record/<int:record_id>', methods=['DELETE'])
 def delete_record(record_id):
@@ -2274,24 +2760,10 @@ def debug_binning(variable):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ----------- Generate Score Card -----------
 @app.route('/api/generate-scorecard', methods=['POST'])
 def generate_scorecard():
     """
-    Generates a score card using the formula:
-    Score = [β * WOE + α/N] * Factor + Offset/N
-    
-    Where:
-    - β: Logistic Regression coefficient of the variable
-    - α: Logistic Regression Intercept
-    - N: Number of Variables in the Model
-    - Factor: Points to double the odds / Ln(2) ≈ 28.85 (for 20 points)
-    - Offset: Score - { Factor * ln(Odds) } ≈ 28.85 (for base score 600, odds 50:1)
-    
-    Returns:
-    - Scorecard bins with variable, bin range, WOE, coefficient, and score
-    - Score parameters (factor, offset, base_score, base_odds, etc.)
-    - Model summary (coefficients, intercept, number of observations)
+    Generates a score card using pre-computed model results.
     """
     try:
         # Parse request data
@@ -2299,6 +2771,8 @@ def generate_scorecard():
         selected_variables = data.get('selected_variables', [])
         target = data.get('target')
         woe_transformed_data = data.get('woe_transformed_data', {})
+        model_results = data.get('model_results', {})  # Accept pre-computed model results
+        model_type = data.get('model_type', 'logistic')  # Accept model type
 
         # Input validation
         if not selected_variables or not target or not woe_transformed_data:
@@ -2326,7 +2800,44 @@ def generate_scorecard():
         if set(df[target].unique()) - {0, 1}:
             return jsonify({"error": "Target variable must be binary (0/1)"}), 400
 
-        # Prepare WOE-transformed data
+        # Extract coefficients from pre-computed model results
+        coefficients = {}
+        intercept = 0
+        
+        if model_results and model_type == 'logistic':
+            # Extract from logistic regression results
+            if 'coefficients' in model_results:
+                for coef_info in model_results['coefficients']:
+                    var_name = coef_info.get('variable')
+                    if var_name and var_name != 'Intercept':
+                        coefficients[var_name] = coef_info.get('coefficient', 0)
+                    elif var_name == 'Intercept':
+                        intercept = coef_info.get('coefficient', 0)
+            else:
+                return jsonify({"error": "No coefficients found in logistic regression results"}), 400
+        
+        elif model_results and model_type in ['random_forest', 'xgboost']:
+            # For tree-based models, use feature importance with proper scaling
+            if 'feature_importance' in model_results:
+                # Normalize feature importances to sum to 1
+                total_importance = sum(feature_info.get('importance', 0) for feature_info in model_results['feature_importance'])
+                if total_importance > 0:
+                    for feature_info in model_results['feature_importance']:
+                        var_name = feature_info.get('variable')
+                        importance = feature_info.get('importance', 0)
+                        # Convert importance to coefficient-like values with proper scaling
+                        # Use a scaling factor that makes sense for score ranges
+                        coefficients[var_name] = (importance / total_importance) * 50  # Scale to reasonable range
+                else:
+                    return jsonify({"error": f"Total feature importance is zero for {model_type}"}), 400
+            else:
+                return jsonify({"error": f"No feature importance found in {model_type} results"}), 400
+            # For tree models, we use a base intercept
+            intercept = 0
+        else:
+            return jsonify({"error": f"Unsupported model type: {model_type} or missing model results"}), 400
+
+        # Prepare WOE-transformed data for scorecard generation
         modeling_data = {}
         for var in selected_variables:
             woe_data = woe_transformed_data[var]
@@ -2434,58 +2945,21 @@ def generate_scorecard():
         if model_df.empty:
             return jsonify({"error": "No valid data after removing missing target values"}), 400
 
-        # Prepare features and target
-        X = model_df[selected_variables]
-        y = model_df[target]
-
-        # Validate feature matrix
-        nunique = X.nunique()
-        zero_var_cols = nunique[nunique <= 1].index.tolist()
-        if zero_var_cols:
-            return jsonify({"error": f"Features with zero variance: {zero_var_cols}"}), 400
-        dup_cols = X.columns[X.T.duplicated()].tolist()
-        if dup_cols:
-            return jsonify({"error": f"Duplicated features: {dup_cols}"}), 400
-
-        # Fit logistic regression
-        X_with_const = sm.add_constant(X)
-        logit_model = sm.Logit(y, X_with_const)
-        try:
-            result = logit_model.fit(disp=0, maxiter=1000)
-        except np.linalg.LinAlgError:
-            # Diagnostics: VIF and correlation matrix
-            from statsmodels.stats.outliers_influence import variance_inflation_factor
-            vif_data = []
-            X_np = X.values
-            for i in range(X_np.shape[1]):
-                try:
-                    vif = variance_inflation_factor(X_np, i)
-                except Exception:
-                    vif = None
-                vif_data.append({"variable": X.columns[i], "vif": vif})
-            corr_matrix = X.corr().round(3).to_dict()
-            return jsonify({
-                "error": "Model failed due to singular matrix",
-                "diagnostics": {
-                    "vif": vif_data,
-                    "correlation_matrix": corr_matrix
-                }
-            }), 500
-        except Exception as fit_err:
-            return jsonify({"error": f"Model fitting failed: {str(fit_err)}"}), 500
-
-        # Extract coefficients
-        coefficients = {}
-        intercept = result.params['const']
-        for var in selected_variables:
-            coefficients[var] = result.params[var]
-
-        # Score card parameters
+        # Score card parameters - adjust for different model types
         N = len(selected_variables)
-        factor = 20 / np.log(2)  # ≈ 28.8539
-        base_odds = 50
-        base_score = 600
-        offset = base_score - factor * np.log(base_odds)  # ≈ 427.432
+        
+        # Adjust parameters based on model type
+        if model_type == 'logistic':
+            factor = 20 / np.log(2)  # ≈ 28.8539 (standard logistic scoring)
+            base_odds = 50
+            base_score = 600
+            offset = base_score - factor * np.log(base_odds)  # ≈ 427.432
+        else:
+            # For tree-based models, use different parameters since we don't have true coefficients
+            factor = 15 / np.log(2)  # Smaller factor for tree models
+            base_odds = 50
+            base_score = 600
+            offset = base_score - factor * np.log(base_odds)
 
         # Generate score card and calculate score ranges
         scorecard_bins = []
@@ -2518,14 +2992,21 @@ def generate_scorecard():
                         continue
                     processed_ranges.add(range_key)
 
-                    score = (beta * woe_value + intercept / N) * factor + offset / N
-                    scorecard_bins.append({
+                    # Use NEGATIVE coefficients for proper credit scoring direction
+                    # Higher risk = lower score, Lower risk = higher score
+                    score = (-beta * woe_value + intercept / N) * factor + offset / N
+                    bin_data = {
                         'variable': var,
                         'bin_range': bin_range,
                         'woe': woe_value,
                         'coefficient': beta,
                         'score': round(float(score), 2)
-                    })
+                    }
+                    if model_type == 'logistic':
+                        bin_data['coefficient'] = round(float(beta), 4)
+                    else:  # random_forest or xgboost
+                        bin_data['feature_importance'] = round(float(beta), 4)
+                    scorecard_bins.append(bin_data)
                     var_score_ranges[var].append(score)
                 except (ValueError, TypeError):
                     pass
@@ -2538,10 +3019,25 @@ def generate_scorecard():
             if scores:
                 min_total_score += min(scores)
                 max_total_score += max(scores)
-            else:
-                pass
+
         min_total_score = round(float(min_total_score), 2) if min_total_score else 0
         max_total_score = round(float(max_total_score), 2) if max_total_score else 0
+
+        # For tree models, adjust the score range if it's unreasonable
+        if model_type in ['random_forest', 'xgboost']:
+            # Tree models might produce very different score ranges
+            # Ensure reasonable credit score range (typically 300-850)
+            if max_total_score > 1000 or min_total_score < 0:
+                # Rescale to reasonable range
+                current_range = max_total_score - min_total_score
+                if current_range > 0:
+                    scale_factor = 550 / current_range  # Target range of 550 points
+                    # Rescale all scores
+                    for bin_info in scorecard_bins:
+                        bin_info['score'] = round(300 + (bin_info['score'] - min_total_score) * scale_factor, 2)
+                    # Recalculate total range
+                    min_total_score = 300
+                    max_total_score = 850
 
         return jsonify({
             "success": True,
@@ -2554,25 +3050,28 @@ def generate_scorecard():
                 "intercept": round(float(intercept), 4),
                 "n_variables": N,
                 "min_score": min_total_score,
-                "max_score": max_total_score
+                "max_score": max_total_score,
+                "model_type": model_type
             },
             "model_summary": {
                 "coefficients": {k: round(float(v), 4) for k, v in coefficients.items()},
                 "intercept": round(float(intercept), 4),
                 "n_observations": len(model_df),
-                "n_variables": N
+                "n_variables": N,
+                "model_type": model_type
             }
         })
 
     except Exception as e:
+        import traceback
+        print(f"ERROR in generate_scorecard: {traceback.format_exc()}")
         return jsonify({"error": f"Failed to generate score card ({type(e).__name__}): {str(e)}"}), 500
-
+    
 # ----------- Apply Score Card to All Records -----------
 @app.route('/api/apply-scorecard', methods=['POST'])
 def apply_scorecard():
     """
-    Applies the score card to all records in the uploaded dataset and returns sorted results.
-    Returns: [{index, score, target, ...}]
+    Applies the score card to all records in the uploaded dataset using pre-computed model results.
     """
     import numpy as np
     try:
@@ -2580,7 +3079,8 @@ def apply_scorecard():
         selected_variables = data.get('selected_variables', [])
         target = data.get('target')
         woe_transformed_data = data.get('woe_transformed_data', {})
-        scorecard_bins = data.get('scorecard_bins', None)
+        model_results = data.get('model_results', {})  # Accept pre-computed model results
+        model_type = data.get('model_type', 'logistic')  # Accept model type
 
         # Input validation
         if not selected_variables or not target or not woe_transformed_data:
@@ -2595,7 +3095,6 @@ def apply_scorecard():
             if var in df.columns:
                 df[var] = df[var].replace([np.inf, -np.inf], np.nan)
                 if df[var].isnull().any():
-                    # Fill NaN with a placeholder (e.g., -9999 for discrete, or median for continuous)
                     if df[var].dtype.kind in 'biufc':
                         df[var] = df[var].fillna(df[var].median())
                     else:
@@ -2606,6 +3105,8 @@ def apply_scorecard():
         for var in selected_variables:
             woe_data = woe_transformed_data[var]
             ranges_list = None
+            
+            # Get the correct WOE data structure
             if isinstance(woe_data, dict) and 'woe_ranges' in woe_data and isinstance(woe_data['woe_ranges'], list):
                 ranges_list = woe_data['woe_ranges']
             elif isinstance(woe_data, dict) and 'stats' in woe_data and isinstance(woe_data['stats'], list):
@@ -2614,22 +3115,30 @@ def apply_scorecard():
                     'woe': float(r.get('WOE') or 0)
                 } for r in woe_data['stats']]
             else:
+                print(f"DEBUG: No valid WOE data structure found for {var}")
                 continue
             if not ranges_list:
+                print(f"DEBUG: Empty ranges list for {var}")
                 continue
+                
             woe_mapping = {}
+            assigned_count = 0
+            
             for range_info in ranges_list:
                 try:
                     bin_range = range_info.get('range') if isinstance(range_info, dict) else str(range_info)
                     woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
                     if bin_range is None:
                         continue
+
                     # Handle Missing/NaN
                     if isinstance(bin_range, str) and ('Missing' in bin_range or 'NaN' in bin_range):
                         mask = df[var].isna() | (df[var] == 'Missing')
                         for idx in df[mask].index:
                             woe_mapping[idx] = woe_value
+                        assigned_count += mask.sum()
                         continue
+
                     # Numeric range parsing (e.g., "(a, b]", "[a, b]")
                     if isinstance(bin_range, str) and any(ch in bin_range for ch in '(),[]'):
                         range_str = bin_range.replace('(', '').replace(')', '').replace('[', '').replace(']', '')
@@ -2646,9 +3155,11 @@ def apply_scorecard():
                                     mask = (df[var] > lower) & (df[var] <= upper)
                                 for idx in df[mask].index:
                                     woe_mapping[idx] = woe_value
+                                assigned_count += mask.sum()
                                 continue
                             except (ValueError, TypeError):
                                 pass
+
                     # Hyphen-separated ranges (e.g., "1 - 2")
                     hyphen_match = re.match(r'^\s*-?\d+(?:\.\d+)?\s*-\s*-?\d+(?:\.\d+)?\s*$', str(bin_range))
                     if isinstance(bin_range, str) and hyphen_match:
@@ -2658,9 +3169,11 @@ def apply_scorecard():
                             mask = (df[var].astype(float) >= lower) & (df[var].astype(float) <= upper)
                             for idx in df[mask].index:
                                 woe_mapping[idx] = woe_value
+                            assigned_count += mask.sum()
                             continue
                         except (ValueError, TypeError):
                             pass
+
                     # Categorical values (comma-separated or single)
                     if isinstance(bin_range, str):
                         cat_vals = [v.strip() for v in bin_range.split(',') if v.strip()]
@@ -2669,81 +3182,228 @@ def apply_scorecard():
                                 mask = df[var].astype(str) == str(cat_val)
                                 for idx in df[mask].index:
                                     woe_mapping[idx] = woe_value
+                                assigned_count += mask.sum()
                             except Exception:
                                 continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"DEBUG: Error processing range {bin_range} for {var}: {e}")
+                    continue
+
+            print(f"DEBUG: Assigned WOE values for {var}: {assigned_count} rows")
+            
             if woe_mapping:
                 woe_column = [woe_mapping.get(i, 0) for i in range(len(df))]
                 modeling_data[var] = woe_column
             else:
                 modeling_data[var] = [0] * len(df)
 
-        # Score card parameters (reuse logic from generate-scorecard)
-        # For simplicity, re-fit logistic regression to get coefficients/intercept
+        # Create DataFrame with WOE-transformed variables
         model_df = pd.DataFrame(modeling_data)
         model_df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
-        X = model_df[selected_variables]
-        y = model_df[target]# Fit logistic regression
-        X_with_const = sm.add_constant(X)
-        logit_model = sm.Logit(y, X_with_const)
-        try:
-            result = logit_model.fit(disp=0, maxiter=1000)
-        except Exception as e:
-            return jsonify({"error": f"Model fit error: {str(e)}"}), 500
-        coefficients = result.params.to_dict()
-        intercept = coefficients.get('const', 0)
-        N = len(selected_variables)
-        base_score = 600
-        base_odds = 50
-        factor = 20 / np.log(2)
-        offset = base_score - factor * np.log(base_odds)
 
-        # Calculate score for each record
-        # Reverse sign of coefficients so higher score = more good-like
+        # Remove rows with missing target
+        mask = ~model_df[target].isna()
+        X = model_df[selected_variables]
+        y = model_df[target][mask]
+        X = X[mask]
+
+        if len(X) == 0:
+            return jsonify({"error": "No valid data after preprocessing"}), 400
+
+        # Calculate scores based on model type
         scores = []
-        for idx, row in model_df.iterrows():
-            score = 0
-            for var in selected_variables:
-                beta = coefficients.get(var, 0)
-                woe = row[var]
-                score += (-beta * woe + intercept / N) * factor + offset / N
-            scores.append(round(float(score), 2))
+        
+        if model_type == 'logistic' and model_results:
+            # Use logistic regression coefficients
+            coefficients = {}
+            intercept = 0
+            
+            if 'coefficients' in model_results:
+                for coef_info in model_results['coefficients']:
+                    var_name = coef_info.get('variable')
+                    if var_name and var_name != 'Intercept':
+                        coefficients[var_name] = coef_info.get('coefficient', 0)
+                    elif var_name == 'Intercept':
+                        intercept = coef_info.get('coefficient', 0)
+            
+            # Score card parameters for logistic regression
+            N = len(selected_variables)
+            factor = 20 / np.log(2)  # ≈ 28.8539
+            base_odds = 50
+            base_score = 600
+            offset = base_score - factor * np.log(base_odds)  # ≈ 427.432
+
+            # FIXED: Use NEGATIVE coefficients so higher risk = lower score
+            for idx in range(len(X)):
+                score = 0
+                for var in selected_variables:
+                    beta = coefficients.get(var, 0)
+                    woe = X.iloc[idx][var] if var in X.columns else 0
+                    # FIX: Use NEGATIVE beta to ensure higher risk = lower score
+                    score += (-beta * woe + intercept / N) * factor + offset / N
+                scores.append(round(float(score), 2))
+                
+        elif model_type in ['random_forest', 'xgboost'] and model_results:
+            # For tree-based models, use the actual model predictions
+            try:
+                if model_type == 'random_forest':
+                    from sklearn.ensemble import RandomForestClassifier
+                    # Recreate the Random Forest model with the same parameters
+                    rf_model = RandomForestClassifier(
+                        n_estimators=model_results.get('model_stats', {}).get('n_estimators', 100),
+                        max_depth=model_results.get('model_stats', {}).get('max_depth', 10),
+                        random_state=42,
+                        n_jobs=-1
+                    )
+                    rf_model.fit(X, y)
+                    # Get probability of being BAD (class 1)
+                    y_pred_proba_bad = rf_model.predict_proba(X)[:, 1]
+                    
+                elif model_type == 'xgboost':
+                    import xgboost as xgb
+                    # Recreate the XGBoost model with the same parameters
+                    xgb_model = xgb.XGBClassifier(
+                        n_estimators=model_results.get('model_stats', {}).get('n_estimators', 100),
+                        max_depth=model_results.get('model_stats', {}).get('max_depth', 6),
+                        learning_rate=model_results.get('model_stats', {}).get('learning_rate', 0.1),
+                        random_state=42
+                    )
+                    xgb_model.fit(X, y)
+                    # Get probability of being BAD (class 1)
+                    y_pred_proba_bad = xgb_model.predict_proba(X)[:, 1]
+                
+                # FIXED: Convert BAD probabilities to scores where higher risk = lower score
+                min_score = 300
+                max_score = 850
+                
+                # FIX: Higher bad probability = Lower score
+                # Use inverse relationship: score = max_score - (bad_probability * score_range)
+                score_range = max_score - min_score
+                scores = max_score - (y_pred_proba_bad * score_range)
+                
+                scores = [round(float(score), 2) for score in scores]
+                
+                print(f"DEBUG: Tree model scoring - Bad probabilities range: {np.min(y_pred_proba_bad):.4f} to {np.max(y_pred_proba_bad):.4f}")
+                print(f"DEBUG: Tree model scoring - Scores range: {np.min(scores):.2f} to {np.max(scores):.2f}")
+                
+            except Exception as model_err:
+                print(f"DEBUG: Tree model scoring failed: {model_err}")
+                # Fallback: use feature importance-based scoring with proper direction
+                if 'feature_importance' in model_results:
+                    coefficients = {}
+                    for feature_info in model_results['feature_importance']:
+                        var_name = feature_info.get('variable')
+                        importance = feature_info.get('importance', 0)
+                        coefficients[var_name] = importance * 100  # Scale factor
+                    
+                    # FIXED: Simple additive scoring with proper direction
+                    for idx in range(len(X)):
+                        score = 600  # Base score
+                        for var in selected_variables:
+                            beta = coefficients.get(var, 0)
+                            woe = X.iloc[idx][var] if var in X.columns else 0
+                            # FIX: Use negative relationship for risk factors
+                            score -= beta * woe
+                        scores.append(round(float(score), 2))
+                else:
+                    return jsonify({"error": f"Failed to calculate scores for {model_type}: {str(model_err)}"}), 500
+        else:
+            return jsonify({"error": f"Unsupported model type or missing model results: {model_type}"}), 400
 
         # Prepare results
-        results = []
-        y_true = []
-        y_score = []
+        results_list = []
+        y_true = y.tolist()
+        y_score = scores
+        
         for idx, score in enumerate(scores):
-            target_val = int(model_df.iloc[idx][target])
-            results.append({
-                "index": idx,
+            results_list.append({
+                "index": int(X.index[idx]) if hasattr(X, 'index') else idx,
                 "score": score,
-                "target": target_val
+                "target": int(y_true[idx])
             })
-            y_true.append(target_val)
-            y_score.append(score)
-        # Sort descending by score
-        results = sorted(results, key=lambda x: x["score"], reverse=True)
+        
+        # Sort descending by score (HIGHEST scores first = LOWEST risk first)
+        results_list = sorted(results_list, key=lambda x: x["score"], reverse=True)
 
         # Calculate KS statistic (separation number)
         try:
             from sklearn.metrics import roc_curve
-            import numpy as np
             fpr, tpr, thresholds = roc_curve(y_true, y_score)
             diffs = np.abs(tpr - fpr)
             ks_stat = float(np.max(diffs)) if len(diffs) > 0 else 0.0
+            
+            # Get KS threshold
+            ks_idx = np.argmax(diffs)
+            ks_threshold = float(thresholds[ks_idx]) if len(thresholds) > ks_idx else 0.0
+            
+            print(f"DEBUG: KS Statistic calculated: {ks_stat}, Threshold: {ks_threshold}")
+            
+            # Debug: Check score distribution by target
+            scores_0 = [score for score, target in zip(scores, y_true) if target == 0]
+            scores_1 = [score for score, target in zip(scores, y_true) if target == 1]
+            print(f"DEBUG: Score distribution - Good (0): {np.mean(scores_0):.2f} ± {np.std(scores_0):.2f}")
+            print(f"DEBUG: Score distribution - Bad  (1): {np.mean(scores_1):.2f} ± {np.std(scores_1):.2f}")
+            
         except Exception as ks_err:
+            print(f"DEBUG: KS calculation error: {ks_err}")
             ks_stat = None
+            ks_threshold = None
 
-        return jsonify({"success": True, "results": results, "ks_stat": ks_stat})
+        # Calculate additional metrics
+        try:
+            from sklearn.metrics import auc, accuracy_score, precision_score, recall_score, f1_score
+            
+            # ROC AUC
+            roc_auc = auc(fpr, tpr) if 'fpr' in locals() and 'tpr' in locals() else 0.0
+            
+            # For credit scoring, we typically use a different threshold than 0.5
+            # Since scores are now properly scaled, we can use a score threshold
+            score_threshold = np.percentile(scores, 50)  # Median score as threshold
+            y_pred = [1 if score < score_threshold else 0 for score in scores]  # Lower score = higher risk = predicted bad
+            
+            accuracy = accuracy_score(y_true, y_pred)
+            precision = precision_score(y_true, y_pred, zero_division=0)
+            recall = recall_score(y_true, y_pred, zero_division=0)
+            f1 = f1_score(y_true, y_pred, zero_division=0)
+            
+            print(f"DEBUG: Additional metrics - AUC: {roc_auc:.4f}, Accuracy: {accuracy:.4f}")
+            print(f"DEBUG: Classification at score threshold {score_threshold:.2f}")
+            
+        except Exception as metric_err:
+            print(f"DEBUG: Metric calculation error: {metric_err}")
+            roc_auc = 0.0
+            accuracy = 0.0
+            precision = 0.0
+            recall = 0.0
+            f1 = 0.0
+
+        return jsonify({
+            "success": True, 
+            "results": results_list, 
+            "ks_stat": ks_stat,
+            "ks_threshold": ks_threshold,
+            "auc": roc_auc,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "model_type": model_type,
+            "variables_used": selected_variables,
+            "n_records": len(results_list),
+            "score_range": {
+                "min": float(np.min(scores)) if len(scores) > 0 else 0,
+                "max": float(np.max(scores)) if len(scores) > 0 else 0,
+                "mean": float(np.mean(scores)) if len(scores) > 0 else 0
+            }
+        })
+        
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         print(f"ERROR in apply_scorecard: {tb}")
-        return jsonify({"error": f"Failed to apply score card ({type(e).__name__}): {str(e)}", "traceback": tb}), 500
-
-
+        return jsonify({"error": f"Failed to apply score card ({type(e).__name__}): {str(e)}"}), 500
+    
+    
 def classify_with_heuristics(column_name, samples):
     """
     Enhanced heuristic classification for discrete vs continuous variables.
