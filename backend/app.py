@@ -24,7 +24,7 @@ from io import BytesIO
 from db import get_db_connection, init_db, save_record_db, upsert_single_record_db, get_records_db, get_latest_record_dataset_path_db, get_record_db, delete_record_db, save_finebin_details_db, get_finebin_details_db
 import traceback
 import logging
-from auto_monotonic_binning import auto_monotonic_binning, compute_woe
+from auto_monotonic_binning import auto_monotonic_binning, compute_woe, compute_iv
 
 # Optional: load environment variables from a .env file if present
 try:
@@ -599,6 +599,7 @@ def auto_monotonic_binning_api():
         "type": "continuous" or "discrete",
         "direction": "increasing", "decreasing", or null (auto-detect),
         "method": "greedy" or "exhaustive",
+        "prioritize_iv": true or false (default: true, only for exhaustive),
         "record_id": optional record ID,
         "dashboard_selected_columns": optional list
     }
@@ -612,6 +613,7 @@ def auto_monotonic_binning_api():
         var_type = req.get('type')
         direction = req.get('direction')  # 'increasing', 'decreasing', or None
         method = req.get('method', 'greedy')  # 'greedy' or 'exhaustive'
+        prioritize_iv = req.get('prioritize_iv', True)  # default to True
         record_id = req.get('record_id')
         
         if not var or not target or not var_type:
@@ -648,7 +650,7 @@ def auto_monotonic_binning_api():
         good = np.array(good_counts)
         bad = np.array(bad_counts)
         
-        print(f"Auto-binning for {var}: {len(bin_labels)} bins, direction={direction}, method={method}")
+        print(f"Auto-binning for {var}: {len(bin_labels)} bins, direction={direction}, method={method}, prioritize_iv={prioritize_iv}")
         print(f"Initial bins: {bin_labels}")
         print(f"Initial Good: {good}")
         print(f"Initial Bad: {bad}")
@@ -661,10 +663,11 @@ def auto_monotonic_binning_api():
             bin_labels=bin_labels,
             variable_type=var_type,
             direction=direction,
-            method=method
+            method=method,
+            prioritize_iv=prioritize_iv
         )
         
-        print(f"Auto-binning result: {result['num_merges']} merges, monotonic={result['is_monotonic']}")
+        print(f"Auto-binning result: {result['num_merges']} merges, monotonic={result['is_monotonic']}, IV={result['iv']:.4f}")
         print(f"Final bins: {result['merged_labels']}")
         print(f"Final WOE: {result['woe_values']}")
         

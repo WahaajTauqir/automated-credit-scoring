@@ -68,6 +68,43 @@ def compute_woe(good: np.ndarray, bad: np.ndarray) -> np.ndarray:
     return woe
 
 
+def compute_iv(good: np.ndarray, bad: np.ndarray) -> float:
+    """
+    Compute Information Value (IV) for the binning.
+    
+    IV = Σ (Dist_Good% - Dist_Bad%) * WOE
+    
+    Parameters:
+    -----------
+    good : np.ndarray
+        Count of good instances in each bin
+    bad : np.ndarray
+        Count of bad instances in each bin
+        
+    Returns:
+    --------
+    float
+        Information Value
+    """
+    total_good = good.sum()
+    total_bad = bad.sum()
+    
+    # Avoid division by zero
+    if total_good == 0 or total_bad == 0:
+        return 0.0
+    
+    good_dist = good / total_good
+    bad_dist = bad / total_bad
+    
+    # Compute WOE for each bin
+    woe = compute_woe(good, bad)
+    
+    # IV = Σ (good_dist - bad_dist) * woe
+    iv = np.sum((good_dist - bad_dist) * woe)
+    
+    return iv
+
+
 def is_monotonic(arr: np.ndarray, increasing: bool = True) -> bool:
     """
     Check if array is monotonic (either increasing or decreasing).
@@ -228,7 +265,8 @@ def exhaustive_merge_bins_woe(
     bin_labels: List[str],
     increasing: Optional[bool] = None,
     continuous: bool = True,
-    max_bins: Optional[int] = None
+    max_bins: Optional[int] = None,
+    prioritize_iv: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray, Dict[str, List[str]]]:
     """
     Exhaustive algorithm to find the best bin merging that achieves monotonic WOE.
@@ -237,8 +275,12 @@ def exhaustive_merge_bins_woe(
     For discrete variables, it will fall back to the greedy algorithm.
     
     For continuous variables: Explores ALL possible adjacent merge combinations 
-    (2^(n-1) possibilities for n bins) and selects the optimal solution with 
-    maximum bins and lowest WOE variance.
+    (2^(n-1) possibilities for n bins) and selects the optimal solution.
+    
+    Selection criteria (in priority order):
+    1. If prioritize_iv=True: Highest IV (Information Value)
+    2. If prioritize_iv=False: Maximum bins (fewer merges)
+    3. Tiebreaker: Lower WOE variance
     
     For discrete variables: A true exhaustive search would require exploring all 
     possible set partitions (Bell number B_n), which is computationally infeasible.
@@ -260,6 +302,9 @@ def exhaustive_merge_bins_woe(
         If False, any bins can merge (discrete variable).
     max_bins : Optional[int]
         Maximum number of bins to keep (will stop when reached)
+    prioritize_iv : bool
+        If True, prioritize solutions with higher IV.
+        If False, prioritize solutions with more bins (traditional approach).
         
     Returns:
     --------
@@ -289,6 +334,7 @@ def exhaustive_merge_bins_woe(
         good, bad, bin_labels, increasing, continuous
     )
     best_num_bins = len(best_good)
+    best_iv = compute_iv(best_good, best_bad)
     
     # If already has few bins or meets target, return greedy solution
     if max_bins and best_num_bins <= max_bins:
@@ -314,7 +360,10 @@ def exhaustive_merge_bins_woe(
         print(f"Falling back to greedy algorithm.")
         return best_good, best_bad, best_labels, best_woe, best_merge_map
     
-    print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins...")
+    if prioritize_iv:
+        print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins (prioritizing IV)...")
+    else:
+        print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins (prioritizing bin count)...")
     
     for combination_idx in range(total_combinations):
         # Convert combination index to binary representation
@@ -367,16 +416,37 @@ def exhaustive_merge_bins_woe(
         test_woe = compute_woe(test_good, test_bad)
         
         if is_monotonic(test_woe, increasing):
-            # Found a valid solution - check if it's better
-            # Prefer solutions with more bins (fewer merges), or same bins but lower WOE variance
-            if len(test_good) > best_num_bins or \
-               (len(test_good) == best_num_bins and np.std(test_woe) < np.std(best_woe)):
+            # Found a valid monotonic solution - check if it's better
+            test_iv = compute_iv(test_good, test_bad)
+            test_num_bins = len(test_good)
+            
+            if prioritize_iv:
+                # Prioritize higher IV, then more bins, then lower WOE variance
+                is_better = (
+                    test_iv > best_iv or
+                    (test_iv == best_iv and test_num_bins > best_num_bins) or
+                    (test_iv == best_iv and test_num_bins == best_num_bins and np.std(test_woe) < np.std(best_woe))
+                )
+            else:
+                # Traditional approach: prioritize more bins, then lower WOE variance
+                is_better = (
+                    test_num_bins > best_num_bins or
+                    (test_num_bins == best_num_bins and np.std(test_woe) < np.std(best_woe))
+                )
+            
+            if is_better:
                 best_good = test_good.copy()
                 best_bad = test_bad.copy()
                 best_labels = test_labels.copy()
                 best_woe = test_woe
                 best_merge_map = copy.deepcopy(test_merge_map)
-                best_num_bins = len(test_good)
+                best_num_bins = test_num_bins
+                best_iv = test_iv
+    
+    if prioritize_iv:
+        print(f"Best solution found: {best_num_bins} bins with IV = {best_iv:.4f}")
+    else:
+        print(f"Best solution found: {best_num_bins} bins")
     
     return best_good, best_bad, best_labels, best_woe, best_merge_map
 
@@ -388,7 +458,8 @@ def auto_monotonic_binning(
     variable_type: str = 'continuous',
     direction: Optional[str] = None,
     method: str = 'greedy',
-    max_bins: Optional[int] = None
+    max_bins: Optional[int] = None,
+    prioritize_iv: bool = True
 ) -> Dict[str, Any]:
     """
     Main function to perform automated monotonic binning.
@@ -409,6 +480,10 @@ def auto_monotonic_binning(
         'greedy' or 'exhaustive'
     max_bins : Optional[int]
         Maximum number of bins to keep
+    prioritize_iv : bool
+        If True and method='exhaustive', prioritize solutions with higher IV.
+        If False, prioritize solutions with more bins (traditional approach).
+        Only applies to exhaustive method.
         
     Returns:
     --------
@@ -417,6 +492,7 @@ def auto_monotonic_binning(
         - merged_bad: Bad counts after merging
         - merged_labels: Labels after merging
         - woe_values: WOE values after merging
+        - iv: Information Value of the final binning
         - merge_mapping: Dictionary mapping new bins to original bins
         - is_monotonic: Boolean indicating if result is monotonic
         - direction: 'increasing' or 'decreasing'
@@ -455,12 +531,15 @@ def auto_monotonic_binning(
 
     if method == 'exhaustive':
         merged_good, merged_bad, merged_labels, final_woe, merge_map = exhaustive_merge_bins_woe(
-            good, bad, bin_labels, increasing, continuous, max_bins
+            good, bad, bin_labels, increasing, continuous, max_bins, prioritize_iv
         )
     else:  # greedy
         merged_good, merged_bad, merged_labels, final_woe, merge_map = greedy_merge_bins_woe(
             good, bad, bin_labels, increasing, continuous
         )
+    
+    # Calculate IV for the final binning
+    final_iv = compute_iv(merged_good, merged_bad)
     
     # Determine final direction
     if increasing is None:
@@ -480,6 +559,7 @@ def auto_monotonic_binning(
         'merged_bad': merged_bad.tolist(),
         'merged_labels': merged_labels,
         'woe_values': final_woe.tolist(),
+        'iv': final_iv,
         'merge_mapping': merge_map,
         'is_monotonic': is_monotonic(final_woe, final_direction == 'increasing'),
         'direction': final_direction,
@@ -513,6 +593,7 @@ if __name__ == "__main__":
     print(f"Merged Bad: {result['merged_bad']}")
     print(f"Merged Labels: {result['merged_labels']}")
     print(f"WOE Values: {result['woe_values']}")
+    print(f"IV: {result['iv']:.4f}")
     print(f"Is Monotonic: {result['is_monotonic']}")
     print(f"Direction: {result['direction']}")
     print(f"Number of Merges: {result['num_merges']}")
@@ -527,14 +608,17 @@ if __name__ == "__main__":
     print(f"Bad: {bad}")
     print(f"Labels: {bin_labels}")
     print(f"Initial WOE: {compute_woe(good, bad)}")
+    initial_iv = compute_iv(good, bad)
+    print(f"Initial IV: {initial_iv:.4f}")
     
-    result = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='exhaustive')
+    result = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='exhaustive', prioritize_iv=True)
     
-    print("\nExhaustive Algorithm Result:")
+    print("\nExhaustive Algorithm Result (IV-prioritized):")
     print(f"Merged Good: {result['merged_good']}")
     print(f"Merged Bad: {result['merged_bad']}")
     print(f"Merged Labels: {result['merged_labels']}")
     print(f"WOE Values: {result['woe_values']}")
+    print(f"IV: {result['iv']:.4f}")
     print(f"Is Monotonic: {result['is_monotonic']}")
     print(f"Direction: {result['direction']}")
     print(f"Number of Merges: {result['num_merges']}")
@@ -554,28 +638,43 @@ if __name__ == "__main__":
     print(f"Labels: {bin_labels}")
     initial_woe = compute_woe(good, bad)
     print(f"Initial WOE: {initial_woe}")
+    initial_iv = compute_iv(good, bad)
+    print(f"Initial IV: {initial_iv:.4f}")
     print(f"Initial Monotonic: {is_monotonic(initial_woe, True) or is_monotonic(initial_woe, False)}")
     
     result_greedy = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='greedy')
     print("\nGreedy Result:")
     print(f"Final Bins: {result_greedy['num_bins_final']}")
     print(f"WOE Values: {result_greedy['woe_values']}")
+    print(f"IV: {result_greedy['iv']:.4f}")
     print(f"Is Monotonic: {result_greedy['is_monotonic']}")
     print(f"Number of Merges: {result_greedy['num_merges']}")
     
-    result_exhaustive = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='exhaustive')
-    print("\nExhaustive Result:")
+    result_exhaustive = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='exhaustive', prioritize_iv=True)
+    print("\nExhaustive Result (IV-prioritized):")
     print(f"Final Bins: {result_exhaustive['num_bins_final']}")
     print(f"WOE Values: {result_exhaustive['woe_values']}")
+    print(f"IV: {result_exhaustive['iv']:.4f}")
     print(f"Is Monotonic: {result_exhaustive['is_monotonic']}")
     print(f"Number of Merges: {result_exhaustive['num_merges']}")
     
+    result_exhaustive_bins = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='exhaustive', prioritize_iv=False)
+    print("\nExhaustive Result (Bin-count prioritized):")
+    print(f"Final Bins: {result_exhaustive_bins['num_bins_final']}")
+    print(f"WOE Values: {result_exhaustive_bins['woe_values']}")
+    print(f"IV: {result_exhaustive_bins['iv']:.4f}")
+    print(f"Is Monotonic: {result_exhaustive_bins['is_monotonic']}")
+    print(f"Number of Merges: {result_exhaustive_bins['num_merges']}")
+    
     print("\nComparison:")
-    print(f"Greedy bins: {result_greedy['num_bins_final']}, Exhaustive bins: {result_exhaustive['num_bins_final']}")
-    if result_exhaustive['num_bins_final'] > result_greedy['num_bins_final']:
-        print("✓ Exhaustive found solution with MORE bins (fewer merges) - Better!")
-    elif result_exhaustive['num_bins_final'] == result_greedy['num_bins_final']:
-        print("= Both methods achieved same number of bins")
+    print(f"Greedy: {result_greedy['num_bins_final']} bins, IV={result_greedy['iv']:.4f}")
+    print(f"Exhaustive (IV-prioritized): {result_exhaustive['num_bins_final']} bins, IV={result_exhaustive['iv']:.4f}")
+    print(f"Exhaustive (Bin-prioritized): {result_exhaustive_bins['num_bins_final']} bins, IV={result_exhaustive_bins['iv']:.4f}")
+    
+    if result_exhaustive['iv'] > result_greedy['iv']:
+        print("✓ IV-prioritized exhaustive found solution with HIGHER IV - Better!")
+    if result_exhaustive_bins['num_bins_final'] >= result_greedy['num_bins_final']:
+        print("✓ Bin-prioritized exhaustive found solution with MORE bins - Better!")
     
     # Test case 4: Discrete variable - GREEDY
     print("\n" + "=" * 70)
