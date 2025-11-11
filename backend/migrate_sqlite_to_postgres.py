@@ -6,7 +6,7 @@ import os
 SQLITE_DB = os.path.join(os.path.dirname(__file__), 'records.db')
 PG_DBNAME = os.getenv('PG_DBNAME', 'mydb')
 PG_USER = os.getenv('PG_USER', 'myuser')
-PG_PASSWORD = os.getenv('PG_PASSWORD', 'my123')
+PG_PASSWORD = os.getenv('PG_PASSWORD', 'mypassword')
 PG_HOST = os.getenv('PG_HOST', 'localhost')
 PG_PORT = os.getenv('PG_PORT', '5432')
 
