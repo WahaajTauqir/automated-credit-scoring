@@ -1,0 +1,57 @@
+%% Automatic Monotonic Binning — Flowchart
+%% Shows how auto-monotonic binning is implemented and invoked in this repository
+%%{init: {"theme": "dark", "flowchart": {"defaultRenderer": "elk", "htmlLabels": true}, "themeVariables": {"primaryColor": "#0f172a", "primaryTextColor": "#ffffff", "primaryBorderColor": "#60a5fa"}} }%%
+flowchart TD
+  classDef proc fill:#0b1220,stroke:#60a5fa,stroke-width:1px,color:#ffffff;
+  classDef decision fill:#2b2b2b,stroke:#f59e0b,stroke-width:1px,color:#ffffff;
+  classDef data fill:#052e16,stroke:#34d399,stroke-width:1px,color:#ffffff;
+  classDef note fill:#111827,stroke:#6b7280,stroke-width:1px,color:#ffffff;
+
+  Start((Start))
+  LoadCSV["Load dataset (uploaded.csv) & validate target"]:::data
+  CoarseChoice{"Variable type?"}:::decision
+  CoarseCont["Coarse bin: continuous\n(pd.qcut -> bin edges)\nfunction: coarse_bin_continuous"]:::proc
+  CoarseDisc["Coarse bin: discrete\n(group by categories -> bad-rate clusters)\nfunction: coarse_bin_discrete"]:::proc
+  ExtractCounts["Extract bin labels, Good counts, Bad counts\n(from coarse stats table)"]:::proc
+  ComputeWOE["Compute initial WOE\nfunction: compute_woe (eps handled)"]:::proc
+  DirectionChoice{"Direction provided?"}:::decision
+  AutoDetect["Auto-detect direction via correlation\n(corr(positions, initial_woe) >= 0 → increasing)"]:::proc
+  UseProvided["Use provided direction (increasing/decreasing)"]:::proc
+  MethodChoice{"Method?"}:::decision
+  Greedy["Greedy algorithm (merge violations iteratively)\nfunction: greedy_merge_bins_woe"]:::proc
+  Exhaustive["Exhaustive search (baseline=greedy; try merge strategies)\nfunction: exhaustive_merge_bins_woe"]:::proc
+  GreedyLoopStart(["Compute WOE -> is_monotonic? (is_monotonic)"])
+  ViolationFound{"Violation?"}:::decision
+  FindFirst["Find first violation index i"]:::proc
+  MergeDecision{"Variable_type: continuous?"}:::decision
+  MergeAdj["Continuous: merge adjacent bins i & i+1"]:::proc
+  MergeBest["Discrete: evaluate candidate merges (min WOE variance)\nmerge bin i with best candidate"]:::proc
+  UpdateState["Update counts, labels, merge_map; iterate"]:::proc
+  GreedyEnd(["Final WOE; return merged counts/labels/map"]):::proc
+  ExhaustiveStart["Start with greedy baseline\nTry multiple deterministic/random merge orders\nAccept strategy if monotonic & fewer merges / better WOE spread"]:::proc
+  ExhaustiveSelect["Select best solution (fewest bins, lower WOE std)\nReturn merged counts/labels/map"]:::proc
+  ApplyMerges["Apply merge_map → call fine_bin_continuous / fine_bin_discrete\nThis builds final_bin per row and computes ranges"]:::proc
+  ComputeFinalWOEIV["Calculate WOE & IV on final bins\nfunction: calculate_woe_iv"]:::proc
+  Persist["Save fine-bin results & stats to DB"]:::proc
+  Response["Return JSON: success, stats, bin_merges, is_monotonic, direction, num_merges"]:::proc
+  EdgeNotes["Edge cases:\n- Epsilon for log(0)\n- Max iterations limit\n- Continuous = adjacent merges\n- Discrete = any merges"]:::note
+
+  Start --> LoadCSV --> CoarseChoice
+  CoarseChoice -->|continuous| CoarseCont --> ExtractCounts
+  CoarseChoice -->|discrete| CoarseDisc --> ExtractCounts
+  ExtractCounts --> ComputeWOE --> DirectionChoice
+  DirectionChoice -->|no| AutoDetect --> MethodChoice
+  DirectionChoice -->|yes| UseProvided --> MethodChoice
+  MethodChoice -->|greedy| Greedy
+  MethodChoice -->|exhaustive| Exhaustive
+  Greedy --> GreedyLoopStart --> ViolationFound
+  ViolationFound -->|no| GreedyEnd
+  ViolationFound -->|yes| FindFirst --> MergeDecision
+  MergeDecision -->|continuous| MergeAdj --> UpdateState --> GreedyLoopStart
+  MergeDecision -->|discrete| MergeBest --> UpdateState --> GreedyLoopStart
+  Exhaustive --> ExhaustiveStart --> ExhaustiveSelect
+  GreedyEnd --> ApplyMerges
+  ExhaustiveSelect --> ApplyMerges
+  ApplyMerges --> ComputeFinalWOEIV --> Persist --> Response
+  Response --> End((End))
+  EdgeNotes --- ComputeWOE

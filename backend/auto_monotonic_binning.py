@@ -8,8 +8,16 @@ or strictly decreasing.
 For continuous variables: Only adjacent bins can be merged.
 For discrete variables: Any bins can be merged.
 
-The algorithm exhaustively explores merge possibilities and selects the best solution
-that achieves monotonicity with the minimum number of merges.
+Two algorithms are available:
+1. Greedy: Fast, merges one violation at a time
+   - Supports both continuous and discrete variables
+   - For discrete: Finds best non-adjacent merge to minimize WOE variance
+   
+2. Exhaustive: Explores all 2^(n-1) possible adjacent merge combinations for n bins
+   - Only supports continuous variables (adjacent-bin merging)
+   - Falls back to greedy for discrete variables
+   - Has performance limits: warns at n>25, hard limit at n>30
+   - Finds optimal solution with maximum bins and monotonic WOE
 """
 
 import numpy as np
@@ -18,6 +26,11 @@ from typing import List, Tuple, Dict, Optional, Any
 import itertools
 import copy
 
+# Hard limit for exhaustive search (adjacent-merge continuous variables)
+# Above this number of bins, exhaustive search (2^(n-1)) becomes prohibitively
+# large. We enforce a conservative hard limit and a warning threshold.
+EXHAUSTIVE_WARNING_LIMIT = 25
+EXHAUSTIVE_HARD_LIMIT = 30
 
 def compute_woe(good: np.ndarray, bad: np.ndarray) -> np.ndarray:
     """
@@ -219,7 +232,17 @@ def exhaustive_merge_bins_woe(
 ) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray, Dict[str, List[str]]]:
     """
     Exhaustive algorithm to find the best bin merging that achieves monotonic WOE.
-    This explores multiple merge possibilities and selects the best one.
+    
+    IMPORTANT: This function only supports continuous variables (adjacent-bin merging).
+    For discrete variables, it will fall back to the greedy algorithm.
+    
+    For continuous variables: Explores ALL possible adjacent merge combinations 
+    (2^(n-1) possibilities for n bins) and selects the optimal solution with 
+    maximum bins and lowest WOE variance.
+    
+    For discrete variables: A true exhaustive search would require exploring all 
+    possible set partitions (Bell number B_n), which is computationally infeasible.
+    For example, B_10 = 115,975 and B_15 = 1,382,958,545.
     
     Parameters:
     -----------
@@ -254,6 +277,13 @@ def exhaustive_merge_bins_woe(
         correlation = np.corrcoef(positions, initial_woe)[0, 1]
         increasing = correlation >= 0
     
+    # For discrete variables, exhaustive search is not supported (would require exploring
+    # all possible set partitions - Bell numbers). Fall back to greedy algorithm.
+    if not continuous:
+        print("WARNING: Exhaustive search not supported for discrete variables.")
+        print("Falling back to greedy algorithm (which supports any-to-any bin merging).")
+        return greedy_merge_bins_woe(good, bad, bin_labels, increasing, continuous)
+    
     # Start with greedy solution as baseline
     best_good, best_bad, best_labels, best_woe, best_merge_map = greedy_merge_bins_woe(
         good, bad, bin_labels, increasing, continuous
@@ -264,72 +294,89 @@ def exhaustive_merge_bins_woe(
     if max_bins and best_num_bins <= max_bins:
         return best_good, best_bad, best_labels, best_woe, best_merge_map
     
-    # Try to find better solutions with fewer merges
-    # Limit search space for computational efficiency
+    # Try all possible merge combinations (truly exhaustive)
     n_bins = len(good)
-    if n_bins <= 4:
-        # For small number of bins, can try more combinations
-        max_merge_attempts = min(10, 2 ** (n_bins - 1))
-    else:
-        # For larger bins, limit to reasonable number
-        max_merge_attempts = 20
+    n_merge_positions = n_bins - 1
     
-    for attempt in range(max_merge_attempts):
+    # Generate all possible merge combinations
+    # Each position can be merged (1) or not merged (0)
+    # This gives us 2^(n_bins-1) possibilities
+    total_combinations = 2 ** n_merge_positions
+    
+    # Warning for large search spaces
+    if n_bins > 25:
+        print(f"WARNING: Exhaustive search with {n_bins} bins requires exploring {total_combinations:,} combinations.")
+        print(f"This may take a very long time. Consider using method='greedy' or reducing bins.")
+    
+    # Hard limit to prevent excessive computation
+    if n_bins > 30:
+        print(f"ERROR: Exhaustive search not recommended for {n_bins} bins (would require {total_combinations:,} combinations).")
+        print(f"Falling back to greedy algorithm.")
+        return best_good, best_bad, best_labels, best_woe, best_merge_map
+    
+    print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins...")
+    
+    for combination_idx in range(total_combinations):
+        # Convert combination index to binary representation
+        # Each bit represents whether to merge at that position
+        merge_pattern = format(combination_idx, f'0{n_merge_positions}b')
+        
+        # Skip the all-zeros case (no merges) if we need monotonicity
+        if combination_idx == 0:
+            continue
+        
         # Create a different merge strategy
         test_good = good.copy()
         test_bad = bad.copy()
         test_labels = bin_labels.copy()
         test_merge_map = {label: [label] for label in test_labels}
         
-        # Randomly select merge order (with seed for determinism)
-        np.random.seed(attempt)
-        merge_order = np.random.permutation(len(test_good) - 1)
+        # Apply merges based on the binary pattern
+        # Process from right to left to maintain correct indices
+        merges_to_apply = []
+        for pos in range(n_merge_positions):
+            if merge_pattern[pos] == '1':
+                merges_to_apply.append(pos)
         
-        for merge_idx in merge_order:
+        # Apply merges from right to left to maintain indices
+        for merge_idx in reversed(merges_to_apply):
             if merge_idx >= len(test_good) - 1:
                 continue
-                
-            # Check if merge would help monotonicity
-            woe_before = compute_woe(test_good, test_bad)
             
-            # Simulate merge
-            sim_good = test_good.copy()
-            sim_bad = test_bad.copy()
-            sim_good[merge_idx] += sim_good[merge_idx + 1]
-            sim_bad[merge_idx] += sim_bad[merge_idx + 1]
-            sim_good = np.delete(sim_good, merge_idx + 1)
-            sim_bad = np.delete(sim_bad, merge_idx + 1)
+            # Perform the merge
+            new_label = f"{test_labels[merge_idx]}_merged_{test_labels[merge_idx + 1]}"
+            test_merge_map[new_label] = test_merge_map.get(test_labels[merge_idx], [test_labels[merge_idx]]) + \
+                                        test_merge_map.get(test_labels[merge_idx + 1], [test_labels[merge_idx + 1]])
             
-            woe_after = compute_woe(sim_good, sim_bad)
+            if test_labels[merge_idx] in test_merge_map:
+                del test_merge_map[test_labels[merge_idx]]
+            if test_labels[merge_idx + 1] in test_merge_map:
+                del test_merge_map[test_labels[merge_idx + 1]]
             
-            # Only merge if it improves or maintains monotonicity
-            if is_monotonic(woe_after, increasing):
-                # Accept this merge
-                new_label = f"{test_labels[merge_idx]}_merged_{test_labels[merge_idx + 1]}"
-                test_merge_map[new_label] = test_merge_map.get(test_labels[merge_idx], [test_labels[merge_idx]]) + \
-                                            test_merge_map.get(test_labels[merge_idx + 1], [test_labels[merge_idx + 1]])
-                
-                if test_labels[merge_idx] in test_merge_map:
-                    del test_merge_map[test_labels[merge_idx]]
-                if test_labels[merge_idx + 1] in test_merge_map:
-                    del test_merge_map[test_labels[merge_idx + 1]]
-                
-                test_good = sim_good
-                test_bad = sim_bad
-                test_labels[merge_idx] = new_label
-                test_labels = [label for i, label in enumerate(test_labels) if i != merge_idx + 1]
-                
-                if is_monotonic(woe_after, increasing):
-                    # Found a valid solution
-                    if len(test_good) > best_num_bins or \
-                       (len(test_good) == best_num_bins and np.std(woe_after) < np.std(best_woe)):
-                        best_good = test_good
-                        best_bad = test_bad
-                        best_labels = test_labels
-                        best_woe = woe_after
-                        best_merge_map = test_merge_map
-                        best_num_bins = len(test_good)
-                    break
+            # Merge counts
+            test_good[merge_idx] += test_good[merge_idx + 1]
+            test_bad[merge_idx] += test_bad[merge_idx + 1]
+            test_good = np.delete(test_good, merge_idx + 1)
+            test_bad = np.delete(test_bad, merge_idx + 1)
+            
+            # Update labels
+            test_labels[merge_idx] = new_label
+            test_labels = [label for i, label in enumerate(test_labels) if i != merge_idx + 1]
+        
+        # After applying all merges, check if this solution is valid
+        test_woe = compute_woe(test_good, test_bad)
+        
+        if is_monotonic(test_woe, increasing):
+            # Found a valid solution - check if it's better
+            # Prefer solutions with more bins (fewer merges), or same bins but lower WOE variance
+            if len(test_good) > best_num_bins or \
+               (len(test_good) == best_num_bins and np.std(test_woe) < np.std(best_woe)):
+                best_good = test_good.copy()
+                best_bad = test_bad.copy()
+                best_labels = test_labels.copy()
+                best_woe = test_woe
+                best_merge_map = copy.deepcopy(test_merge_map)
+                best_num_bins = len(test_good)
     
     return best_good, best_bad, best_labels, best_woe, best_merge_map
 
@@ -388,6 +435,24 @@ def auto_monotonic_binning(
         increasing = None
     
     # Choose algorithm
+    # If exhaustive requested for discrete variables, fall back to greedy with a warning
+    if method == 'exhaustive' and not continuous:
+        print("WARNING: 'exhaustive' method requested for discrete variable. Falling back to 'greedy'.")
+        method = 'greedy'
+
+    # If exhaustive requested, perform some safety checks on bin count before calling
+    if method == 'exhaustive':
+        n_bins = len(bin_labels)
+        if n_bins > EXHAUSTIVE_WARNING_LIMIT:
+            print(
+                f"Warning: exhaustive search will explore 2^{n_bins-1} combinations for {n_bins} bins; this may be slow."
+            )
+        if n_bins > EXHAUSTIVE_HARD_LIMIT:
+            raise ValueError(
+                f"Exhaustive search not allowed for n_bins={n_bins} > {EXHAUSTIVE_HARD_LIMIT}. "
+                "Use method='greedy' or reduce the number of initial bins."
+            )
+
     if method == 'exhaustive':
         merged_good, merged_bad, merged_labels, final_woe, merge_map = exhaustive_merge_bins_woe(
             good, bad, bin_labels, increasing, continuous, max_bins
@@ -426,10 +491,10 @@ def auto_monotonic_binning(
 
 # Example usage and testing
 if __name__ == "__main__":
-    # Test case 1: Continuous variable with decreasing trend
-    print("=" * 60)
-    print("Test Case 1: Continuous Variable (Decreasing Trend)")
-    print("=" * 60)
+    # Test case 1: Continuous variable with decreasing trend - GREEDY
+    print("=" * 70)
+    print("Test Case 1: Continuous Variable (Decreasing Trend) - GREEDY")
+    print("=" * 70)
     
     good = np.array([50, 40, 30, 20])
     bad = np.array([10, 20, 30, 40])
@@ -451,15 +516,74 @@ if __name__ == "__main__":
     print(f"Is Monotonic: {result['is_monotonic']}")
     print(f"Direction: {result['direction']}")
     print(f"Number of Merges: {result['num_merges']}")
-    print(f"Merge Mapping: {result['merge_mapping']}")
     
-    # Test case 2: Discrete variable
-    print("\n" + "=" * 60)
-    print("Test Case 2: Discrete Variable")
-    print("=" * 60)
+    # Test case 2: Same continuous variable - EXHAUSTIVE
+    print("\n" + "=" * 70)
+    print("Test Case 2: Continuous Variable (Decreasing Trend) - EXHAUSTIVE")
+    print("=" * 70)
     
-    good = np.array([100, 80, 60, 90, 70])
-    bad = np.array([20, 30, 40, 25, 35])
+    print("\nOriginal Bins:")
+    print(f"Good: {good}")
+    print(f"Bad: {bad}")
+    print(f"Labels: {bin_labels}")
+    print(f"Initial WOE: {compute_woe(good, bad)}")
+    
+    result = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='exhaustive')
+    
+    print("\nExhaustive Algorithm Result:")
+    print(f"Merged Good: {result['merged_good']}")
+    print(f"Merged Bad: {result['merged_bad']}")
+    print(f"Merged Labels: {result['merged_labels']}")
+    print(f"WOE Values: {result['woe_values']}")
+    print(f"Is Monotonic: {result['is_monotonic']}")
+    print(f"Direction: {result['direction']}")
+    print(f"Number of Merges: {result['num_merges']}")
+    
+    # Test case 3: Continuous with non-monotonic pattern - Compare both methods
+    print("\n" + "=" * 70)
+    print("Test Case 3: Non-Monotonic Continuous - GREEDY vs EXHAUSTIVE")
+    print("=" * 70)
+    
+    good = np.array([100, 50, 80, 40, 70, 30])
+    bad = np.array([10, 40, 20, 50, 30, 60])
+    bin_labels = ['Bin_1', 'Bin_2', 'Bin_3', 'Bin_4', 'Bin_5', 'Bin_6']
+    
+    print("\nOriginal Bins:")
+    print(f"Good: {good}")
+    print(f"Bad: {bad}")
+    print(f"Labels: {bin_labels}")
+    initial_woe = compute_woe(good, bad)
+    print(f"Initial WOE: {initial_woe}")
+    print(f"Initial Monotonic: {is_monotonic(initial_woe, True) or is_monotonic(initial_woe, False)}")
+    
+    result_greedy = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='greedy')
+    print("\nGreedy Result:")
+    print(f"Final Bins: {result_greedy['num_bins_final']}")
+    print(f"WOE Values: {result_greedy['woe_values']}")
+    print(f"Is Monotonic: {result_greedy['is_monotonic']}")
+    print(f"Number of Merges: {result_greedy['num_merges']}")
+    
+    result_exhaustive = auto_monotonic_binning(good, bad, bin_labels, 'continuous', method='exhaustive')
+    print("\nExhaustive Result:")
+    print(f"Final Bins: {result_exhaustive['num_bins_final']}")
+    print(f"WOE Values: {result_exhaustive['woe_values']}")
+    print(f"Is Monotonic: {result_exhaustive['is_monotonic']}")
+    print(f"Number of Merges: {result_exhaustive['num_merges']}")
+    
+    print("\nComparison:")
+    print(f"Greedy bins: {result_greedy['num_bins_final']}, Exhaustive bins: {result_exhaustive['num_bins_final']}")
+    if result_exhaustive['num_bins_final'] > result_greedy['num_bins_final']:
+        print("✓ Exhaustive found solution with MORE bins (fewer merges) - Better!")
+    elif result_exhaustive['num_bins_final'] == result_greedy['num_bins_final']:
+        print("= Both methods achieved same number of bins")
+    
+    # Test case 4: Discrete variable - GREEDY
+    print("\n" + "=" * 70)
+    print("Test Case 4: Discrete Variable - GREEDY")
+    print("=" * 70)
+    
+    good = np.array([100, 50, 90, 40, 80])
+    bad = np.array([20, 50, 25, 55, 30])
     bin_labels = ['Category_A', 'Category_B', 'Category_C', 'Category_D', 'Category_E']
     
     print("\nOriginal Bins:")
@@ -478,4 +602,24 @@ if __name__ == "__main__":
     print(f"Is Monotonic: {result['is_monotonic']}")
     print(f"Direction: {result['direction']}")
     print(f"Number of Merges: {result['num_merges']}")
-    print(f"Merge Mapping: {result['merge_mapping']}")
+    
+    # Test case 5: Discrete variable with EXHAUSTIVE (should fall back to greedy)
+    print("\n" + "=" * 70)
+    print("Test Case 5: Discrete Variable - EXHAUSTIVE (expects fallback)")
+    print("=" * 70)
+    
+    print("\nOriginal Bins:")
+    print(f"Good: {good}")
+    print(f"Bad: {bad}")
+    print(f"Labels: {bin_labels}")
+    
+    result = auto_monotonic_binning(good, bad, bin_labels, 'discrete', method='exhaustive')
+    
+    print("\nExhaustive Algorithm Result (should be same as greedy):")
+    print(f"Final Bins: {result['num_bins_final']}")
+    print(f"Is Monotonic: {result['is_monotonic']}")
+    print(f"Number of Merges: {result['num_merges']}")
+    
+    print("\n" + "=" * 70)
+    print("All tests completed!")
+    print("=" * 70)

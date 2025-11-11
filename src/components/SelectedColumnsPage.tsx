@@ -608,14 +608,14 @@ const SelectedColumnsPage = () => {
           target: targetVariable,
           type: varType,
           direction: null,  // Auto-detect direction
-          method: 'greedy',  // Use greedy algorithm (faster)
+          method: 'exhaustive',  // Use greedy algorithm (faster)
           record_id: recordId,
           dashboard_selected_columns: selectedForModeling,
         }),
       });
       
       const data = await response.json();
-      
+       
       if (!data.success) {
         throw new Error(data.error || 'Auto-binning failed');
       }
