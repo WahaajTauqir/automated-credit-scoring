@@ -1,5 +1,5 @@
 import './Results.css';
-import { useState } from 'react';
+import { DiscreteValuesDropdown } from './DiscreteValues';
 
 interface UnivariateResultsProps {
   univariateResults: Record<string, any>;
@@ -12,8 +12,6 @@ const UnivariateResults = ({
   formatToFourDecimals,
   onDropColumn,
 }: UnivariateResultsProps) => {
-  // State to track which ranges are expanded
-  const [expandedRanges, setExpandedRanges] = useState<Record<string, boolean>>({});
 
   if (!univariateResults || Object.keys(univariateResults).length === 0) return null;
 
@@ -21,20 +19,6 @@ const UnivariateResults = ({
     ([, result]: any) => result && Array.isArray(result.stats) && result.stats.length > 0
   );
   if (entries.length === 0) return null;
-
-  // Function to truncate long range strings
-  const truncateRange = (range: string, maxLength: number = 50): string => {
-    if (range.length <= maxLength) return range;
-    return `${range.slice(0, maxLength - 3)}...`;
-  };
-
-  // Toggle expansion of a specific range
-  const toggleRangeExpansion = (key: string) => {
-    setExpandedRanges((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
-  };
 
   return (
     <div className="results-container coarse-binning-results" aria-label="Coarse binning results summary">
@@ -90,14 +74,7 @@ const UnivariateResults = ({
                   {result.stats.map((row: any, index: number) => {
                     const binnedKey = Object.keys(row).find((key: string) => key.endsWith('_binned'));
                     const binLabel = binnedKey ? row[binnedKey] : `Bin_${index + 1}`;
-                    const rangeKey = `${col}_${index}`;
                     const rangeValue = String(row.Range ?? '');
-                    const isTruncated = rangeValue.length > 50;
-                    const truncatedRange = truncateRange(rangeValue);
-                    const canToggleRange = isTruncated;
-                    const displayRange = canToggleRange && expandedRanges[rangeKey]
-                      ? rangeValue
-                      : truncatedRange;
                     const badRateValue =
                       row['Bad Rate'] ?? row['Bad Rate (%)'] ?? row.bad_rate ?? row.BadRate ?? 0;
                     const freqValue = row['Freq%'] ?? row.freq ?? row.Freq ?? 0;
@@ -107,17 +84,7 @@ const UnivariateResults = ({
                         <td>{binLabel}</td>
                         {isDiscrete ? (
                           <td>
-                            <button
-                              type="button"
-                              className={`range-toggle-btn${canToggleRange ? '' : ' is-static'}`}
-                              title={rangeValue}
-                              onClick={canToggleRange ? () => toggleRangeExpansion(rangeKey) : undefined}
-                              aria-label={
-                                canToggleRange ? `Toggle full range for ${binLabel}` : undefined
-                              }
-                            >
-                              {canToggleRange ? displayRange : rangeValue}
-                            </button>
+                            <DiscreteValuesDropdown rangeValue={rangeValue} />
                           </td>
                         ) : (
                           <>

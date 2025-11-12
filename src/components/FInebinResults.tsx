@@ -1,5 +1,5 @@
 import './Results.css';
-import { useState } from 'react';
+import { DiscreteValuesDropdown } from './DiscreteValues';
 
 export interface BinStats {
   Bin: string;
@@ -17,23 +17,8 @@ interface FineBinResultsProps {
 }
 
 const FineBinResults = ({ fineBinResults, formatToFourDecimals, discreteColumns = [] }: FineBinResultsProps) => {
-  const [expandedRanges, setExpandedRanges] = useState<Record<string, boolean>>({});
 
   if (!fineBinResults || Object.keys(fineBinResults).length === 0) return null;
-
-  // Function to truncate long range strings
-  const truncateRange = (range: string, maxLength: number = 50): string => {
-    if (range.length <= maxLength) return range;
-    return `${range.slice(0, maxLength - 3)}...`;
-  };
-
-  // Toggle expansion of a specific range
-  const toggleRangeExpansion = (key: string) => {
-    setExpandedRanges((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
-  };
 
   return (
     <div className="results-container" aria-label="Fine binning results summary">
@@ -83,27 +68,14 @@ const FineBinResults = ({ fineBinResults, formatToFourDecimals, discreteColumns 
                         return la.localeCompare(lb);
                       })
                       .map((bin, idx) => {
-                      const rangeKey = `${col}_${idx}`; // Unique key for each row's range
                       const rangeValue = String(bin.Range ?? '');
-                      const isTruncated = rangeValue.length > 50;
-                      const truncatedRange = truncateRange(rangeValue);
 
                       return (
                         <tr key={idx}>
                           <td>{bin.Bin}</td>
                           {isDiscrete && (
                             <td>
-                              <button
-                                type="button"
-                                className={`range-toggle-btn${isTruncated ? '' : ' is-static'}`}
-                                title={rangeValue}
-                                onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                                aria-label={
-                                  isTruncated ? `Toggle full range for ${bin.Bin}` : undefined
-                                }
-                              >
-                                {expandedRanges[rangeKey] || !isTruncated ? rangeValue : truncatedRange}
-                              </button>
+                              <DiscreteValuesDropdown rangeValue={rangeValue} />
                             </td>
                           )}
                           <td>{bin.Count}</td>

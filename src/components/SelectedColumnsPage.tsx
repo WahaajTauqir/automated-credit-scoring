@@ -4,6 +4,7 @@ import LogisticRegressionResults from './LogisticRegressionResults';
 import Navbar from './Navbar';
 import RandomForestResults from './RandomForestResults';
 import XGBoostResults from './XGBoostResults';
+import { DiscreteValuesDropdown } from './DiscreteValues';
 // import WoeIvResults from './WoeIvResults';
 import './SelectedColumnsPage.css';
 import {
@@ -57,6 +58,7 @@ const SelectedColumnsPage = () => {
 
   // Add to your existing state declarations
   const [binScoringMetrics, setBinScoringMetrics] = useState<Record<string, any[]>>({});
+  const [binScoringTotals, setBinScoringTotals] = useState<Record<string, { total_good: number; total_bad: number; total_zero_one_ratio?: number }>>({});
   // Removed UI sorting controls per request; keep search only
   // Helper to format IV class if needed later
   // (kept here for possible future IV badge usage)
@@ -193,6 +195,7 @@ const SelectedColumnsPage = () => {
         };
       });
 
+      console.log('[SelectedColumnsPage] calculateAllBinMetrics request for', columnName, binsData);
       const response = await fetch('http://localhost:5000/api/calculate-bin-metrics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -202,7 +205,8 @@ const SelectedColumnsPage = () => {
       // Some backend responses may include non-standard tokens (Infinity, -Infinity, NaN)
       // which JSON.parse in the browser will reject. Read as text first and sanitize
       // those tokens before parsing.
-      const text = await response.text();
+  const text = await response.text();
+  console.log('[SelectedColumnsPage] calculateAllBinMetrics response text for', columnName, text);
       let data: any;
       try {
         data = JSON.parse(text);
@@ -219,10 +223,20 @@ const SelectedColumnsPage = () => {
           return null;
         }
       }
+  console.log('[SelectedColumnsPage] calculateAllBinMetrics response for', columnName, data);
       if (data.success) {
         setBinScoringMetrics(prev => ({
           ...prev,
           [columnName]: data.bin_metrics
+        }));
+        // Save totals if provided by backend
+        setBinScoringTotals(prev => ({
+          ...prev,
+          [columnName]: {
+            total_good: Number(data.total_good ?? 0),
+            total_bad: Number(data.total_bad ?? 0),
+            total_zero_one_ratio: data.total_zero_one_ratio
+          }
         }));
         return data.bin_metrics;
       } else {
@@ -273,27 +287,7 @@ const SelectedColumnsPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeColumn, fineBinResults]);
   const formatToFourDecimals = (value: any) => (typeof value === 'number' ? value.toFixed(4) : String(value));
-  const canonicalModelType = (raw?: any): string => {
-    if (!raw) return 'logistic';
-
-    const r = String(raw).toLowerCase().replace(/_/g, '');
-
-    if (r.includes('log')) return 'logistic';
-    if (r.includes('random') || r.includes('forest') || r.includes('rf')) return 'random_forest';
-    if (r.includes('xg') || r.includes('xgb') || r.includes('boost')) return 'xgboost';
-
-    // Default mappings for common variations
-    const mappings: Record<string, string> = {
-      'logistic': 'logistic',
-      'logisticregression': 'logistic',
-      'randomforest': 'random_forest',
-      'rf': 'random_forest',
-      'xgboost': 'xgboost',
-      'xgb': 'xgboost'
-    };
-
-    return mappings[r] || r || 'logistic';
-  };
+              
   const showNotification = (message: string) => {
     setNotification(message);
     setTimeout(() => setNotification(null), 3000);
@@ -884,6 +878,13 @@ const SelectedColumnsPage = () => {
         body: JSON.stringify(body),
       });
       const data = await res.json();
+      try {
+        console.log('[SelectedColumnsPage] fetchWoeIv response for', col, data);
+        // Also print a JSON string so collapsed objects are visible in logs
+        if (data && data[col]) console.log('[SelectedColumnsPage] fetchWoeIv response JSON for', col, JSON.stringify(data[col], null, 2));
+      } catch (e) {
+        console.log('[SelectedColumnsPage] fetchWoeIv response (stringify failed) for', col, data);
+      }
 
       if (!data.error && data[col]) {
         setWoeIvResults((prev) => ({ ...prev, [col]: data[col] }));
@@ -899,6 +900,27 @@ const SelectedColumnsPage = () => {
     }
     return false;
   };
+
+  // Show woeIvResults for the active column whenever it changes (helps debugging)
+  useEffect(() => {
+    if (!activeColumn) return;
+    try {
+      const w = woeIvResults[activeColumn];
+      if (w) {
+        console.log('[SelectedColumnsPage] woeIvResults for activeColumn', activeColumn, w);
+        try {
+          console.log('[SelectedColumnsPage] woeIvResults JSON for activeColumn', activeColumn, JSON.stringify(w, null, 2));
+        } catch (e) {
+          // ignore stringify errors
+        }
+      } else {
+        console.log('[SelectedColumnsPage] no woeIvResults available yet for', activeColumn);
+      }
+    } catch (e) {
+      console.error('Error logging woeIvResults for', activeColumn, e);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeColumn, woeIvResults]);
   const canGoToStep = (step: number) => {
     switch (step) {
       case 1:
@@ -1090,36 +1112,189 @@ const SelectedColumnsPage = () => {
 
               const woeLookup = (() => {
                 const map = new Map<string, any>();
+                const variantsFor = (raw: string) => {
+                  const out = new Set<string>();
+                  const s = String(raw).trim();
+                  if (!s) return Array.from(out);
+                  const base = s;
+                  out.add(base);
+                  // common variants: remove 'bin' prefix, replace underscores/spaces, numeric only
+                  const noPrefix = base.replace(/^bin[\s_\-]*/i, '');
+                  out.add(noPrefix);
+                  out.add(base.replace(/[_\s\-]+/g, ' '));
+                  out.add(base.replace(/[_\s\-]+/g, '_'));
+                  out.add(base.replace(/[_\s\-]+/g, '-'));
+                  // numeric-only variant if digits exist
+                  const m = base.match(/(\d+)/);
+                  if (m) out.add(m[1]);
+                  return Array.from(out).map(x => standardizeKey(String(x)));
+                };
+
                 woeStats.forEach((row: any) => {
-                  const candidates = [
-                    row.Bin,
-                    row.bin,
-                    row.temp_bin,
-                    row.Range,
-                    row.range,
-                  ];
+                  const candidates = [row.Bin, row.bin, row.temp_bin, row.Range, row.range];
                   candidates.forEach((candidate) => {
                     if (candidate === null || candidate === undefined) return;
-                    const key = standardizeKey(String(candidate));
-                    if (!map.has(key)) {
-                      map.set(key, row);
-                    }
+                    const variants = variantsFor(String(candidate));
+                    variants.forEach(v => {
+                      if (!map.has(v)) map.set(v, row);
+                    });
                   });
                 });
                 return map;
               })();
 
-              const getWoeRow = (label: string, range?: string) => {
-                const direct = woeLookup.get(standardizeKey(label));
-                if (direct) return direct;
-                if (range) {
-                  const rangeMatch = woeLookup.get(standardizeKey(range));
-                  if (rangeMatch) return rangeMatch;
+              // Helper to find binScoringMetrics entry for a displayed label.
+              // Handles merged labels like 'Bin_2_Bin_3' by splitting into components
+              // and attempting to match by numeric parts or normalized equality.
+              const findBinMetric = (labelRaw: any, labelDisplay?: string) => {
+                const metrics = binScoringMetrics[activeColumn] || [];
+                if (!metrics || metrics.length === 0) return null;
+                const rawStr = String(labelRaw);
+                // 1) exact match
+                let m = metrics.find((mm: any) => String(mm.bin_name) === rawStr);
+                if (m) return m;
+
+                // 2) normalized key match
+                const standardize = (v: string) => String(v).replace(/[_\s\-]+/g, ' ').trim().toLowerCase();
+                const target = standardize(rawStr);
+                m = metrics.find((mm: any) => standardize(String(mm.bin_name)) === target);
+                if (m) return m;
+
+                // 3) split merged labels into components and match by numeric parts
+                const parts = rawStr.split(/[_\s,\-]+/).map(p => p.trim()).filter(Boolean);
+                const numericParts = parts.flatMap(p => (p.match(/\d+/g) || []));
+                if (numericParts.length > 0) {
+                  // try to find a metric that contains all numericParts
+                  m = metrics.find((mm: any) => {
+                    const mmNums: string[] = (String(mm.bin_name).match(/\d+/g) || []) as string[];
+                    return numericParts.every((np: string) => mmNums.includes(np));
+                  });
+                  if (m) return m;
+
+                  // try partial match: any overlap
+                  m = metrics.find((mm: any) => {
+                    const mmNums: string[] = (String(mm.bin_name).match(/\d+/g) || []) as string[];
+                    return numericParts.some((np: string) => mmNums.includes(np));
+                  });
+                  if (m) return m;
                 }
-                return woeStats.find((row: any) => {
+
+                // 4) try matching by whether metric bin_name contains the display label
+                if (labelDisplay) {
+                  const disp = standardize(String(labelDisplay));
+                  m = metrics.find((mm: any) => standardize(String(mm.bin_name)).includes(disp) || disp.includes(standardize(String(mm.bin_name))));
+                  if (m) return m;
+                }
+
+                return null;
+              };
+
+              const getWoeRow = (label: string, range?: string, rawLabel?: any) => {
+                if (!label && !range) return null;
+                const tryKeys = (val?: string) => {
+                  if (!val) return null;
+                  const candidates = [] as string[];
+                  const raw = String(val);
+                  candidates.push(standardizeKey(raw));
+                  // try removing common 'Bin' prefixes
+                  candidates.push(standardizeKey(raw.replace(/^bin[\s_\-]*/i, '')));
+                  // try numeric-only suffix
+                  const m = raw.match(/(\d+)/);
+                  if (m) candidates.push(standardizeKey(m[1]));
+                  // try replacing underscores/spaces
+                  candidates.push(standardizeKey(raw.replace(/[_\s\-]+/g, ' ')));
+                  candidates.push(standardizeKey(raw.replace(/[_\s\-]+/g, '_')));
+                  for (const k of candidates) {
+                    const found = woeLookup.get(k);
+                    if (found) return found;
+                  }
+                  return null;
+                };
+
+                // direct label match
+                const direct = tryKeys(label);
+                if (direct) return direct;
+                // try range string
+                const rangeMatch = tryKeys(range);
+                if (rangeMatch) return rangeMatch;
+
+                // fallback to scanning woeStats by normalized equality as last resort
+                const scanned = woeStats.find((row: any) => {
                   const rowLabel = row.Bin || row.temp_bin || row.Range || '';
-                  return normalizeLabel(String(rowLabel)) === normalizeLabel(label);
-                }) || null;
+                  return normalizeLabel(String(rowLabel)) === normalizeLabel(label) || normalizeLabel(String(rowLabel)) === normalizeLabel(range || '');
+                });
+                if (scanned) return scanned;
+
+                // absolute fallback: compute WOE/IV from binScoringMetrics when possible
+                const metric = rawLabel !== undefined ? findBinMetric(rawLabel, label) : findBinMetric(label, label);
+                const totals = binScoringTotals[activeColumn];
+                if (metric && totals && (totals.total_good || totals.total_bad)) {
+                  const goodValue = Number(metric.good_count || 0);
+                  const badValue = Number(metric.bad_count || 0);
+                  const totalValue = Number(metric.total_count || (goodValue + badValue));
+                  const distGoodFrac = goodValue / Math.max(1, Number(totals.total_good));
+                  const distBadFrac = badValue / Math.max(1, Number(totals.total_bad));
+                  let woeVal = 0;
+                  if (distGoodFrac > 0 && distBadFrac > 0) {
+                    woeVal = Math.log(distGoodFrac / distBadFrac);
+                  } else if (distGoodFrac > 0 && distBadFrac === 0) {
+                    woeVal = Math.log(distGoodFrac / (1e-9));
+                  } else if (distGoodFrac === 0 && distBadFrac > 0) {
+                    woeVal = Math.log((1e-9) / distBadFrac);
+                  }
+                  const ivContribution = (distGoodFrac - distBadFrac) * woeVal;
+                  const computedRow = {
+                    WOE: woeVal,
+                    IV: ivContribution,
+                    'Dist_Good_%': distGoodFrac * 100,
+                    'Dist_Bad_%': distBadFrac * 100,
+                    Good: goodValue,
+                    Bad: badValue,
+                    Total: totalValue,
+                    __computed: true
+                  };
+                  const key = standardizeKey(String(rawLabel ?? label));
+                  if (!woeLookup.has(key)) {
+                    woeLookup.set(key, computedRow);
+                  }
+                  return computedRow;
+                }
+
+                return null;
+              };
+
+              // Return the standardized key that matched in woeLookup (or null)
+              const getMatchedKey = (label?: string, range?: string, rawLabel?: any) => {
+                const tryKeys = (val?: string) => {
+                  if (!val) return null;
+                  const candidates = [] as string[];
+                  const raw = String(val);
+                  candidates.push(standardizeKey(raw));
+                  candidates.push(standardizeKey(raw.replace(/^bin[\s_\-]*/i, '')));
+                  const m = raw.match(/(\d+)/);
+                  if (m) candidates.push(standardizeKey(m[1]));
+                  candidates.push(standardizeKey(raw.replace(/[_\s\-]+/g, ' ')));
+                  candidates.push(standardizeKey(raw.replace(/[_\s\-]+/g, '_')));
+                  for (const k of candidates) {
+                    if (woeLookup.has(k)) return k;
+                  }
+                  return null;
+                };
+
+                const d = tryKeys(label);
+                if (d) return d;
+                const r = tryKeys(range);
+                if (r) return r;
+
+                if (rawLabel !== undefined) {
+                  const metric = findBinMetric(rawLabel, label);
+                  const totals = binScoringTotals[activeColumn];
+                  if (metric && totals && (totals.total_good || totals.total_bad)) {
+                    return `computed:${standardizeKey(String(rawLabel))}`;
+                  }
+                }
+
+                return null;
               };
 
               const pickNumeric = (...values: any[]) => {
@@ -1164,13 +1339,48 @@ const SelectedColumnsPage = () => {
 
               // === CHART DATA (WOE/IV from backend) ===
               const chartRows = sortedRows.map((bin: any, idx: number) => {
-                const { labelVal, rangeValue } = getBinIdentifiers(bin, idx);
-                const woeData = getWoeRow(labelVal, rangeValue) || {};
+                const { labelValRaw, labelVal, rangeValue } = getBinIdentifiers(bin, idx);
+                const woeData = getWoeRow(labelVal, rangeValue, labelValRaw) || {};
+
+                // Prefer authoritative counts from binScoringMetrics when available
+                const binMetrics = findBinMetric(labelValRaw, labelVal);
+                const goodCount = binMetrics?.good_count ?? pickNumeric(woeData.Good, bin.Good, bin.good);
+                const badCount = binMetrics?.bad_count ?? pickNumeric(woeData.Bad, bin.Bad, bin.bad);
+                const totalCount = binMetrics?.total_count ?? pickNumeric(woeData.Total, bin.Total, bin.total, (goodCount + badCount));
+
+                // If there is no matching WOE row, compute WOE/IV client-side using authoritative counts
+                const totals = binScoringTotals[activeColumn];
+                let computedWoeData: any = null;
+                if ((!woeData || Object.keys(woeData).length === 0 || (!woeData.WOE && !woeData.IV && !woeData.__computed)) && binMetrics && totals && (totals.total_good || totals.total_bad)) {
+                  const distGood = (Number(goodCount) / Math.max(1, Number(totals.total_good))) * 100;
+                  const distBad = (Number(badCount) / Math.max(1, Number(totals.total_bad))) * 100;
+                  const distGoodFrac = Number(goodCount) / Math.max(1, Number(totals.total_good));
+                  const distBadFrac = Number(badCount) / Math.max(1, Number(totals.total_bad));
+                  let woeVal = 0;
+                  if (distGoodFrac > 0 && distBadFrac > 0) {
+                    woeVal = Math.log(distGoodFrac / distBadFrac);
+                  } else if (distGoodFrac > 0 && distBadFrac === 0) {
+                    woeVal = Math.log(distGoodFrac / (1e-9));
+                  } else if (distGoodFrac === 0 && distBadFrac > 0) {
+                    woeVal = Math.log((1e-9) / distBadFrac);
+                  }
+                  const ivContribution = (distGoodFrac - distBadFrac) * woeVal;
+                  computedWoeData = {
+                    WOE: woeVal,
+                    IV: ivContribution,
+                    'Dist_Good_%': distGood,
+                    'Dist_Bad_%': distBad,
+                    Good: Number(goodCount),
+                    Bad: Number(badCount),
+                    Total: Number(totalCount)
+                  };
+                }
 
                 return {
                   Bin: labelVal,
                   Range: rangeValue || (typeof woeData.Range === 'string' ? woeData.Range : ''),
                   WOE: pickNumeric(
+                    computedWoeData?.WOE,
                     woeData.WOE,
                     woeData.woe,
                     woeData.WoE,
@@ -1183,6 +1393,7 @@ const SelectedColumnsPage = () => {
                     bin.Woe
                   ),
                   IV: pickNumeric(
+                    computedWoeData?.IV,
                     woeData.IV,
                     woeData.iv,
                     woeData.Iv,
@@ -1192,9 +1403,9 @@ const SelectedColumnsPage = () => {
                     bin.iv,
                     bin.Iv
                   ),
-                  Good: pickNumeric(woeData.Good, bin.Good, bin.good),
-                  Bad: pickNumeric(woeData.Bad, bin.Bad, bin.bad),
-                  Total: pickNumeric(woeData.Total, bin.Total, bin.total),
+                  Good: goodCount,
+                  Bad: badCount,
+                  Total: totalCount,
                 };
               });
 
@@ -1231,6 +1442,7 @@ const SelectedColumnsPage = () => {
                             <th>WOE</th>
                             <th>IV</th>
                             <th>Actions</th>
+                            <th>Metrics</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1250,15 +1462,35 @@ const SelectedColumnsPage = () => {
 
                               // Get authoritative values from backend WOE/IV results
                               const normalizedLabel = normalizeLabel(labelVal);
-                              const woeData = getWoeRow(labelVal, rangeValue) || getWoeRow(normalizedLabel, rangeValue) || {
-                                WOE: 0,
-                                IV: 0,
-                                'Dist_Good_%': 0,
-                                'Dist_Bad_%': 0,
-                                Good: 0,
-                                Bad: 0,
-                                Total: 0
-                              };
+                              const rawWoe = getWoeRow(labelVal, rangeValue, labelValRaw) || getWoeRow(normalizedLabel, rangeValue, labelValRaw) || {};
+                              // If backend WOE row not matched, compute from binScoringMetrics (authoritative counts)
+                              const fallbackMetrics = findBinMetric(labelValRaw, labelVal);
+                              const totals = binScoringTotals[activeColumn];
+                              let woeData = rawWoe;
+                              if ((!rawWoe || Object.keys(rawWoe).length === 0 || ((!rawWoe.WOE && !rawWoe.IV) && !rawWoe.__computed)) && fallbackMetrics && totals && (totals.total_good || totals.total_bad)) {
+                                const goodValue = Number(fallbackMetrics.good_count || 0);
+                                const badValue = Number(fallbackMetrics.bad_count || 0);
+                                const distGoodFrac = goodValue / Math.max(1, Number(totals.total_good));
+                                const distBadFrac = badValue / Math.max(1, Number(totals.total_bad));
+                                let woeVal = 0;
+                                if (distGoodFrac > 0 && distBadFrac > 0) {
+                                  woeVal = Math.log(distGoodFrac / distBadFrac);
+                                } else if (distGoodFrac > 0 && distBadFrac === 0) {
+                                  woeVal = Math.log(distGoodFrac / (1e-9));
+                                } else if (distGoodFrac === 0 && distBadFrac > 0) {
+                                  woeVal = Math.log((1e-9) / distBadFrac);
+                                }
+                                const ivContribution = (distGoodFrac - distBadFrac) * woeVal;
+                                woeData = {
+                                  WOE: woeVal,
+                                  IV: ivContribution,
+                                  'Dist_Good_%': distGoodFrac * 100,
+                                  'Dist_Bad_%': distBadFrac * 100,
+                                  Good: goodValue,
+                                  Bad: badValue,
+                                  Total: Number(fallbackMetrics.total_count || (goodValue + badValue))
+                                };
+                              }
 
                               // FIXED: Get Good/Bad counts - use authoritative data from backend
                               const goodValue = woeData.Good || bin.Good || bin.good || 0;
@@ -1271,13 +1503,149 @@ const SelectedColumnsPage = () => {
                               const isMergedLabel = Boolean(history[labelVal]);
                               const isSelected = selectedLabels.includes(labelVal);
 
+                              // Build table cells programmatically to avoid accidental
+                              // whitespace-only text nodes between JSX elements which
+                              // can cause hydration errors when rendering <tr> children.
+                              const cells: any[] = [];
+                              // Checkbox cell
+                              cells.push(
+                                <td key={`chk-${labelVal}-${idx}`}>
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={(ev) => {
+                                      ev.stopPropagation();
+                                      toggleFineBinSelection(activeColumn, labelVal);
+                                    }}
+                                    aria-label={`Select bin ${labelVal} for ${activeColumn}`}
+                                  />
+                                </td>
+                              );
+
+                              // Label cell
+                              cells.push(
+                                <td key={`label-${labelVal}-${idx}`} title={rangeValue.length > 0 ? rangeValue : undefined} style={{ maxWidth: '160px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                  {labelVal}
+                                </td>
+                              );
+
+                              // Min/Max or Discrete dropdown
+                              if (isContinuousColumn) {
+                                cells.push(<td key={`min-${labelVal}-${idx}`}>{minDisplay}</td>);
+                                cells.push(<td key={`max-${labelVal}-${idx}`}>{maxDisplay}</td>);
+                              } else {
+                                cells.push(
+                                  <td key={`disc-${labelVal}-${idx}`}>
+                                    <DiscreteValuesDropdown rangeValue={rangeValue} />
+                                  </td>
+                                );
+                              }
+
+                              // Good / Bad / Total
+                              cells.push(<td key={`good-${labelVal}-${idx}`} style={{ color: 'green', fontWeight: 'bold' }}>{goodValue}</td>);
+                              cells.push(<td key={`bad-${labelVal}-${idx}`} style={{ color: 'red', fontWeight: 'bold' }}>{badValue}</td>);
+                              cells.push(<td key={`total-${labelVal}-${idx}`}>{totalValue}</td>);
+
+                              // 0/1 Ratio
+                              cells.push(
+                                <td key={`ratio-${labelVal}-${idx}`}>
+                                  {(() => {
+                                    const binMetrics = findBinMetric(labelValRaw, labelVal);
+                                    return binMetrics?.zero_one_ratio || '—';
+                                  })()}
+                                </td>
+                              );
+
+                              // Bad Rate and Freq
+                              cells.push(<td key={`br-${labelVal}-${idx}`}>{badRateRaw !== null && badRateRaw !== undefined ? badRateRaw.toFixed(4) : '0.0000'}</td>);
+                              cells.push(<td key={`freq-${labelVal}-${idx}`}>{freqRaw !== null && freqRaw !== undefined ? freqRaw.toFixed(2) : '0.00'}</td>);
+
+                              // G/B Odd
+                              cells.push(
+                                <td key={`gbodd-${labelVal}-${idx}`}>
+                                  {(() => {
+                                    const binMetrics = findBinMetric(labelValRaw, labelVal);
+                                    return binMetrics?.gb_odd || '—';
+                                  })()}
+                                </td>
+                              );
+
+                              // G/B Index
+                              cells.push(
+                                <td key={`gbindex-${labelVal}-${idx}`}>
+                                  {(() => {
+                                    const binMetrics = findBinMetric(labelValRaw, labelVal);
+                                    return (
+                                      <span style={{
+                                        color: binMetrics?.gb_index === 'G' ? 'green' : 'red',
+                                        fontWeight: 'bold'
+                                      }}>
+                                        {binMetrics?.gb_index || '—'}
+                                      </span>
+                                    );
+                                  })()}
+                                </td>
+                              );
+
+                              // Combined Index
+                              cells.push(
+                                <td key={`combined-${labelVal}-${idx}`}>
+                                  {(() => {
+                                    const binMetrics = findBinMetric(labelValRaw, labelVal);
+                                    return (
+                                      <span style={{
+                                        color: binMetrics?.gb_index === 'G' ? 'green' : 'red',
+                                        fontWeight: 'bold'
+                                      }}>
+                                        {binMetrics?.combined_index || '—'}
+                                      </span>
+                                    );
+                                  })()}
+                                </td>
+                              );
+
+                              // Dist Good/Bad, WOE, IV
+                              cells.push(<td key={`distgood-${labelVal}-${idx}`}>{formatToFourDecimals(woeData['Dist_Good_%'] || 0)}</td>);
+                              cells.push(<td key={`distbad-${labelVal}-${idx}`}>{formatToFourDecimals(woeData['Dist_Bad_%'] || 0)}</td>);
+                              cells.push(<td key={`woe-${labelVal}-${idx}`}>{formatToFourDecimals(pickNumeric(woeData.WOE, woeData.woe, woeData.WoE, woeData.Woe, woeData.woe_value, woeData.WOEValue))}</td>);
+                              cells.push(<td key={`iv-${labelVal}-${idx}`}>{formatToFourDecimals(pickNumeric(woeData.IV, woeData.iv, woeData.Iv, woeData.iv_contribution, woeData.IVContribution))}</td>);
+
+                              const matchedKey = getMatchedKey(labelVal, rangeValue, labelValRaw);
+                              const metricsBin = fallbackMetrics; // reuse previously resolved metric
+
+                              // Actions cell (Unmerge)
+                              cells.push(
+                                <td key={`actions-${labelVal}-${idx}`}>
+                                  {isMergedLabel ? (
+                                    <button
+                                      className="unmerge-btn compact"
+                                      onClick={() => unmergeFineBin(activeColumn, labelVal)}
+                                      aria-label={`Unmerge ${labelVal}`}
+                                      title="Unmerge"
+                                    >
+                                      <span style={{ fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s' }}>
+                                        Unmerge
+                                      </span>
+                                    </button>
+                                  ) : null}
+                                </td>
+                              );
+
+                              // Metrics summary (woeKey, matched metric, Dist Good %)
+                              cells.push(
+                                <td key={`metrics-${labelVal}-${idx}`} style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
+                                  <div>
+                                    <div style={{ color: matchedKey ? '#9ae6b4' : '#fca5a5' }}><strong>woeKey:</strong> {matchedKey || '—'}</div>
+                                    <div style={{ color: metricsBin ? '#c7d2fe' : '#fef3c7' }}><strong>metric:</strong> {metricsBin?.bin_name || '—'}</div>
+                                  </div>
+                                </td>
+                              );
+
                               return (
                                 <tr
                                   key={`${labelVal}-${idx}`}
                                   className={`bin-row ${isSelected ? 'selected' : ''}`}
-                                  style={{
-                                    backgroundColor: isMergedLabel ? 'var(--merged-bin-bg, #21262d)' : 'transparent',
-                                  }}
+                                  style={{ backgroundColor: isMergedLabel ? 'var(--merged-bin-bg, #21262d)' : 'transparent' }}
                                   role="button"
                                   tabIndex={0}
                                   onClick={(e) => {
@@ -1294,109 +1662,7 @@ const SelectedColumnsPage = () => {
                                     }
                                   }}
                                 >
-                                  <td>
-                                    <input
-                                      type="checkbox"
-                                      checked={isSelected}
-                                      onChange={(ev) => {
-                                        ev.stopPropagation();
-                                        toggleFineBinSelection(activeColumn, labelVal);
-                                      }}
-                                      aria-label={`Select bin ${labelVal} for ${activeColumn}`}
-                                    />
-                                  </td>
-                                  <td title={rangeValue.length > 0 ? rangeValue : undefined} style={{ maxWidth: '160px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                    {labelVal}
-                                  </td>
-                                  {isContinuousColumn ? (
-                                    <>
-                                      <td>{minDisplay}</td>
-                                      <td>{maxDisplay}</td>
-                                    </>
-                                  ) : (
-                                    <td title={rangeValue.length > 0 ? rangeValue : undefined}>
-                                      {rangeValue || '—'}
-                                    </td>
-                                  )}
-
-                                  {/* 0/1 Columns - Good/Bad counts */}
-                                  <td style={{ color: 'green', fontWeight: 'bold' }}>{goodValue}</td>
-                                  <td style={{ color: 'red', fontWeight: 'bold' }}>{badValue}</td>
-                                  <td>{totalValue}</td>
-
-                                  {/* 0/1 Ratio Column (Good/Bad) */}
-                                  <td>
-                                    {(() => {
-                                      const binMetrics = binScoringMetrics[activeColumn]?.find(
-                                        (m: any) => m.bin_name === String(labelValRaw)
-                                      );
-                                      return binMetrics?.zero_one_ratio || '—';
-                                    })()}
-                                  </td>
-
-                                  <td>{badRateRaw !== null && badRateRaw !== undefined ? badRateRaw.toFixed(4) : '0.0000'}</td>
-                                  <td>{freqRaw !== null && freqRaw !== undefined ? freqRaw.toFixed(2) : '0.00'}</td>
-
-                                  {/* G/B Metrics Columns */}
-                                  <td>
-                                    {(() => {
-                                      const binMetrics = binScoringMetrics[activeColumn]?.find(
-                                        (m: any) => m.bin_name === String(labelValRaw)
-                                      );
-                                      return binMetrics?.gb_odd || '—';
-                                    })()}
-                                  </td>
-                                  <td>
-                                    {(() => {
-                                      const binMetrics = binScoringMetrics[activeColumn]?.find(
-                                        (m: any) => m.bin_name === String(labelValRaw)
-                                      );
-                                      return (
-                                        <span style={{
-                                          color: binMetrics?.gb_index === 'G' ? 'green' : 'red',
-                                          fontWeight: 'bold'
-                                        }}>
-                                          {binMetrics?.gb_index || '—'}
-                                        </span>
-                                      );
-                                    })()}
-                                  </td>
-
-                                  {/* Combined Index Column */}
-                                  <td>
-                                    {(() => {
-                                      const binMetrics = binScoringMetrics[activeColumn]?.find(
-                                        (m: any) => m.bin_name === String(labelValRaw)
-                                      );
-                                      return (
-                                        <span style={{
-                                          color: binMetrics?.gb_index === 'G' ? 'green' : 'red',
-                                          fontWeight: 'bold'
-                                        }}>
-                                          {binMetrics?.combined_index || '—'}
-                                        </span>
-                                      );
-                                    })()}
-                                  </td>
-
-                                  <td>{formatToFourDecimals(woeData['Dist_Good_%'] || 0)}</td>
-                                  <td>{formatToFourDecimals(woeData['Dist_Bad_%'] || 0)}</td>
-                                  <td>{formatToFourDecimals(pickNumeric(woeData.WOE, woeData.woe, woeData.WoE, woeData.Woe, woeData.woe_value, woeData.WOEValue))}</td>
-                                  <td>{formatToFourDecimals(pickNumeric(woeData.IV, woeData.iv, woeData.Iv, woeData.iv_contribution, woeData.IVContribution))}</td>
-                                  <td>
-                                    {isMergedLabel ? (
-                                      <button
-                                        className="unmerge-btn compact"
-                                        onClick={() => unmergeFineBin(activeColumn, labelVal)}
-                                        aria-label={`Unmerge ${labelVal}`}
-                                        title="Unmerge"
-                                      >
-                                        <span style={{ fontSize: '12px', fontWeight: 600, padding: '2px 8px', borderRadius: '6px', background: 'var(--bg-quaternary)', color: 'var(--fg-accent-red)', border: '1px solid var(--border-secondary)', boxShadow: 'var(--shadow-light)', transition: 'all 0.2s' }}>
-                                          Unmerge
-                                        </span>
-                                      </button>
-                                    ) : null}
-                                  </td>
+                                  {cells}
                                 </tr>
                               );
                             })
@@ -1413,14 +1679,18 @@ const SelectedColumnsPage = () => {
                             let freqProvided = false;
 
                             sortedRows.forEach((bin: any, idx: number) => {
-                              const { labelVal, rangeValue } = getBinIdentifiers(bin, idx);
+                              const { labelValRaw, labelVal, rangeValue } = getBinIdentifiers(bin, idx);
 
-                              // Get authoritative counts from backend (aligned with table rows)
-                              const woeData = getWoeRow(labelVal, rangeValue) || { Good: 0, Bad: 0, Total: 0 };
+                              // Prefer binScoringMetrics counts when present
+                              const binMetrics = findBinMetric(labelValRaw, labelVal);
+                              const woeTotalsRow = getWoeRow(labelVal, rangeValue, labelValRaw);
+                              const good = binMetrics?.good_count ?? (woeTotalsRow?.Good ?? 0);
+                              const bad = binMetrics?.bad_count ?? (woeTotalsRow?.Bad ?? 0);
+                              const total = binMetrics?.total_count ?? (woeTotalsRow?.Total ?? (good + bad));
 
-                              totalBad += woeData.Bad || 0;
-                              totalGood += woeData.Good || 0;
-                              totalTotal += woeData.Total || 0;
+                              totalBad += bad;
+                              totalGood += good;
+                              totalTotal += total;
 
                               const freq = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
                               if (freq !== null) {
@@ -1466,6 +1736,7 @@ const SelectedColumnsPage = () => {
                                 <td />
                                 <td />
                                 <td className="iv-total">{formatToFourDecimals(totalIv)}</td>
+                                <td />
                                 <td />
                               </tr>
                             );

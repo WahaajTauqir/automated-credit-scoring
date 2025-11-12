@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   BarChart,
   Bar,
@@ -12,6 +12,7 @@ import {
   Legend,
 } from 'recharts';
 import './Results.css';
+import { DiscreteValuesDropdown } from './DiscreteValues';
 
 interface WoeIvResultsProps {
   woeIvResults: Record<string, any>;
@@ -32,7 +33,6 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
   formatToFourDecimals,
   discreteColumns = [],
 }) => {
-  const [expandedRanges, setExpandedRanges] = useState<Record<string, boolean>>({});
 
   const colName = Object.keys(woeIvResults)[0];
   const colData = woeIvResults[colName];
@@ -51,20 +51,6 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
     Bad: row.Bad,
     Range: row.Range,
   }));
-
-  // Function to truncate long range strings
-  const truncateRange = (range: string, maxLength: number = 50): string => {
-    if (range.length <= maxLength) return range;
-    return `${range.slice(0, maxLength - 3)}...`;
-  };
-
-  // Toggle expansion of a specific range
-  const toggleRangeExpansion = (key: string) => {
-    setExpandedRanges((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
-  };
 
   return (
     <div className="woe-iv-container results-container">
@@ -101,10 +87,7 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
           </thead>
           <tbody>
             {colData.stats?.map((row: any, idx: number) => {
-              const rangeKey = `${colName}_${idx}`;
               const rangeValue = String(row.Range ?? '');
-              const isTruncated = rangeValue.length > 50;
-              const truncatedRange = truncateRange(rangeValue);
               const badRate = row.Total > 0 ? (row.Bad / row.Total * 100) : 0;
 
               return (
@@ -112,19 +95,7 @@ const WoeIvResults: React.FC<WoeIvResultsProps> = ({
                   <td>{row.Bin || row.temp_bin || row.Range || `Bin_${idx + 1}`}</td>
                   {isDiscrete && (
                     <td>
-                      <button
-                        type="button"
-                        className={`range-toggle-btn${isTruncated ? '' : ' is-static'}`}
-                        title={rangeValue}
-                        onClick={isTruncated ? () => toggleRangeExpansion(rangeKey) : undefined}
-                        aria-label={
-                          isTruncated
-                            ? `Toggle full range for bin ${row.Bin || row.temp_bin || row.Range}`
-                            : undefined
-                        }
-                      >
-                        {expandedRanges[rangeKey] || !isTruncated ? rangeValue : truncatedRange}
-                      </button>
+                      <DiscreteValuesDropdown rangeValue={rangeValue} />
                     </td>
                   )}
                   <td>{row.Total}</td>

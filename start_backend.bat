@@ -7,8 +7,8 @@ set GITHUB_TOKEN=github_pat_11AVFI2WA0FOJdQkRuGM1y_Jb2uZjY02Bq9UXStGVDgXZKdjQokN
 REM PostgreSQL connection settings
 set PG_DBNAME=mydb
 set PG_USER=myuser
-set PG_PASSWORD=my123
-set PG_HOST=localhost
+set PG_PASSWORD=mypassword
+set PG_HOST=127.0.0.1
 set PG_PORT=5432
 
 REM Optional runtime settings

@@ -565,7 +565,9 @@ def fine_bin_api():
         univariate_results = json.dumps([])
         finebin_results = json.dumps(tab.to_dict(orient='records'))
         crosstab_results = json.dumps([])
-        woe_iv_results = json.dumps([])
+        # Store an empty object for woe_iv_results by default (was previously an empty list)
+        # This keeps the DB column consistently a JSON object mapping variable->results
+        woe_iv_results = json.dumps({})
         dashboard_selected_columns = json.dumps(req.get('dashboard_selected_columns', []))
         if not record_id:
             # If no recordId, upsert will create one
@@ -712,7 +714,9 @@ def auto_monotonic_binning_api():
         univariate_results = json.dumps([])
         finebin_results = json.dumps(tab.to_dict(orient='records'))
         crosstab_results = json.dumps([])
-        woe_iv_results = json.dumps([])
+        # Store an empty object for woe_iv_results by default (was previously an empty list)
+        # This keeps the DB column consistently a JSON object mapping variable->results
+        woe_iv_results = json.dumps({})
         dashboard_selected_columns = json.dumps(req.get('dashboard_selected_columns', []))
         
         if not record_id:
@@ -1589,6 +1593,23 @@ def woe_iv_api():
                     existing_woe = json.loads(row[0])
                 except json.JSONDecodeError:
                     existing_woe = {}
+
+            # Defensive coercion: some older records may have stored a JSON list
+            # (e.g. json.dumps([])). Ensure we have a dict before calling update().
+            if isinstance(existing_woe, list):
+                coerced = {}
+                for item in existing_woe:
+                    if isinstance(item, dict):
+                        # Merge dict entries; later entries override earlier ones
+                        for k, v in item.items():
+                            coerced[str(k)] = v
+                existing_woe = coerced
+
+            # If still not a dict, replace with empty dict to avoid attribute errors
+            if not isinstance(existing_woe, dict):
+                existing_woe = {}
+
+            # Merge new results into existing map
             existing_woe.update(results)
             cur.execute(
                 "UPDATE records SET woe_iv_results = %s WHERE id = %s",
