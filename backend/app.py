@@ -1432,6 +1432,43 @@ def woe_iv_api():
         global_type = data.get("type")
         types_map = data.get("types", {}) if isinstance(data.get("types", {}), dict) else {}
 
+        raw_bin_merges = data.get("bin_merges")
+
+        def normalize_merge_map(merge_map):
+            normalized = {}
+            if isinstance(merge_map, dict):
+                for group_key, group_vals in merge_map.items():
+                    if group_vals is None:
+                        continue
+                    if isinstance(group_vals, (list, tuple, set)):
+                        normalized[str(group_key).strip()] = [str(item).strip() for item in group_vals]
+                    else:
+                        normalized[str(group_key).strip()] = [str(group_vals).strip()]
+            return {k: v for k, v in normalized.items() if v}
+
+        requested_bin_merges = {}
+        if isinstance(raw_bin_merges, dict) and raw_bin_merges:
+            values = list(raw_bin_merges.values())
+            # Case 1: Nested map { variable: { merge_key: [...] } }
+            if values and all(isinstance(v, dict) for v in values):
+                for var_key, merge_map in raw_bin_merges.items():
+                    normalized = normalize_merge_map(merge_map)
+                    if normalized:
+                        requested_bin_merges[str(var_key)] = normalized
+                        try:
+                            print(f"WOE/IV DEBUG: Received {len(normalized)} merge groups from request for {var_key}")
+                        except Exception:
+                            pass
+            # Case 2: Single-variable payload { merge_key: [...] }
+            elif len(variables) == 1:
+                normalized = normalize_merge_map(raw_bin_merges)
+                if normalized:
+                    requested_bin_merges[str(variables[0])] = normalized
+                    try:
+                        print(f"WOE/IV DEBUG: Received {len(normalized)} merge groups from request for {variables[0]}")
+                    except Exception:
+                        pass
+
         print(f"WOE/IV DEBUG: Starting with variables: {variables}, target: {target}")
 
         if not variables or not target:
@@ -1539,13 +1576,26 @@ def woe_iv_api():
                     merges = {}
                     for row in finebin_details:
                         try:
-                            bins = json.loads(row["merged_bins"])
-                            merges[str(row["group_id"])] = bins
+                            bins_loaded = json.loads(row["merged_bins"])
+                            if isinstance(bins_loaded, (list, tuple, set)):
+                                merges[str(row["group_id"]).strip()] = [str(item).strip() for item in bins_loaded]
+                            elif bins_loaded is not None:
+                                merges[str(row["group_id"]).strip()] = [str(bins_loaded).strip()]
                         except Exception:
                             pass
                     if merges:
                         merges_per_var[var] = merges
                         print(f"WOE/IV DEBUG: Loaded {len(merges)} merge groups for {var}")
+
+        # Override/augment with merges provided directly in the request body
+        if requested_bin_merges:
+            for var_key, merge_map in requested_bin_merges.items():
+                if merge_map:
+                    merges_per_var[var_key] = merge_map
+                    try:
+                        print(f"WOE/IV DEBUG: Applying request merge overrides for {var_key} ({len(merge_map)} groups)")
+                    except Exception:
+                        pass
 
         # Compute WOE/IV per variable
         for var in variables:

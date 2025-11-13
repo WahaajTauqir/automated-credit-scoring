@@ -1107,8 +1107,81 @@ const SelectedColumnsPage = () => {
               const selectedLabels = selectedFineBins[activeColumn] || [];
               const selectedCount = selectedLabels.length;
               const woeStats = woeIvResults[activeColumn]?.stats || [];
+
+              const metricsArray = binScoringMetrics[activeColumn] || [];
+              const metricsAggregate = metricsArray.reduce(
+                (acc, metric) => {
+                  const g = Number(metric?.good_count ?? 0);
+                  const b = Number(metric?.bad_count ?? 0);
+                  acc.good += Number.isFinite(g) ? g : 0;
+                  acc.bad += Number.isFinite(b) ? b : 0;
+                  return acc;
+                },
+                { good: 0, bad: 0 }
+              );
+
+              const totalsRecord = binScoringTotals[activeColumn];
+              const totalGoodForDerived = Number.isFinite(Number(totalsRecord?.total_good)) && totalsRecord?.total_good !== undefined
+                ? Number(totalsRecord.total_good)
+                : metricsAggregate.good;
+              const totalBadForDerived = Number.isFinite(Number(totalsRecord?.total_bad)) && totalsRecord?.total_bad !== undefined
+                ? Number(totalsRecord.total_bad)
+                : metricsAggregate.bad;
+
+              const computeDerivedStatsForCounts = (goodCount: number, badCount: number, totalCount: number) => {
+                const safeGood = Number.isFinite(goodCount) ? goodCount : 0;
+                const safeBad = Number.isFinite(badCount) ? badCount : 0;
+                const safeTotal = Number.isFinite(totalCount) ? totalCount : safeGood + safeBad;
+
+                const distGoodPct = totalGoodForDerived > 0 ? (safeGood / totalGoodForDerived) * 100 : 0;
+                const distBadPct = totalBadForDerived > 0 ? (safeBad / totalBadForDerived) * 100 : 0;
+
+                let woeValue = 0;
+                let ivValue = 0;
+                if (distGoodPct > 0 && distBadPct > 0) {
+                  const ratio = distGoodPct / distBadPct;
+                  const lnRatio = Math.log(ratio);
+                  if (Number.isFinite(lnRatio)) {
+                    const woeScaled = lnRatio * 100;
+                    const ivRaw = ((distGoodPct - distBadPct) * lnRatio) / 100;
+                    woeValue = Number(woeScaled.toFixed(1));
+                    ivValue = Number(ivRaw.toFixed(4));
+                  }
+                }
+
+                return {
+                  goodCount: safeGood,
+                  badCount: safeBad,
+                  totalCount: safeTotal,
+                  distGoodPct,
+                  distBadPct,
+                  woeValue,
+                  ivValue,
+                };
+              };
               const normalizeLabel = (value: string) => value.replace(/\s+/g, ' ').trim();
               const standardizeKey = (value: string) => normalizeLabel(value).toLowerCase();
+
+              const formatWoeKeyDisplay = (rawKey?: string | null) => {
+                if (!rawKey) return '—';
+                let working = String(rawKey).trim();
+                const computedPrefix = working.startsWith('computed:');
+                if (computedPrefix) {
+                  working = working.slice('computed:'.length).trim();
+                }
+                const digitsOnly = working.match(/^\d+$/);
+                if (digitsOnly) {
+                  working = `Bin_${digitsOnly[0]}`;
+                } else if (/^bin[\s_\-]*\d+$/i.test(working)) {
+                  const match = working.match(/\d+/);
+                  if (match) working = `Bin_${match[0]}`;
+                } else if (working.includes(',')) {
+                  const parts = working.split(',').map(p => p.trim()).filter(Boolean);
+                  const normalized = parts.map(part => (part.match(/^\d+$/) ? `Bin_${part}` : part));
+                  working = normalized.join('_');
+                }
+                return computedPrefix ? `computed:${working}` : working;
+              };
 
               const woeLookup = (() => {
                 const map = new Map<string, any>();
@@ -1347,65 +1420,16 @@ const SelectedColumnsPage = () => {
                 const goodCount = binMetrics?.good_count ?? pickNumeric(woeData.Good, bin.Good, bin.good);
                 const badCount = binMetrics?.bad_count ?? pickNumeric(woeData.Bad, bin.Bad, bin.bad);
                 const totalCount = binMetrics?.total_count ?? pickNumeric(woeData.Total, bin.Total, bin.total, (goodCount + badCount));
-
-                // If there is no matching WOE row, compute WOE/IV client-side using authoritative counts
-                const totals = binScoringTotals[activeColumn];
-                let computedWoeData: any = null;
-                if ((!woeData || Object.keys(woeData).length === 0 || (!woeData.WOE && !woeData.IV && !woeData.__computed)) && binMetrics && totals && (totals.total_good || totals.total_bad)) {
-                  const distGood = (Number(goodCount) / Math.max(1, Number(totals.total_good))) * 100;
-                  const distBad = (Number(badCount) / Math.max(1, Number(totals.total_bad))) * 100;
-                  const distGoodFrac = Number(goodCount) / Math.max(1, Number(totals.total_good));
-                  const distBadFrac = Number(badCount) / Math.max(1, Number(totals.total_bad));
-                  let woeVal = 0;
-                  if (distGoodFrac > 0 && distBadFrac > 0) {
-                    woeVal = Math.log(distGoodFrac / distBadFrac);
-                  } else if (distGoodFrac > 0 && distBadFrac === 0) {
-                    woeVal = Math.log(distGoodFrac / (1e-9));
-                  } else if (distGoodFrac === 0 && distBadFrac > 0) {
-                    woeVal = Math.log((1e-9) / distBadFrac);
-                  }
-                  const ivContribution = (distGoodFrac - distBadFrac) * woeVal;
-                  computedWoeData = {
-                    WOE: woeVal,
-                    IV: ivContribution,
-                    'Dist_Good_%': distGood,
-                    'Dist_Bad_%': distBad,
-                    Good: Number(goodCount),
-                    Bad: Number(badCount),
-                    Total: Number(totalCount)
-                  };
-                }
+                const derived = computeDerivedStatsForCounts(Number(goodCount), Number(badCount), Number(totalCount));
 
                 return {
                   Bin: labelVal,
                   Range: rangeValue || (typeof woeData.Range === 'string' ? woeData.Range : ''),
-                  WOE: pickNumeric(
-                    computedWoeData?.WOE,
-                    woeData.WOE,
-                    woeData.woe,
-                    woeData.WoE,
-                    woeData.Woe,
-                    woeData.woe_value,
-                    woeData.WOEValue,
-                    bin.WOE,
-                    bin.woe,
-                    bin.WoE,
-                    bin.Woe
-                  ),
-                  IV: pickNumeric(
-                    computedWoeData?.IV,
-                    woeData.IV,
-                    woeData.iv,
-                    woeData.Iv,
-                    woeData.iv_contribution,
-                    woeData.IVContribution,
-                    bin.IV,
-                    bin.iv,
-                    bin.Iv
-                  ),
-                  Good: goodCount,
-                  Bad: badCount,
-                  Total: totalCount,
+                  WOE: derived.woeValue,
+                  IV: derived.ivValue,
+                  Good: derived.goodCount,
+                  Bad: derived.badCount,
+                  Total: derived.totalCount,
                 };
               });
 
@@ -1460,42 +1484,44 @@ const SelectedColumnsPage = () => {
                               const minDisplay = minVal !== null && minVal !== undefined ? minVal : (isContinuousColumn ? 'N/A' : '—');
                               const maxDisplay = maxVal !== null && maxVal !== undefined ? maxVal : (isContinuousColumn ? 'N/A' : '—');
 
-                              // Get authoritative values from backend WOE/IV results
                               const normalizedLabel = normalizeLabel(labelVal);
                               const rawWoe = getWoeRow(labelVal, rangeValue, labelValRaw) || getWoeRow(normalizedLabel, rangeValue, labelValRaw) || {};
-                              // If backend WOE row not matched, compute from binScoringMetrics (authoritative counts)
                               const fallbackMetrics = findBinMetric(labelValRaw, labelVal);
-                              const totals = binScoringTotals[activeColumn];
-                              let woeData = rawWoe;
-                              if ((!rawWoe || Object.keys(rawWoe).length === 0 || ((!rawWoe.WOE && !rawWoe.IV) && !rawWoe.__computed)) && fallbackMetrics && totals && (totals.total_good || totals.total_bad)) {
-                                const goodValue = Number(fallbackMetrics.good_count || 0);
-                                const badValue = Number(fallbackMetrics.bad_count || 0);
-                                const distGoodFrac = goodValue / Math.max(1, Number(totals.total_good));
-                                const distBadFrac = badValue / Math.max(1, Number(totals.total_bad));
-                                let woeVal = 0;
-                                if (distGoodFrac > 0 && distBadFrac > 0) {
-                                  woeVal = Math.log(distGoodFrac / distBadFrac);
-                                } else if (distGoodFrac > 0 && distBadFrac === 0) {
-                                  woeVal = Math.log(distGoodFrac / (1e-9));
-                                } else if (distGoodFrac === 0 && distBadFrac > 0) {
-                                  woeVal = Math.log((1e-9) / distBadFrac);
-                                }
-                                const ivContribution = (distGoodFrac - distBadFrac) * woeVal;
-                                woeData = {
-                                  WOE: woeVal,
-                                  IV: ivContribution,
-                                  'Dist_Good_%': distGoodFrac * 100,
-                                  'Dist_Bad_%': distBadFrac * 100,
-                                  Good: goodValue,
-                                  Bad: badValue,
-                                  Total: Number(fallbackMetrics.total_count || (goodValue + badValue))
-                                };
-                              }
 
-                              // FIXED: Get Good/Bad counts - use authoritative data from backend
-                              const goodValue = woeData.Good || bin.Good || bin.good || 0;
-                              const badValue = woeData.Bad || bin.Bad || bin.bad || 0;
-                              const totalValue = woeData.Total || bin.Total || bin.total || (goodValue + badValue);
+                              const goodValue = pickNumeric(
+                                fallbackMetrics?.good_count,
+                                rawWoe.Good,
+                                (rawWoe as any)?.good,
+                                bin.Good,
+                                bin.good
+                              );
+                              const badValue = pickNumeric(
+                                fallbackMetrics?.bad_count,
+                                rawWoe.Bad,
+                                (rawWoe as any)?.bad,
+                                bin.Bad,
+                                bin.bad
+                              );
+                              const totalValue = pickNumeric(
+                                fallbackMetrics?.total_count,
+                                rawWoe.Total,
+                                (rawWoe as any)?.total,
+                                bin.Total,
+                                bin.total,
+                                goodValue + badValue
+                              );
+
+                              const derived = computeDerivedStatsForCounts(Number(goodValue), Number(badValue), Number(totalValue));
+                              const displayWoeData = {
+                                ...rawWoe,
+                                Good: derived.goodCount,
+                                Bad: derived.badCount,
+                                Total: derived.totalCount,
+                                'Dist_Good_%': derived.distGoodPct,
+                                'Dist_Bad_%': derived.distBadPct,
+                                WOE: derived.woeValue,
+                                IV: derived.ivValue,
+                              };
 
                               const badRateRaw = typeof bin['Bad Rate'] === 'number' ? bin['Bad Rate'] : (typeof bin.BadRate === 'number' ? bin.BadRate : null);
                               const freqRaw = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
@@ -1605,13 +1631,15 @@ const SelectedColumnsPage = () => {
                               );
 
                               // Dist Good/Bad, WOE, IV
-                              cells.push(<td key={`distgood-${labelVal}-${idx}`}>{formatToFourDecimals(woeData['Dist_Good_%'] || 0)}</td>);
-                              cells.push(<td key={`distbad-${labelVal}-${idx}`}>{formatToFourDecimals(woeData['Dist_Bad_%'] || 0)}</td>);
-                              cells.push(<td key={`woe-${labelVal}-${idx}`}>{formatToFourDecimals(pickNumeric(woeData.WOE, woeData.woe, woeData.WoE, woeData.Woe, woeData.woe_value, woeData.WOEValue))}</td>);
-                              cells.push(<td key={`iv-${labelVal}-${idx}`}>{formatToFourDecimals(pickNumeric(woeData.IV, woeData.iv, woeData.Iv, woeData.iv_contribution, woeData.IVContribution))}</td>);
+                              cells.push(<td key={`distgood-${labelVal}-${idx}`}>{formatToFourDecimals(displayWoeData['Dist_Good_%'] || 0)}</td>);
+                              cells.push(<td key={`distbad-${labelVal}-${idx}`}>{formatToFourDecimals(displayWoeData['Dist_Bad_%'] || 0)}</td>);
+                              cells.push(<td key={`woe-${labelVal}-${idx}`}>{formatToFourDecimals(displayWoeData.WOE || 0)}</td>);
+                              cells.push(<td key={`iv-${labelVal}-${idx}`}>{formatToFourDecimals(displayWoeData.IV || 0)}</td>);
 
                               const matchedKey = getMatchedKey(labelVal, rangeValue, labelValRaw);
                               const metricsBin = fallbackMetrics; // reuse previously resolved metric
+                              const displayMatchedKey = matchedKey ? formatWoeKeyDisplay(matchedKey) : '—';
+                              const displayMetricName = metricsBin?.bin_name ? formatWoeKeyDisplay(String(metricsBin.bin_name)) : '—';
 
                               // Actions cell (Unmerge)
                               cells.push(
@@ -1635,8 +1663,8 @@ const SelectedColumnsPage = () => {
                               cells.push(
                                 <td key={`metrics-${labelVal}-${idx}`} style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
                                   <div>
-                                    <div style={{ color: matchedKey ? '#9ae6b4' : '#fca5a5' }}><strong>woeKey:</strong> {matchedKey || '—'}</div>
-                                    <div style={{ color: metricsBin ? '#c7d2fe' : '#fef3c7' }}><strong>metric:</strong> {metricsBin?.bin_name || '—'}</div>
+                                    <div style={{ color: matchedKey ? '#9ae6b4' : '#fca5a5' }}><strong>woeKey:</strong> {displayMatchedKey}</div>
+                                    <div style={{ color: metricsBin ? '#c7d2fe' : '#fef3c7' }}><strong>metric:</strong> {displayMetricName}</div>
                                   </div>
                                 </td>
                               );
@@ -1678,19 +1706,35 @@ const SelectedColumnsPage = () => {
                             let sumFreq = 0;
                             let freqProvided = false;
 
+                            let totalIvContribution = 0;
                             sortedRows.forEach((bin: any, idx: number) => {
                               const { labelValRaw, labelVal, rangeValue } = getBinIdentifiers(bin, idx);
 
-                              // Prefer binScoringMetrics counts when present
                               const binMetrics = findBinMetric(labelValRaw, labelVal);
                               const woeTotalsRow = getWoeRow(labelVal, rangeValue, labelValRaw);
-                              const good = binMetrics?.good_count ?? (woeTotalsRow?.Good ?? 0);
-                              const bad = binMetrics?.bad_count ?? (woeTotalsRow?.Bad ?? 0);
-                              const total = binMetrics?.total_count ?? (woeTotalsRow?.Total ?? (good + bad));
 
-                              totalBad += bad;
-                              totalGood += good;
-                              totalTotal += total;
+                              const good = Number(
+                                binMetrics?.good_count ??
+                                woeTotalsRow?.Good ??
+                                0
+                              );
+                              const bad = Number(
+                                binMetrics?.bad_count ??
+                                woeTotalsRow?.Bad ??
+                                0
+                              );
+                              const total = Number(
+                                binMetrics?.total_count ??
+                                woeTotalsRow?.Total ??
+                                good + bad
+                              );
+
+                              const derived = computeDerivedStatsForCounts(good, bad, total);
+
+                              totalBad += derived.badCount;
+                              totalGood += derived.goodCount;
+                              totalTotal += derived.totalCount;
+                              totalIvContribution += derived.ivValue;
 
                               const freq = typeof bin['Freq%'] === 'number' ? bin['Freq%'] : (typeof bin.Freq === 'number' ? bin.Freq : null);
                               if (freq !== null) {
@@ -1704,9 +1748,7 @@ const SelectedColumnsPage = () => {
 
                             // Calculate overall 0/1 ratio (Good/Bad)
                             const overallZeroOneRatio = totalBad > 0 ? totalGood / totalBad : 'Inf';
-
-                            // Use authoritative total IV from backend
-                            const totalIv = Number(woeIvResults[activeColumn]?.iv ?? 0) || 0;
+                            const totalIv = Number(totalIvContribution.toFixed(4));
 
                             return (
                               <tr className="totals-row">
