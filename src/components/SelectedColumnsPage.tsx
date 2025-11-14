@@ -1309,16 +1309,23 @@ const SelectedColumnsPage = () => {
                     })) || [];
                     
                     // Sort bins numerically
-                    const chartData = unsortedChartData.sort((a, b) => {
+                    // Added types for chart data points
+                    interface ChartDataPoint {
+                      bin: string;
+                      WOE: number;
+                      temp_bin?: string;
+                    }
+
+                    const chartData: ChartDataPoint[] = unsortedChartData.sort((a: ChartDataPoint, b: ChartDataPoint) => {
                       // Extract numeric part from bin labels like "Bin_1", "Bin_2", etc.
                       const extractNum = (binLabel: string) => {
                         const match = String(binLabel).match(/\d+/);
                         return match ? parseInt(match[0], 10) : 0;
                       };
-                      
-                      const numA = extractNum(a.temp_bin || a.bin);
-                      const numB = extractNum(b.temp_bin || b.bin);
-                      
+
+                      const numA = extractNum(a.temp_bin ?? a.bin);
+                      const numB = extractNum(b.temp_bin ?? b.bin);
+
                       return numA - numB;
                     });
                     
