@@ -5,11 +5,15 @@ import './AdminPanel.css';
 type AnalysisRecord = {
   id: number;
   dataset_path: string;
-  discrete_columns: string;
-  continuous_columns: string;
-  selected_columns: string;
+  discrete_columns: string[];  // Changed to array
+  continuous_columns: string[];  // Changed to array
+  selected_columns: string[];  // Changed to array
   target_variable: string;
   created_at: string;
+  total_features?: number;
+  discrete_features?: number;
+  continuous_features?: number;
+  binning_data?: Record<string, any>;
 };
 
 const AdminPanel: React.FC = () => {
@@ -42,16 +46,36 @@ const AdminPanel: React.FC = () => {
             columns = csvData.columns || [];
           }
         } catch {}
-        // Parse columns from CSV strings to arrays
+        
+        // Extract binning results from new format
+        const univariateResults: Record<string, any> = {};
+        const fineBinResults: Record<string, any> = {};
+        const woeIvResults: Record<string, any> = {};
+        
+        if (data.binning_data) {
+          Object.entries(data.binning_data).forEach(([column, binning]: [string, any]) => {
+            if (binning.coarse) {
+              univariateResults[column] = binning.coarse;
+            }
+            if (binning.fine) {
+              fineBinResults[column] = binning.fine.bins;
+            }
+            if (binning.woe_iv) {
+              woeIvResults[column] = binning.woe_iv;
+            }
+          });
+        }
+        
+        // Build state with NEW format (arrays instead of comma-separated strings)
         const state = {
           columns,
-          discreteColumns: data.discrete_columns ? data.discrete_columns.split(',').filter(Boolean) : [],
-          continuousColumns: data.continuous_columns ? data.continuous_columns.split(',').filter(Boolean) : [],
-          selectedForUnivariate: data.selected_columns ? data.selected_columns.split(',').filter(Boolean) : [],
+          discreteColumns: data.discrete_columns || [],  // Already an array
+          continuousColumns: data.continuous_columns || [],  // Already an array
+          selectedForUnivariate: data.selected_columns || [],  // Already an array
           targetVariable: data.target_variable,
-          univariateResults: data.univariate_results ? JSON.parse(data.univariate_results) : {},
-          fineBinResults: data.finebin_results ? JSON.parse(data.finebin_results) : {},
-          crossTabResults: data.crosstab_results ? JSON.parse(data.crosstab_results) : {},
+          univariateResults,
+          fineBinResults,
+          woeIvResults,
           recordId: id,
         };
         navigate('/', { state });
@@ -93,7 +117,9 @@ const AdminPanel: React.FC = () => {
               <tr key={rec.id}>
                 <td style={{ textAlign: 'center' }}>{rec.id}</td>
                 <td style={{ textAlign: 'center' }}>{rec.dataset_path}</td>
-                <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>{rec.selected_columns}</td>
+                <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>
+                  {Array.isArray(rec.selected_columns) ? rec.selected_columns.join(', ') : rec.selected_columns}
+                </td>
                 <td style={{ textAlign: 'center' }}>{rec.created_at}</td>
                 <td style={{ textAlign: 'center' }}>
                   <div style={{ display: 'inline-flex', gap: '8px' }}>

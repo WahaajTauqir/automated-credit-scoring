@@ -97,9 +97,6 @@ const ColumnPanels = ({
                   continuous_columns: remaining,
                   selected_columns: selectedForUnivariate,
                   target_variable: targetVariable,
-                  univariate_results: '',
-                  finebin_results: '',
-                  crosstab_results: ''
                 })
               });
             } catch (e) {

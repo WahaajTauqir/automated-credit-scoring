@@ -1,66 +1,21 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import pandas as pd
-import numpy as np
-import os
-import datetime
-import json
-import requests
-import math
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_curve, auc, classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
-from sklearn.preprocessing import StandardScaler
-from statsmodels.stats.outliers_influence import variance_inflation_factor
-import statsmodels.api as sm
-from scipy import stats
-import warnings
-warnings.filterwarnings('ignore')
-import re
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import base64
-from io import BytesIO
-from db import get_db_connection, init_db, save_record_db, upsert_single_record_db, get_records_db, get_latest_record_dataset_path_db, get_record_db, delete_record_db, save_finebin_details_db, get_finebin_details_db
-import traceback
-import logging
-from auto_monotonic_binning import auto_monotonic_binning, compute_woe, compute_iv
+"""
+ARCHIVED LEGACY MODULE (app_old.py)
 
-# Optional: load environment variables from a .env file if present
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv()
-except Exception:
-    pass
+Legacy application module that used JSON-blob persistence has been removed
+from active code. Use `backend/app.py` and `backend/db.py` for current
+normalized implementations.
 
-# configure basic logging for debug
-logging.basicConfig(level=logging.DEBUG)
+The original content is preserved in git history. Importing this module
+will raise to prevent accidental usage.
+"""
 
-app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173"])
+def _archived_import_error():
+    raise RuntimeError(
+        "The legacy module 'app_old' is archived. Use 'backend/app.py' and 'backend/db.py' instead."
+    )
 
-# Helper function to get the CSV path consistently
-def get_csv_path():
-    """Returns the absolute path to uploaded.csv in the backend directory."""
-    return os.path.join(os.path.dirname(__file__), "uploaded.csv")
 
-# Helper function to safely save CSV with retry logic
-def safe_save_csv(df, max_retries=3):
-    """
-    Safely saves DataFrame to uploaded.csv with retry logic for Windows permission issues.
-    """
-    csv_path = get_csv_path()
-    import time
-    for attempt in range(max_retries):
-        try:
-            df.to_csv(csv_path, index=False)
-            return True
-        except PermissionError as e:
-            if attempt < max_retries - 1:
-                time.sleep(0.1)  # Wait 100ms before retry
-            else:
-                raise e  # Re-raise on final attempt
-    return False
+_archived_import_error()
 
 
 # ----------- Get Uploaded CSV Columns -----------

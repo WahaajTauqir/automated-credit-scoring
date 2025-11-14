@@ -366,13 +366,16 @@ const SelectedColumnsPage = () => {
       }
       const savedMerges: Record<string, any[]> = {};
       details.forEach((row: any) => {
-        let bins: any[];
-        try {
-          bins = JSON.parse(row.merged_bins);
-        } catch {
+        let bins: any[] = [];
+        if (Array.isArray(row.merged_bins)) {
+          bins = row.merged_bins;
+        } else if (typeof row.merged_bins === 'string') {
+          // Legacy stored as CSV-like string — convert to array without JSON.parse
+          bins = row.merged_bins.split(',').map((s: string) => s.trim()).filter((s: string) => s);
+        } else {
           bins = [];
         }
-        if (bins && bins.length > 0) {
+        if (bins.length > 0) {
           savedMerges[row.group_id] = bins;
         }
       });
@@ -418,35 +421,69 @@ const SelectedColumnsPage = () => {
       const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
       const recordData = await recordResp.json();
       
-      if (recordData.woe_iv_results) {
-        setWoeIvResults(recordData.woe_iv_results);
-        const readyColumns = new Set(Object.keys(recordData.woe_iv_results));
-        setWoeReadyColumns(readyColumns);
-      }
-      if (recordData.selected_columns) {
-        setSelectedColumns(recordData.selected_columns.split(','));
-      }
-      // Restore dashboard checkbox selection (supports string CSV or JSON array)
-      if (recordData.dashboard_selected_columns !== undefined && recordData.dashboard_selected_columns !== null) {
-        let restoredArr: string[] = [];
-        try {
-          if (Array.isArray(recordData.dashboard_selected_columns)) {
-            restoredArr = recordData.dashboard_selected_columns.map((s: any) => String(s).trim()).filter((s: string) => s);
-          } else if (typeof recordData.dashboard_selected_columns === 'string') {
-            const raw = recordData.dashboard_selected_columns.trim();
-            if (raw.startsWith('[')) {
-              // JSON array stored as text
-              const parsed = JSON.parse(raw);
-              restoredArr = Array.isArray(parsed) ? parsed.map((s: any) => String(s).trim()).filter((s: string) => s) : [];
-            } else {
-              restoredArr = raw.split(',').map((s: string) => s.trim()).filter((s: string) => s);
-            }
-          }
-        } catch (e) {
-          
-        }
+      // Extract WOE/IV data from new binning_data structure
+      if (recordData.binning_data) {
+        const woeData: Record<string, any> = {};
+        const univariateData: Record<string, any> = {};
+        const fineData: Record<string, any[]> = {};
         
-        setSelectedForModeling(restoredArr);
+        Object.entries(recordData.binning_data).forEach(([column, binning]: [string, any]) => {
+          // Extract WOE/IV results
+          if (binning.woe_iv) {
+            woeData[column] = binning.woe_iv;
+          }
+          // Extract coarse binning (univariate) results
+          if (binning.coarse) {
+            univariateData[column] = binning.coarse;
+          }
+          // Extract fine binning results
+          if (binning.fine && binning.fine.bins) {
+            fineData[column] = binning.fine.bins;
+          }
+        });
+        
+        if (Object.keys(woeData).length > 0) {
+          setWoeIvResults(woeData);
+          const readyColumns = new Set(Object.keys(woeData));
+          setWoeReadyColumns(readyColumns);
+        }
+        if (Object.keys(univariateData).length > 0) {
+          setUnivariateResults(univariateData);
+        }
+        if (Object.keys(fineData).length > 0) {
+          setFineBinResults(fineData);
+          setCoarseBinResults(fineData); // Coarse results same as fine initially
+        }
+      }
+      
+      // Handle selected_columns - now an array from backend
+      if (recordData.selected_columns) {
+        if (Array.isArray(recordData.selected_columns)) {
+          setSelectedColumns(recordData.selected_columns);
+        } else if (typeof recordData.selected_columns === 'string') {
+          // Backward compatibility with old string format
+          setSelectedColumns(recordData.selected_columns.split(',').map((s: string) => s.trim()).filter(Boolean));
+        }
+      }
+      
+      // Restore dashboard checkbox selection (supports both array and string CSV)
+      if (recordData.dashboard_selected_columns !== undefined && recordData.dashboard_selected_columns !== null) {
+        const parseLegacyList = (raw: any): string[] => {
+          if (!raw) return [];
+          if (Array.isArray(raw)) return raw.map((s: any) => String(s).trim()).filter(Boolean);
+          if (typeof raw === 'string') {
+            // Remove surrounding brackets and outer quotes, then split on commas
+            const cleaned = raw.replace(/^\s*\[|\]\s*$/g, '').split(',').map((s: string) => s.replace(/^"|"$|^'|'$/g, '').trim()).filter(Boolean);
+            return cleaned;
+          }
+          return [];
+        };
+        try {
+          const restoredArr = parseLegacyList(recordData.dashboard_selected_columns);
+          setSelectedForModeling(restoredArr);
+        } catch (e) {
+          // non-fatal
+        }
       }
     } catch (e) {
       
@@ -929,10 +966,6 @@ const SelectedColumnsPage = () => {
     try {
       const payloadSelectedColumns = overrides.selectedColumns ?? selectedColumns ?? [];
       const payloadDashboard = overrides.dashboardSelectedColumns ?? selectedForModeling ?? [];
-      const payloadUnivariate = overrides.univariateResults ?? univariateResults ?? {};
-      const payloadFine = overrides.fineBinResults ?? fineBinResults ?? {};
-      const payloadCrosstab = overrides.crosstabResults ?? coarseBinResults ?? {};
-      const payloadWoe = overrides.woeIvResults ?? woeIvResults ?? {};
 
       const upsertResp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
@@ -944,10 +977,6 @@ const SelectedColumnsPage = () => {
           selected_columns: payloadSelectedColumns,
           dashboard_selected_columns: payloadDashboard,
           target_variable: targetVariable || '',
-          univariate_results: JSON.stringify(payloadUnivariate),
-          finebin_results: JSON.stringify(payloadFine),
-          crosstab_results: JSON.stringify(payloadCrosstab),
-          woe_iv_results: JSON.stringify(payloadWoe),
         }),
       });
       const up = await upsertResp.json();
@@ -980,10 +1009,6 @@ const SelectedColumnsPage = () => {
           selected_columns: selectedColumns,
           dashboard_selected_columns: newSelection,
           target_variable: targetVariable || '',
-          univariate_results: JSON.stringify(univariateResults || {}),
-          finebin_results: JSON.stringify(fineBinResults || {}),
-          crosstab_results: JSON.stringify(coarseBinResults || {}),
-          woe_iv_results: JSON.stringify(woeIvResults || {}),
           record_id: recordId,
         }),
       });
@@ -1122,10 +1147,6 @@ const SelectedColumnsPage = () => {
           selected_columns: selectedColumns,
           dashboard_selected_columns: selectedForModeling,
           target_variable: targetVariable || '',
-          univariate_results: JSON.stringify(univariateResults || {}),
-          finebin_results: JSON.stringify(fineBinResults || {}),
-          crosstab_results: JSON.stringify(coarseBinResults || {}),
-          woe_iv_results: JSON.stringify(woeIvResults || {}),
           record_id: recordId,
         }),
       });

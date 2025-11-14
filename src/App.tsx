@@ -8,18 +8,19 @@ import ColumnSelectionPage from './components/ColumnSelectionPage';
 import './App.css';
 import './components/Admin/AdminPanel.css';
 
-// Reuse the analysis record type from Admin panel locally for inline table
+// Type definition for the new database schema
 type AnalysisRecord = {
   id: number;
   dataset_path: string;
-  discrete_columns: string;
-  continuous_columns: string;
-  selected_columns: string;
+  discrete_columns: string[];  // Changed from comma-separated string to array
+  continuous_columns: string[];  // Changed from comma-separated string to array
+  selected_columns: string[];  // Changed from comma-separated string to array
   target_variable: string;
   created_at: string;
-  univariate_results?: string;
-  finebin_results?: string;
-  crosstab_results?: string;
+  total_features?: number;
+  discrete_features?: number;
+  continuous_features?: number;
+  binning_data?: Record<string, any>;  // New: structured binning data
 };
 
 function App() {
@@ -241,13 +242,45 @@ function App() {
   };
 
   const handleTypeChange = (column: string, type: string) => {
-    if (type === 'discrete') {
-      setDiscreteColumns(prev => [...new Set([...prev, column])]);
-      setContinuousColumns(prev => prev.filter(c => c !== column));
-    } else if (type === 'continuous') {
-      setContinuousColumns(prev => [...new Set([...prev, column])]);
-      setDiscreteColumns(prev => prev.filter(c => c !== column));
-    }
+    // Use functional updates to avoid race conditions when many changes occur quickly
+    let computedDiscrete: string[] = [];
+    let computedContinuous: string[] = [];
+
+    setDiscreteColumns(prev => {
+      const next = type === 'discrete'
+        ? Array.from(new Set([...prev, column]))
+        : prev.filter(c => c !== column);
+      computedDiscrete = next;
+      return next;
+    });
+
+    setContinuousColumns(prev => {
+      const next = type === 'continuous'
+        ? Array.from(new Set([...prev, column]))
+        : prev.filter(c => c !== column);
+      computedContinuous = next;
+      return next;
+    });
+
+    // Persist change to backend (non-blocking). Backend will recalc dataset counts.
+    (async () => {
+      try {
+        await fetch('http://localhost:5000/api/upsert-single-record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataset_path: datasetPath,
+            discrete_columns: computedDiscrete,
+            continuous_columns: computedContinuous,
+            selected_columns: selectedForUnivariate,
+            target_variable: targetVariable
+          })
+        });
+      } catch (err) {
+        // Non-fatal: keep UI responsive even if persistence fails
+        console.error('Failed to persist type change:', err);
+      }
+    })();
   };
 
 
@@ -267,6 +300,28 @@ function App() {
 
   useEffect(() => {
     if (targetVariable) fetchTargetCounts(targetVariable);
+  }, [targetVariable]);
+
+  // Persist target variable to backend when user selects it (non-blocking)
+  useEffect(() => {
+    if (!targetVariable) return;
+    (async () => {
+      try {
+        await fetch('http://localhost:5000/api/upsert-single-record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataset_path: datasetPath,
+            discrete_columns: discreteColumns,
+            continuous_columns: continuousColumns,
+            selected_columns: selectedForUnivariate,
+            target_variable: targetVariable
+          })
+        });
+      } catch (err) {
+        console.error('Failed to persist target variable:', err);
+      }
+    })();
   }, [targetVariable]);
 
   const toggleBinSelection = (col: string, binValue: any) => {
@@ -297,7 +352,7 @@ function App() {
       setRestoring(true);
       // Fetch complete record
       const recResp = await fetch(`http://localhost:5000/api/record/${id}`);
-      const data: AnalysisRecord & { univariate_results?: string; finebin_results?: string; crosstab_results?: string } = await recResp.json();
+      const data: AnalysisRecord & { univariate_results?: any; finebin_results?: any; crosstab_results?: any } = await recResp.json();
 
       // Ask backend to load dataset & return columns
       let loadedColumns: string[] = [];
@@ -321,29 +376,57 @@ function App() {
         } catch { /* ignore */ }
       }
 
-      // Fallback: infer from stored column strings
+      // Fallback: infer from stored column fields. Accept both array or comma-separated string formats.
       if (loadedColumns.length === 0) {
         const inferred = new Set<string>();
-        (data.discrete_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
-        (data.continuous_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
-        (data.selected_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
+        const addField = (field: any) => {
+          if (!field) return;
+          if (Array.isArray(field)) {
+            field.forEach((c: any) => { if (c) inferred.add(String(c).trim()); });
+          } else if (typeof field === 'string') {
+            field.split(',').map(s => s.trim()).filter(Boolean).forEach((c: string) => inferred.add(c));
+          }
+        };
+
+        addField((data as any).discrete_columns);
+        addField((data as any).continuous_columns);
+        addField((data as any).selected_columns);
         loadedColumns = Array.from(inferred);
       }
 
       // Update state
   setColumns(loadedColumns);
-      const discreteArr = data.discrete_columns ? data.discrete_columns.split(',').filter(Boolean) : [];
-      const continuousArr = data.continuous_columns ? data.continuous_columns.split(',').filter(Boolean) : [];
-      const selectedArr = data.selected_columns ? data.selected_columns.split(',').filter(Boolean) : [];
-  const expected = loadedColumns.length ? loadedColumns : Array.from(new Set([...discreteArr, ...continuousArr, ...selectedArr]));
+      const discreteArr: string[] = Array.isArray((data as any).discrete_columns)
+        ? (data as any).discrete_columns
+        : (typeof (data as any).discrete_columns === 'string'
+          ? (data as any).discrete_columns.split(',').filter(Boolean)
+          : []);
+
+      const continuousArr: string[] = Array.isArray((data as any).continuous_columns)
+        ? (data as any).continuous_columns
+        : (typeof (data as any).continuous_columns === 'string'
+          ? (data as any).continuous_columns.split(',').filter(Boolean)
+          : []);
+
+      const selectedArr: string[] = Array.isArray((data as any).selected_columns)
+        ? (data as any).selected_columns
+        : (typeof (data as any).selected_columns === 'string'
+          ? (data as any).selected_columns.split(',').filter(Boolean)
+          : []);
+
+      const expected = loadedColumns.length ? loadedColumns : Array.from(new Set([...discreteArr, ...continuousArr, ...selectedArr]));
   setExpectedColumnsForRecord(expected);
       setDiscreteColumns(discreteArr);
       setContinuousColumns(continuousArr);
       setSelectedForUnivariate(selectedArr);
       setTargetVariable(data.target_variable || '');
-      const uni = data.univariate_results ? JSON.parse(data.univariate_results) : {};
-      const fine = data.finebin_results ? JSON.parse(data.finebin_results) : {};
-      const cross = data.crosstab_results ? JSON.parse(data.crosstab_results) : {};
+      let uni: Record<string, any> = {};
+      let fine: Record<string, any> = {};
+      let cross: Record<string, any> = {};
+      // Backend now returns structured objects/arrays for these fields.
+      uni = data.univariate_results && typeof data.univariate_results !== 'string' ? data.univariate_results : {};
+      fine = data.finebin_results && typeof data.finebin_results !== 'string' ? data.finebin_results : {};
+      cross = data.crosstab_results && typeof data.crosstab_results !== 'string' ? data.crosstab_results : {};
       setUnivariateResults(uni);
       setFineBinResults(fine);
       setCrossTabResults(cross);

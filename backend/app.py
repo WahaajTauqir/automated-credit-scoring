@@ -22,7 +22,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
-# Import new database layer functions
+# Import ONLY new database layer functions - NO MORE db_old imports!
 from db import (
     get_db_connection, init_db,
     # Dataset operations
@@ -42,15 +42,10 @@ from db import (
     # Helper functions
     get_complete_binning_results, get_dataset_with_all_results, delete_all_binning_for_feature
 )
-# Import old database functions (temporary - until full migration)
-from db_old import (
-    upsert_single_record_db, get_records_db, get_record_db, 
-    get_latest_record_dataset_path_db, delete_record_db,
-    save_finebin_details_db, get_finebin_details_db, save_record_db
-)
 import traceback
 import logging
 from auto_monotonic_binning import auto_monotonic_binning, compute_woe, compute_iv
+import ast
 
 # Optional: load environment variables from a .env file if present
 try:
@@ -65,6 +60,198 @@ logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173"])
 
+# =====================================================================
+# MIGRATION HELPER FUNCTIONS - Convert between old and new schema formats
+# =====================================================================
+
+def format_dataset_to_record(dataset_dict):
+    """
+    Convert a dataset dictionary (from new schema) to the old record format
+    for backward compatibility with frontend expectations.
+    """
+    print(f"[format_dataset_to_record] Converting dataset {dataset_dict.get('id')} to old format")
+    features = get_features_by_dataset(dataset_dict['id'])
+    print(f"[format_dataset_to_record] Found {len(features)} features")
+    
+    discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
+    continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
+    selected_cols = [f['name'] for f in features if f.get('selected') is True]
+    
+    # Build univariate_results from binning_steps (coarse binning)
+    univariate_results = {}
+    for feature in features:
+        coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+        if coarse_step:
+            bins = get_bins_by_step(coarse_step['id'])
+            univariate_results[feature['name']] = {
+                'type': feature['type'],
+                'stats': [format_bin_to_dict(b) for b in bins]
+            }
+    
+    # Build finebin_results from binning_steps (fine binning)
+    finebin_results = {}
+    for feature in features:
+        fine_step = get_binning_step_by_type(feature['id'], 'fine')
+        if fine_step:
+            bins = get_bins_by_step(fine_step['id'])
+            finebin_results[feature['name']] = [format_bin_to_dict(b) for b in bins]
+    
+    # Build woe_iv_results from binning_steps (IV values)
+    woe_iv_results = {}
+    for feature in features:
+        # Use fine binning if available, otherwise coarse
+        fine_step = get_binning_step_by_type(feature['id'], 'fine')
+        step = fine_step if fine_step else get_binning_step_by_type(feature['id'], 'coarse')
+        if step and step.get('iv_value') is not None:
+            bins = get_bins_by_step(step['id'])
+            woe_iv_results[feature['name']] = {
+                'iv': float(step['iv_value']),
+                'stats': [format_bin_to_woe_dict(b) for b in bins]
+            }
+    
+    # Return structured objects/lists (do NOT stringify) - frontend expects structured data
+    return {
+        'id': dataset_dict['id'],
+        'dataset_path': dataset_dict.get('file_path', ''),
+        'discrete_columns': discrete_cols,
+        'continuous_columns': continuous_cols,
+        'selected_columns': selected_cols,
+        'dashboard_selected_columns': selected_cols,
+        'target_variable': dataset_dict.get('target_variable', ''),
+        'created_at': str(dataset_dict.get('created_at', '')),
+        'univariate_results': univariate_results,
+        'finebin_results': finebin_results,
+        'crosstab_results': [],
+        'woe_iv_results': woe_iv_results
+    }
+
+
+def format_bin_to_dict(bin_record):
+    """Convert a bin database record to dictionary format expected by frontend."""
+    result = {
+        'Bin': bin_record.get('bin_label', ''),
+        'Good': int(bin_record.get('good_count', 0)),
+        'Bad': int(bin_record.get('bad_count', 0)),
+        'Total': int(bin_record.get('total_count', 0))
+    }
+    
+    # Add Min/Max for continuous, Range for discrete
+    if bin_record.get('min_value') is not None:
+        result['Min'] = float(bin_record['min_value'])
+    if bin_record.get('max_value') is not None:
+        result['Max'] = float(bin_record['max_value'])
+    if bin_record.get('range_text'):
+        result['Range'] = bin_record['range_text']
+    
+    return result
+
+
+def format_bin_to_woe_dict(bin_record):
+    """Convert a bin database record to WOE/IV format."""
+    return {
+        'Bin': bin_record.get('bin_label', ''),
+        'Good': int(bin_record.get('good_count', 0)),
+        'Bad': int(bin_record.get('bad_count', 0)),
+        'Total': int(bin_record.get('total_count', 0)),
+        'Dist_Good_%': float(bin_record.get('dist_good', 0)),
+        'Dist_Bad_%': float(bin_record.get('dist_bad', 0)),
+        'WOE': float(bin_record.get('woe', 0)),
+        'IV': float(bin_record.get('iv', 0)),
+        'Range': bin_record.get('range_text', bin_record.get('bin_label', ''))
+    }
+
+
+def save_coarse_binning_to_db(feature_id, bins_df, var_type):
+    """
+    Save coarse binning results to the new normalized schema.
+    Returns the binning_step_id.
+    """
+    print(f"[save_coarse_binning_to_db] Saving coarse binning for feature {feature_id}, type={var_type}, bins={len(bins_df)}")
+    # Create binning step
+    step_id = create_binning_step(
+        feature_id=feature_id,
+        step_type='coarse',
+        method='qcut' if var_type == 'continuous' else 'bad_rate',
+        num_bins=len(bins_df)
+    )
+    
+    # Create bins
+    bins_data = []
+    total_good = int(bins_df['Good'].sum())
+    total_bad = int(bins_df['Bad'].sum())
+    total_all = int(total_good + total_bad)
+
+    # Overall odds for index calculations
+    overall_odds = (total_good / total_bad) if total_bad > 0 else None
+
+    for idx, row in bins_df.iterrows():
+        good = int(row['Good'])
+        bad = int(row['Bad'])
+        total = int(row['Total'])
+
+        bin_data = {
+            'bin_number': idx + 1,
+            'bin_label': str(row.get('Bin', f'Bin_{idx+1}')),
+            'good_count': good,
+            'bad_count': bad,
+            'total_count': total
+        }
+
+        # Add Min/Max for continuous
+        if 'Min' in row and row['Min'] is not None:
+            try:
+                bin_data['min_value'] = float(row['Min'])
+            except Exception:
+                bin_data['min_value'] = None
+        if 'Max' in row and row['Max'] is not None:
+            try:
+                bin_data['max_value'] = float(row['Max'])
+            except Exception:
+                bin_data['max_value'] = None
+
+        # Add Range for discrete
+        if 'Range' in row and row['Range']:
+            bin_data['range_text'] = str(row['Range'])
+
+        # Calculate distributions and rates
+        bin_data['dist_good'] = (good / total_good) * 100 if total_good > 0 else None
+        bin_data['dist_bad'] = (bad / total_bad) * 100 if total_bad > 0 else None
+        bin_data['bad_rate'] = (bad / total) * 100 if total > 0 else None
+        bin_data['freq_percent'] = (total / total_all) * 100 if total_all > 0 else None
+
+        # Odds and ratio (guard divide-by-zero)
+        bin_data['odds'] = (good / bad) if bad > 0 else None
+        bin_data['good_bad_ratio'] = bin_data['odds']
+
+        # Index metrics: index_value = dist_good / dist_bad, odds_index = odds / overall_odds
+        try:
+            bin_data['index_value'] = (bin_data['dist_good'] / bin_data['dist_bad']) * 100 if (bin_data['dist_bad'] and bin_data['dist_bad'] > 0) else None
+        except Exception:
+            bin_data['index_value'] = None
+        try:
+            bin_data['odds_index'] = (bin_data['odds'] / overall_odds) * 100 if (bin_data['odds'] is not None and overall_odds and overall_odds > 0) else None
+        except Exception:
+            bin_data['odds_index'] = None
+
+        bins_data.append(bin_data)
+
+    # Persist bins and totals
+    if bins_data:
+        create_bins_batch(step_id, bins_data)
+
+    # Create binning totals
+    create_binning_totals(
+        binning_step_id=step_id,
+        total_good=total_good,
+        total_bad=total_bad,
+        total_count=total_all,
+        good_bad_ratio=(total_good / total_bad) if total_bad > 0 else None,
+        bad_rate=(total_bad / total_all) * 100 if total_all > 0 else None,
+        freq_percent=100.0,
+    )
+    
+    return step_id
+
 # Helper function to get the CSV path consistently
 def get_csv_path():
     """Returns the absolute path to uploaded.csv in the backend directory."""
@@ -72,17 +259,212 @@ def get_csv_path():
     try:
         dataset = get_latest_dataset()
         if dataset and dataset.get('file_path'):
-            candidate = os.path.join(os.path.dirname(__file__), dataset.get('file_path'))
+            fp = dataset.get('file_path')
+            # First try relative to backend folder
+            candidate = os.path.join(os.path.dirname(__file__), fp)
             if os.path.exists(candidate):
                 return candidate
-            # Fall back to absolute path stored (if any)
-            fp = dataset.get('file_path')
+            # Next try if file_path is absolute on disk
             if fp and os.path.isabs(fp) and os.path.exists(fp):
                 return fp
+            # Next try looking in the uploads folder for the stored name
+            uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
+            maybe = os.path.join(uploads_dir, os.path.basename(fp))
+            if os.path.exists(maybe):
+                return maybe
     except Exception:
         # If DB isn't available yet, fall back to the legacy uploaded.csv
         pass
-    return os.path.join(os.path.dirname(__file__), "uploaded.csv")
+    # As a last resort, pick the most recent CSV in uploads/ if present
+    uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
+    if os.path.exists(uploads_dir):
+        files = [os.path.join(uploads_dir, f) for f in os.listdir(uploads_dir) if f.lower().endswith('.csv')]
+        if files:
+            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            return files[0]
+
+    # Nothing found — raise with helpful message so callers can return a proper error
+    raise FileNotFoundError('No dataset CSV found. Upload a CSV via /api/upload-csv first.')
+
+
+# ---------------- Compatibility shims for legacy db_old APIs ----------------
+def get_record_db(record_id):
+    """
+    Compatibility wrapper that returns a legacy-style record dict (matching old `records` table)
+    by querying the new normalized `datasets`/`features` tables.
+    """
+    try:
+        dataset = get_dataset(record_id)
+        if not dataset:
+            return None
+        features = get_features_by_dataset(dataset['id'])
+        discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
+        continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
+        selected_cols = [f['name'] for f in features if f.get('selected')]
+
+        # Build minimal legacy payload similar to db_old.get_record_db
+        legacy = {
+            'id': dataset['id'],
+            'dataset_path': dataset.get('file_path', ''),
+            'discrete_columns': discrete_cols,
+            'continuous_columns': continuous_cols,
+            'selected_columns': selected_cols,
+            'dashboard_selected_columns': selected_cols,
+            'target_variable': dataset.get('target_variable', ''),
+            'created_at': str(dataset.get('created_at', '')),
+            # Results placeholders (return structured objects/lists, not JSON strings)
+            'univariate_results': {},
+            'finebin_results': {},
+            'crosstab_results': [],
+            'woe_iv_results': {}
+        }
+        return legacy
+    except Exception:
+        return None
+
+
+def get_finebin_details_db(record_id, column_name):
+    """
+    Compatibility wrapper that returns fine-bin merged groups in the old `finebin_details` format:
+    list of dicts with keys `group_id` and `merged_bins` (as JSON string).
+    Uses new schema functions to reconstruct the data.
+    """
+    try:
+        dataset_id = record_id
+        feature = get_feature_by_name(dataset_id, column_name)
+        if not feature:
+            return []
+        fine_step = get_binning_step_by_type(feature['id'], 'fine')
+        if not fine_step:
+            return []
+        merged = get_merged_bins_by_step(fine_step['id'])
+        rows = []
+        for mb in merged:
+            # return merged_bins as a list (do NOT stringify)
+            rows.append({'group_id': mb.get('merged_bin_number'), 'merged_bins': mb.get('original_bin_ids', [])})
+        return rows
+    except Exception:
+        return []
+
+
+def upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results):
+    """
+    Lightweight compatibility function to ensure code paths that expect an 'upsert_single_record_db'
+    function return a stable record id. This will try to use the latest dataset (new schema) or
+    create a minimal dataset if none exists.
+    """
+    try:
+        ds = get_latest_dataset()
+        if ds:
+            return ds['id']
+        # Create a minimal dataset record
+        name = os.path.basename(dataset_path) if dataset_path else 'uploaded'
+        dataset_id = create_dataset(name=name, file_path=dataset_path or 'uploaded.csv', total_features=0, discrete_features=0, continuous_features=0, target_variable=target_variable or '')
+        return dataset_id
+    except Exception:
+        return None
+
+
+def save_finebin_details_db(record_id, column_name, bin_merges):
+    """
+    Compatibility wrapper to persist merged bin groups into the new `merged_bins` table.
+    `bin_merges` is expected to be a mapping of merged_label -> list(original_bin_indices).
+    """
+    try:
+        dataset_id = record_id
+        feature = get_feature_by_name(dataset_id, column_name)
+        if not feature:
+            # Nothing to persist if feature doesn't exist
+            return False
+
+        # Ensure fine binning step exists
+        fine_step = get_binning_step_by_type(feature['id'], 'fine')
+        if not fine_step:
+            fine_step_id = create_binning_step(feature_id=feature['id'], step_type='fine', method='merged', num_bins=0)
+        else:
+            fine_step_id = fine_step['id']
+
+        # Clean existing merged bins for this fine step
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM merged_bins WHERE fine_step_id = %s", (fine_step_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+        # Map coarse bin indices and bin_numbers to bin IDs where possible
+        coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+        coarse_bins = get_bins_by_step(coarse_step['id']) if coarse_step else []
+        # Build robust mappings: 0-based index, 1-based bin_number, and label -> id
+        index_to_id = {}
+        bin_number_to_id = {}
+        label_to_id = {}
+        index_to_label = {}
+        for idx, b in enumerate(coarse_bins):
+            bid = b.get('id')
+            index_to_id[idx] = bid
+            index_to_label[idx] = b.get('bin_label', str(idx))
+            # if bin_number stored, map it as 1-based
+            bn = b.get('bin_number')
+            if bn is not None:
+                try:
+                    bin_number_to_id[int(bn)] = bid
+                except Exception:
+                    pass
+            # label mapping
+            lbl = b.get('bin_label')
+            if lbl is not None:
+                label_to_id[str(lbl).strip()] = bid
+
+        for merged_key, originals in (bin_merges or {}).items():
+            try:
+                merged_num = int(str(merged_key)) if str(merged_key).isdigit() else None
+            except Exception:
+                merged_num = None
+
+            original_ids = []
+            original_labels = []
+            for o in originals:
+                # Accept several possible representations from the frontend:
+                # - numeric index (0-based)
+                # - numeric bin_number (1-based)
+                # - bin label string like 'Bin_1' or a label
+                found_id = None
+                label = None
+                try:
+                    # Try numeric
+                    o_int = int(str(o).strip())
+                    # Prefer bin_number (1-based) match first
+                    found_id = bin_number_to_id.get(o_int)
+                    if found_id is None:
+                        found_id = index_to_id.get(o_int)
+                    label = index_to_label.get(o_int, str(o_int))
+                except Exception:
+                    # Not numeric — treat as label
+                    o_str = str(o).strip()
+                    found_id = label_to_id.get(o_str)
+                    label = o_str
+
+                if found_id:
+                    original_ids.append(found_id)
+                original_labels.append(label)
+
+            # If merged_num not numeric, assign sequential numbering
+            if merged_num is None:
+                # pick next available number
+                existing = get_merged_bins_by_step(fine_step_id)
+                merged_num = (max([m['merged_bin_number'] for m in existing]) + 1) if existing else 1
+
+            # Persist merged bin
+            create_merged_bin(fine_step_id=fine_step_id, merged_bin_number=merged_num, original_bin_ids=original_ids or [], original_bin_labels=original_labels or [])
+
+        return True
+    except Exception:
+        return False
+
 
 # Helper function to safely save CSV with retry logic
 def safe_save_csv(df, max_retries=3):
@@ -111,8 +493,13 @@ def get_uploaded_csv_columns():
     """
     try:
         csv_path = get_csv_path()
+    except FileNotFoundError as fe:
+        return jsonify({"error": str(fe)}), 400
+    try:
         df = pd.read_csv(csv_path, nrows=0)
         return jsonify({"columns": df.columns.tolist()})
+    except FileNotFoundError as fe:
+        return jsonify({"error": str(fe)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -242,8 +629,16 @@ def target_distribution():
     Computes and returns the value counts for a specified target column.
     """
     try:
-        csv_path = get_csv_path()
-        df = pd.read_csv(csv_path)
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
         data = request.get_json()
         col = data.get('column')
         if not col or col not in df.columns:
@@ -339,8 +734,16 @@ def coarse_bin_discrete(df, var, target, bad_label=1, bad_rate_diff=0.5):
             bin_mapping[idx] = current_bin
             prev_bad_rate = row['Bad Rate']
 
-        # Apply binning
-        df[f'{var}_binned'] = df[var].map(bin_mapping).astype(int)
+        # Apply binning (safe conversion): map values, coerce non-mapped to -1, avoid integer cast errors
+        mapped_series = df[var].map(bin_mapping)
+        # Ensure any non-finite / NaN mappings do not cause astype(int) to fail
+        try:
+            mapped_series = pd.to_numeric(mapped_series, errors='coerce').fillna(-1)
+            df[f'{var}_binned'] = mapped_series.astype(int)
+        except Exception:
+            # Fallback: convert via string then numeric
+            mapped_series = mapped_series.astype(str).replace('nan', '-1')
+            df[f'{var}_binned'] = pd.to_numeric(mapped_series, errors='coerce').fillna(-1).astype(int)
 
         # Final crosstab
         final_tab = pd.crosstab(df[f'{var}_binned'], df[target])
@@ -608,9 +1011,17 @@ def fine_bin_api():
         if not var or not target or not var_type:
             return jsonify({"error": "Missing required fields"}), 400
         
-        # Use absolute path to ensure we're working with the right file
-        csv_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
-        df = pd.read_csv(csv_path)
+        # Use configured CSV path (prefers dataset file_path when available)
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
         df[target] = df[target].fillna(0).astype(int)
 
         if var_type == 'continuous':
@@ -642,78 +1053,109 @@ def fine_bin_api():
             iv = 0
             woe_stats = []
 
-        # Save binning results to PostgreSQL
-        from db import save_record_db, save_finebin_details_db, get_record_db
-        # Always upsert into the same record (never create new)
+        # Persist coarse + fine binning into the new normalized schema (datasets/features/binning tables)
         record_id = req.get('recordId')
-        dataset_path = "uploaded.csv"
-        # Load latest record to preserve selected_columns, discrete_columns, continuous_columns
-        from db import get_records_db
-        records = get_records_db()
-        if records:
-            latest = records[0]
-            discrete_columns = latest.get('discrete_columns', '[]')
-            continuous_columns = latest.get('continuous_columns', '[]')
-            selected_columns = latest.get('selected_columns', '[]')
+        latest_ds = get_latest_dataset()
+
+        # Determine dataset id (prefer provided record_id, else latest, else create minimal dataset)
+        if record_id:
+            try:
+                dataset_id = int(record_id)
+            except Exception:
+                dataset_id = latest_ds['id'] if latest_ds else None
         else:
-            discrete_columns = json.dumps([])
-            continuous_columns = json.dumps([])
-            selected_columns = json.dumps([])
-        target_variable = target
-        
-        # Preserve existing univariate_results and update with new data
-        univariate_results_dict = {}
-        if record_id:
-            existing_record = get_record_db(record_id)
-            if existing_record and existing_record.get('univariate_results'):
+            dataset_id = latest_ds['id'] if latest_ds else None
+
+        if dataset_id is None:
+            # Create a minimal dataset record to attach feature/binning results
+            dataset_id = create_dataset(name='uploaded', file_path='uploaded.csv', total_features=0, discrete_features=0, continuous_features=0, target_variable=target)
+
+        # Ensure feature exists in new schema
+        feature = get_feature_by_name(dataset_id, var)
+        if not feature:
+            fid = create_feature(dataset_id, var, var_type, selected=True)
+            feature = get_feature(fid)
+
+        # Ensure coarse binning exists (recompute and save if missing)
+        try:
+            coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+            if not coarse_step:
+                # recompute coarse stats and persist
+                if var_type == 'continuous':
+                    coarse_stats, _ = coarse_bin_continuous(df, var, target)
+                else:
+                    coarse_stats, _, _ = coarse_bin_discrete(df, var, target)
+                save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
+        except Exception:
+            pass
+
+        # Create / update fine binning step
+        num_bins = len(tab) if hasattr(tab, 'shape') else (len(tab) if isinstance(tab, list) else 0)
+        fine_step_id = create_binning_step(feature_id=feature['id'], step_type='fine', method='merged' if adjusted_merges else 'manual', num_bins=num_bins, iv_value=iv)
+
+        # Build bins payload and persist
+        bins_data = []
+        total_good = 0
+        total_bad = 0
+        try:
+            records = tab.to_dict(orient='records')
+        except Exception:
+            records = list(tab)
+
+        for idx, row in enumerate(records):
+            good = int(row.get('Good', 0))
+            bad = int(row.get('Bad', 0))
+            total = int(row.get('Total', good + bad))
+            total_good += good
+            total_bad += bad
+
+            bin_item = {
+                'bin_number': idx + 1,
+                'bin_label': str(row.get('Bin', f'Bin_{idx+1}')),
+                'good_count': good,
+                'bad_count': bad,
+                'total_count': total
+            }
+            # include range/min/max if present
+            if 'Min' in row and row.get('Min') is not None:
                 try:
-                    univariate_results_dict = json.loads(existing_record['univariate_results'])
-                except:
+                    bin_item['min_value'] = float(row.get('Min'))
+                except Exception:
                     pass
-        
-        univariate_results = json.dumps(univariate_results_dict)
-        
-        # Store fine binning results as dict (not array) for consistency
-        finebin_results_dict = {}
-        if record_id:
-            existing_record = get_record_db(record_id)
-            if existing_record and existing_record.get('finebin_results'):
+            if 'Max' in row and row.get('Max') is not None:
                 try:
-                    finebin_results_dict = json.loads(existing_record['finebin_results'])
-                except:
+                    bin_item['max_value'] = float(row.get('Max'))
+                except Exception:
                     pass
-        
-        # Update with current variable's fine binning
-        finebin_results_dict[var] = tab.to_dict(orient='records')
-        finebin_results = json.dumps(finebin_results_dict)
-        
-        crosstab_results = json.dumps([])
-        
-        # Update WOE/IV results for this variable
-        woe_iv_dict = {}
-        if record_id:
-            existing_record = get_record_db(record_id)
-            if existing_record and existing_record.get('woe_iv_results'):
+            if 'Range' in row and row.get('Range'):
+                bin_item['range_text'] = str(row.get('Range'))
+
+            # attempt to include WOE/IV if present in row
+            if 'WOE' in row:
                 try:
-                    woe_iv_dict = json.loads(existing_record['woe_iv_results'])
-                    if not isinstance(woe_iv_dict, dict):
-                        woe_iv_dict = {}
-                except:
-                    woe_iv_dict = {}
-        
-        # Store the recalculated WOE/IV for this variable
-        woe_iv_dict[var] = {"iv": iv, "stats": woe_stats}
-        woe_iv_results = json.dumps(woe_iv_dict)
-        
-        dashboard_selected_columns = json.dumps(req.get('dashboard_selected_columns', []))
-        if not record_id:
-            # If no recordId, upsert will create one
-            record_id = upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
-        else:
-            # If recordId exists, upsert will update it
-            upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
-        save_finebin_details_db(int(record_id), var, adjusted_merges)
-        print("Fine binning done for", var)
+                    bin_item['woe'] = float(row.get('WOE'))
+                except Exception:
+                    pass
+            if 'IV' in row:
+                try:
+                    bin_item['iv'] = float(row.get('IV'))
+                except Exception:
+                    pass
+
+            bins_data.append(bin_item)
+
+        # Persist bins and totals
+        if bins_data:
+            create_bins_batch(fine_step_id, bins_data)
+            create_binning_totals(binning_step_id=fine_step_id, total_good=int(total_good), total_bad=int(total_bad), total_count=int(total_good + total_bad))
+
+        # Persist merged groups (if any)
+        try:
+            save_finebin_details_db(int(dataset_id), var, adjusted_merges)
+        except Exception:
+            pass
+
+        print("Fine binning persisted for", var)
         return jsonify({
             "success": True,
             "stats": tab.to_dict(orient='records'),
@@ -760,8 +1202,16 @@ def auto_monotonic_binning_api():
             return jsonify({"error": "Missing required fields: variable, target, type"}), 400
         
         # Load data
-        csv_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
-        df = pd.read_csv(csv_path)
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
         df[target] = df[target].fillna(0).astype(int)
         
         # First perform coarse binning to get initial bins
@@ -850,84 +1300,101 @@ def auto_monotonic_binning_api():
             iv = result['iv']
             woe_stats = []
         
-        # Save results to database
-        from db import get_records_db, get_record_db
-        records = get_records_db()
-        if records:
-            latest = records[0]
-            discrete_columns = latest.get('discrete_columns', '[]')
-            continuous_columns = latest.get('continuous_columns', '[]')
-            selected_columns = latest.get('selected_columns', '[]')
+        # Persist coarse + fine binning results into the normalized schema
+        latest_ds = get_latest_dataset()
+
+        # Determine dataset id
+        if record_id:
+            try:
+                dataset_id = int(record_id)
+            except Exception:
+                dataset_id = latest_ds['id'] if latest_ds else None
         else:
-            discrete_columns = json.dumps([])
-            continuous_columns = json.dumps([])
-            selected_columns = json.dumps([])
-        
-        dataset_path = "uploaded.csv"
-        target_variable = target
-        
-        # Preserve existing univariate_results
-        univariate_results_dict = {}
-        if record_id:
-            existing_record = get_record_db(record_id)
-            if existing_record and existing_record.get('univariate_results'):
+            dataset_id = latest_ds['id'] if latest_ds else None
+
+        if dataset_id is None:
+            dataset_id = create_dataset(name='uploaded', file_path='uploaded.csv', total_features=0, discrete_features=0, continuous_features=0, target_variable=target)
+
+        # Ensure feature exists
+        feature = get_feature_by_name(dataset_id, var)
+        if not feature:
+            fid = create_feature(dataset_id, var, var_type, selected=True)
+            feature = get_feature(fid)
+
+        # Ensure coarse saved
+        try:
+            coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+            if not coarse_step:
+                if var_type == 'continuous':
+                    coarse_stats, _ = coarse_bin_continuous(df, var, target)
+                else:
+                    coarse_stats, _, _ = coarse_bin_discrete(df, var, target)
+                save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
+        except Exception:
+            pass
+
+        # Create/update fine step and persist bins/totals
+        num_bins = len(tab) if hasattr(tab, 'shape') else (len(tab) if isinstance(tab, list) else 0)
+        fine_step_id = create_binning_step(feature_id=feature['id'], step_type='fine', method='merged' if adjusted_merges else 'auto_monotonic', num_bins=num_bins, iv_value=iv)
+
+        bins_data = []
+        total_good = 0
+        total_bad = 0
+        try:
+            records = tab.to_dict(orient='records')
+        except Exception:
+            records = list(tab)
+
+        for idx, row in enumerate(records):
+            good = int(row.get('Good', 0))
+            bad = int(row.get('Bad', 0))
+            total = int(row.get('Total', good + bad))
+            total_good += good
+            total_bad += bad
+
+            bin_item = {
+                'bin_number': idx + 1,
+                'bin_label': str(row.get('Bin', f'Bin_{idx+1}')),
+                'good_count': good,
+                'bad_count': bad,
+                'total_count': total
+            }
+            if 'Min' in row and row.get('Min') is not None:
                 try:
-                    univariate_results_dict = json.loads(existing_record['univariate_results'])
-                except:
+                    bin_item['min_value'] = float(row.get('Min'))
+                except Exception:
                     pass
-        univariate_results = json.dumps(univariate_results_dict)
-        
-        # Store fine binning results as dict (not array) for consistency
-        finebin_results_dict = {}
-        if record_id:
-            existing_record = get_record_db(record_id)
-            if existing_record and existing_record.get('finebin_results'):
+            if 'Max' in row and row.get('Max') is not None:
                 try:
-                    finebin_results_dict = json.loads(existing_record['finebin_results'])
-                except:
+                    bin_item['max_value'] = float(row.get('Max'))
+                except Exception:
                     pass
-        
-        # Update with current variable's fine binning
-        finebin_results_dict[var] = tab.to_dict(orient='records')
-        finebin_results = json.dumps(finebin_results_dict)
-        
-        crosstab_results = json.dumps([])
-        
-        # Update WOE/IV results for this variable
-        woe_iv_dict = {}
-        if record_id:
-            existing_record = get_record_db(record_id)
-            if existing_record and existing_record.get('woe_iv_results'):
+            if 'Range' in row and row.get('Range'):
+                bin_item['range_text'] = str(row.get('Range'))
+            if 'WOE' in row:
                 try:
-                    woe_iv_dict = json.loads(existing_record['woe_iv_results'])
-                    if not isinstance(woe_iv_dict, dict):
-                        woe_iv_dict = {}
-                except:
-                    woe_iv_dict = {}
-        
-        # Store the calculated WOE/IV for this variable
-        woe_iv_dict[var] = {"iv": iv, "stats": woe_stats}
-        woe_iv_results = json.dumps(woe_iv_dict)
-        
-        dashboard_selected_columns = json.dumps(req.get('dashboard_selected_columns', []))
-        
-        if not record_id:
-            record_id = upsert_single_record_db(
-                dataset_path, discrete_columns, continuous_columns, selected_columns,
-                dashboard_selected_columns, target_variable, univariate_results,
-                finebin_results, crosstab_results, woe_iv_results
-            )
-        else:
-            upsert_single_record_db(
-                dataset_path, discrete_columns, continuous_columns, selected_columns,
-                dashboard_selected_columns, target_variable, univariate_results,
-                finebin_results, crosstab_results, woe_iv_results
-            )
-        
-        save_finebin_details_db(int(record_id), var, adjusted_merges)
-        
-        print(f"Auto-binning completed for {var}")
-        
+                    bin_item['woe'] = float(row.get('WOE'))
+                except Exception:
+                    pass
+            if 'IV' in row:
+                try:
+                    bin_item['iv'] = float(row.get('IV'))
+                except Exception:
+                    pass
+
+            bins_data.append(bin_item)
+
+        if bins_data:
+            create_bins_batch(fine_step_id, bins_data)
+            create_binning_totals(binning_step_id=fine_step_id, total_good=int(total_good), total_bad=int(total_bad), total_count=int(total_good + total_bad))
+
+        try:
+            save_finebin_details_db(int(dataset_id), var, adjusted_merges)
+        except Exception:
+            pass
+
+        print(f"Auto-binning persisted for {var}")
+
         return jsonify({
             "success": True,
             "stats": tab.to_dict(orient='records'),
@@ -960,9 +1427,16 @@ def cross_tab_api():
         if not target or not variables:
             return jsonify({"error": "Missing required fields: variables or target"}), 400
         
-        # Load dataset with absolute path
-        csv_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
-        df = pd.read_csv(csv_path)
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
         # Robustly convert target to numeric (0/1). Avoids 500s on text targets.
@@ -1014,35 +1488,88 @@ def univariate_analysis():
     """
     Performs univariate analysis (coarse binning) for a list of variables.
     """
+    print("\n[API] /api/univariate-analysis (POST) called")
     try:
         req = request.get_json()
+        print(f"[univariate_analysis] discrete={len(req.get('discrete', []))}, continuous={len(req.get('continuous', []))}, target={req.get('target')}")
         discrete_cols = req.get('discrete', [])
         continuous_cols = req.get('continuous', [])
         target = req.get('target')
+        record_id = req.get('record_id')  # Optional: for persistence
+        
         if not target:
             return jsonify({"error": "Missing required field: target"}), 400
-        csv_path = get_csv_path()
-        df = pd.read_csv(csv_path)
+        
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
+        
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
-        df[target] = df[target].fillna(0).astype(int)
+        
+        # Convert target to binary 0/1
+        try:
+            df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
+        except Exception as e:
+            return jsonify({"error": f"Failed to convert target to numeric: {str(e)}"}), 400
+        
         results = {}
+        
+        # Process discrete columns
         for col in discrete_cols:
             if col != target and col in df.columns:
-                stats, _, _ = coarse_bin_discrete(df, col, target)
-                results[col] = {
-                    'type': 'discrete',
-                    'stats': stats.to_dict(orient='records')
-                }
+                try:
+                    stats, _, _ = coarse_bin_discrete(df, col, target)
+                    results[col] = {
+                        'type': 'discrete',
+                        'stats': stats.to_dict(orient='records')
+                    }
+                    print(f"[univariate_analysis] Processed discrete: {col}")
+                    
+                    # Optionally persist to DB if record_id provided
+                    if record_id:
+                        dataset_id = record_id
+                        feature = get_feature_by_name(dataset_id, col)
+                        if feature:
+                            save_coarse_binning_to_db(feature['id'], stats, 'discrete')
+                except Exception as e:
+                    print(f"[univariate_analysis] Error processing discrete column {col}: {e}")
+                    results[col] = {'type': 'discrete', 'error': str(e)}
+        
+        # Process continuous columns
         for col in continuous_cols:
             if col != target and col in df.columns:
-                stats, _ = coarse_bin_continuous(df, col, target)
-                results[col] = {
-                    'type': 'continuous',
-                    'stats': stats.to_dict(orient='records')
-                }
+                try:
+                    stats, _ = coarse_bin_continuous(df, col, target)
+                    results[col] = {
+                        'type': 'continuous',
+                        'stats': stats.to_dict(orient='records')
+                    }
+                    print(f"[univariate_analysis] Processed continuous: {col}")
+                    
+                    # Optionally persist to DB if record_id provided
+                    if record_id:
+                        dataset_id = record_id
+                        feature = get_feature_by_name(dataset_id, col)
+                        if feature:
+                            save_coarse_binning_to_db(feature['id'], stats, 'continuous')
+                except Exception as e:
+                    print(f"[univariate_analysis] Error processing continuous column {col}: {e}")
+                    results[col] = {'type': 'continuous', 'error': str(e)}
+        
         return jsonify(results)
     except Exception as e:
+        print(f"[univariate_analysis] Unhandled error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -1060,8 +1587,10 @@ def reset_bins_api():
         "record_id": record ID
     }
     """
+    print("\n[API] /api/reset-bins (POST) called")
     try:
         req = request.get_json()
+        print(f"[reset_bins] variable={req.get('variable')}, type={req.get('type')}, record_id={req.get('record_id')}")
         var = req.get('variable')
         target = req.get('target')
         var_type = req.get('type')
@@ -1071,8 +1600,16 @@ def reset_bins_api():
             return jsonify({"error": "Missing required fields: variable, target, type, record_id"}), 400
         
         # Load data and perform coarse binning
-        csv_path = get_csv_path()
-        df = pd.read_csv(csv_path)
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
         
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
@@ -1085,90 +1622,25 @@ def reset_bins_api():
         else:
             coarse_stats, _, _ = coarse_bin_discrete(df, var, target)
         
-        # Load existing record
-        from db import get_record_db, delete_record_db
-        existing_record = get_record_db(record_id)
+        # Get feature from new schema
+        dataset_id = record_id
+        feature = get_feature_by_name(dataset_id, var)
         
-        if not existing_record:
-            return jsonify({"error": f"Record {record_id} not found"}), 404
+        if not feature:
+            return jsonify({"error": f"Feature {var} not found for dataset {dataset_id}"}), 404
         
-        # Update univariate_results with coarse bins
-        univariate_results_dict = {}
-        if existing_record.get('univariate_results'):
-            try:
-                univariate_results_dict = json.loads(existing_record['univariate_results'])
-            except:
-                pass
+        # Delete all binning steps, bins, and merged bins for this feature
+        delete_all_binning_for_feature(feature['id'])
         
-        univariate_results_dict[var] = {
-            'type': var_type,
-            'stats': coarse_stats.to_dict(orient='records')
-        }
+        # Recreate coarse binning in the new schema
+        save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
         
-        # Remove from finebin_results
-        finebin_results_dict = {}
-        if existing_record.get('finebin_results'):
-            try:
-                finebin_results_dict = json.loads(existing_record['finebin_results'])
-            except:
-                pass
-        
-        if var in finebin_results_dict:
-            del finebin_results_dict[var]
-        
-        # Remove from woe_iv_results
-        woe_iv_dict = {}
-        if existing_record.get('woe_iv_results'):
-            try:
-                woe_iv_dict = json.loads(existing_record['woe_iv_results'])
-                if not isinstance(woe_iv_dict, dict):
-                    woe_iv_dict = {}
-            except:
-                woe_iv_dict = {}
-        
-        if var in woe_iv_dict:
-            del woe_iv_dict[var]
-        
-        # Delete finebin_details for this variable
-        from db import get_db_connection
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM finebin_details WHERE record_id = %s AND column_name = %s",
-            (record_id, var)
-        )
-        conn.commit()
-        conn.close()
-        
-        # Update the record
-        dataset_path = existing_record.get('dataset_path', 'uploaded.csv')
-        discrete_columns = existing_record.get('discrete_columns', '')
-        continuous_columns = existing_record.get('continuous_columns', '')
-        selected_columns = existing_record.get('selected_columns', '')
-        dashboard_selected_columns = existing_record.get('dashboard_selected_columns', '')
-        target_variable = existing_record.get('target_variable', target)
-        crosstab_results = existing_record.get('crosstab_results', '[]')
-        
-        upsert_single_record_db(
-            dataset_path, discrete_columns, continuous_columns, selected_columns,
-            dashboard_selected_columns, target_variable, 
-            json.dumps(univariate_results_dict),
-            json.dumps(finebin_results_dict),
-            crosstab_results,
-            json.dumps(woe_iv_dict)
-        )
-        
-        print(f"Reset bins for {var}: cleared fine binning and WOE/IV")
-        
+        # Return the coarse bins for frontend display
         return jsonify({
             "success": True,
-            "message": f"Bins reset for {var}",
-            "coarse_stats": coarse_stats.to_dict(orient='records')
+            "stats": coarse_stats.to_dict(orient='records')
         })
-        
     except Exception as e:
-        import traceback
-        print("ERROR in reset-bins:", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
@@ -1235,6 +1707,7 @@ def ai_classify_columns():
             return jsonify(results)
 
         # Build an enhanced prompt with detailed classification criteria
+        # Use a plain-text representation for prompt (avoid embedding JSON strings)
         prompt = (
             "You are a data science expert that classifies dataset columns as 'discrete' or 'continuous'.\n\n"
             "DISCRETE variables are:\n"
@@ -1250,8 +1723,8 @@ def ai_classify_columns():
             "- Time durations (days, hours, response_time)\n"
             "- Scientific measurements (pressure, voltage, distance)\n\n"
             "Analyze the column names and sample values. Return ONLY a valid JSON object.\n"
-            f"Columns to classify: {json.dumps(columns)}\n"
-            f"Sample data: {json.dumps(sample_data)}\n\n"
+            f"Columns to classify: {str(columns)}\n"
+            f"Sample data: {str(sample_data)}\n\n"
             "Response format: {\"column_name\": \"discrete\" or \"continuous\"}\n"
         )
 
@@ -1299,14 +1772,20 @@ def ai_classify_columns():
         try:
             mapping = json.loads(text.strip())
         except Exception:
-            # attempt to find JSON substring
-            import re
-            m = re.search(r"\{[\s\S]*\}", text)
-            if m:
-                try:
-                    mapping = json.loads(m.group(0))
-                except Exception:
-                    mapping = None
+            # attempt to parse using ast.literal_eval or find JSON substring
+            try:
+                mapping = ast.literal_eval(text.strip())
+            except Exception:
+                import re
+                m = re.search(r"\{[\s\S]*\}", text)
+                if m:
+                    try:
+                        mapping = json.loads(m.group(0))
+                    except Exception:
+                        try:
+                            mapping = ast.literal_eval(m.group(0))
+                        except Exception:
+                            mapping = None
 
         if not mapping or not isinstance(mapping, dict):
             return jsonify({"error": "Failed to parse JSON from model response", "raw_text": text}), 502
@@ -1448,10 +1927,13 @@ def calculate_bin_metrics():
     """
     try:
         data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+            
         bins_data = data.get('bins', [])
         
         if not bins_data:
-            return jsonify({"error": "No bin data provided"}), 400
+            return jsonify({"error": "No bin data provided. Please run univariate analysis or binning first."}), 400
         
         # Calculate totals for overall ratio
         total_good = sum(bin_data.get('good_count', 0) for bin_data in bins_data)
@@ -1792,9 +2274,18 @@ def woe_iv_api():
 
         if not variables or not target:
             return jsonify({"error": "Missing required fields: variables or target"}), 400
-
-        csv_path = get_csv_path()
-        df = pd.read_csv(csv_path)
+        
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
         
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
@@ -1823,13 +2314,13 @@ def woe_iv_api():
 
         results = {}
 
-        # Load saved coarse bins if record_id provided
+        # Load saved coarse bins if record_id provided (record now returns structured objects)
         existing_binned_columns = {}
         if record_id:
             try:
                 record_data = get_record_db(record_id)
                 if record_data and record_data.get('univariate_results'):
-                    univariate_results = json.loads(record_data['univariate_results'])
+                    univariate_results = record_data['univariate_results']
                     for var in variables:
                         if var in univariate_results:
                             var_data = univariate_results[var]
@@ -1840,7 +2331,6 @@ def woe_iv_api():
                                 _, temp_df[f"{var}_binned"], _ = coarse_bin_discrete(temp_df, var, target)
                             else:
                                 _, temp_df[f"{var}_binned"] = coarse_bin_continuous(temp_df, var, target)
-                            
                             # Copy only the binned column back to main dataframe
                             df[f"{var}_binned"] = temp_df[f"{var}_binned"]
                             existing_binned_columns[var] = True
@@ -1895,11 +2385,11 @@ def woe_iv_api():
                     merges = {}
                     for row in finebin_details:
                         try:
-                            bins_loaded = json.loads(row["merged_bins"])
-                            if isinstance(bins_loaded, (list, tuple, set)):
-                                merges[str(row["group_id"]).strip()] = [str(item).strip() for item in bins_loaded]
-                            elif bins_loaded is not None:
-                                merges[str(row["group_id"]).strip()] = [str(bins_loaded).strip()]
+                            mb = row.get("merged_bins")
+                            # New schema: merged_bins is always a list (no JSON string conversion)
+                            if isinstance(mb, (list, tuple, set)) and mb:
+                                bins_loaded = [str(item).strip() for item in mb]
+                                merges[str(row.get("group_id")).strip()] = bins_loaded
                         except Exception:
                             pass
                     if merges:
@@ -1950,42 +2440,143 @@ def woe_iv_api():
                 print(f"WOE/IV DEBUG: Failed to calculate WOE/IV for {var}: {e}")
                 results[var] = {"iv": 0, "stats": []}
 
-        # Persist results if record_id provided
+        # Persist results into the new normalized schema if record_id (dataset_id) provided
         if record_id:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT woe_iv_results FROM records WHERE id = %s", (record_id,))
-            row = cur.fetchone()
-            existing_woe = {}
-            if row and row[0]:
+            try:
+                dataset_id = int(record_id)
+            except Exception:
+                dataset_id = record_id
+
+            # For each variable's results, create/update binning_step, bins and totals
+            for var_name, res in results.items():
                 try:
-                    existing_woe = json.loads(row[0])
-                except json.JSONDecodeError:
-                    existing_woe = {}
+                    iv_value = res.get('iv', 0) if isinstance(res, dict) else 0
+                    stats = res.get('stats', []) if isinstance(res, dict) else []
 
-            # Defensive coercion: some older records may have stored a JSON list
-            # (e.g. json.dumps([])). Ensure we have a dict before calling update().
-            if isinstance(existing_woe, list):
-                coerced = {}
-                for item in existing_woe:
-                    if isinstance(item, dict):
-                        # Merge dict entries; later entries override earlier ones
-                        for k, v in item.items():
-                            coerced[str(k)] = v
-                existing_woe = coerced
+                    # Ensure feature exists for this dataset
+                    feature = get_feature_by_name(dataset_id, var_name)
+                    if not feature:
+                        # Create feature with inferred type (best effort)
+                        inferred_type = types_map.get(var_name) or global_type
+                        if not inferred_type:
+                            # fallback: use continuous if present in df and numeric, else discrete
+                            try:
+                                inferred_type = 'continuous' if pd.api.types.is_numeric_dtype(df[var_name]) else 'discrete'
+                            except Exception:
+                                inferred_type = 'discrete'
+                        fid = create_feature(dataset_id, var_name, inferred_type, False)
+                        feature = get_feature(fid)
 
-            # If still not a dict, replace with empty dict to avoid attribute errors
-            if not isinstance(existing_woe, dict):
-                existing_woe = {}
+                    # Determine if we should use fine or coarse step
+                    step_type = 'fine' if merges_per_var.get(var_name) else 'coarse'
 
-            # Merge new results into existing map
-            existing_woe.update(results)
-            cur.execute(
-                "UPDATE records SET woe_iv_results = %s WHERE id = %s",
-                (json.dumps(existing_woe), record_id)
-            )
-            conn.commit()
-            conn.close()
+                    # Create or update binning step with IV and num_bins
+                    num_bins = len(stats) if isinstance(stats, (list, tuple)) else 0
+                    step_id = create_binning_step(
+                        feature_id=feature['id'],
+                        step_type=step_type,
+                        method='calculated',
+                        num_bins=num_bins,
+                        iv_value=float(iv_value) if iv_value is not None else None
+                    )
+
+                    # Prepare bins data for insertion
+                    # Build bins_data and compute per-bin metrics
+                    bins_data = []
+                    # Precompute totals from stats so we can calculate freq_percent and indexes
+                    try:
+                        total_good = sum(int(s.get('Good', s.get('good', 0))) for s in stats)
+                        total_bad = sum(int(s.get('Bad', s.get('bad', 0))) for s in stats)
+                        total_all = sum(int(s.get('Total', s.get('total', (int(s.get('Good', 0)) + int(s.get('Bad', 0))))) ) for s in stats)
+                    except Exception:
+                        total_good = 0
+                        total_bad = 0
+                        total_all = 0
+
+                    overall_odds = (total_good / total_bad) if total_bad > 0 else None
+
+                    for idx, s in enumerate(stats):
+                        try:
+                            bin_number = idx + 1
+                            bin_label = str(s.get('Bin', s.get('bin', bin_number)))
+                            good = int(s.get('Good', s.get('good', 0)))
+                            bad = int(s.get('Bad', s.get('bad', 0)))
+                            total = int(s.get('Total', s.get('total', good + bad)))
+                            dist_good = float(s.get('Dist_Good_%', s.get('dist_good', 0))) if total_good > 0 else ( (good / total_good) * 100 if total_good > 0 else None )
+                            dist_bad = float(s.get('Dist_Bad_%', s.get('dist_bad', 0))) if total_bad > 0 else ( (bad / total_bad) * 100 if total_bad > 0 else None )
+                            woe = float(s.get('WOE', s.get('woe', 0)))
+                            iv_bin = float(s.get('IV', s.get('iv', 0)))
+                            range_text = s.get('Range') if s.get('Range') is not None else s.get('range', None)
+                            min_value = None
+                            max_value = None
+                            # Attempt to parse continuous range like 'min - max'
+                            if isinstance(range_text, str) and '-' in range_text and any(ch.isdigit() for ch in range_text):
+                                parts = [p.strip() for p in range_text.split('-', 1)]
+                                try:
+                                    min_value = float(parts[0])
+                                    max_value = float(parts[1])
+                                except Exception:
+                                    min_value = None
+                                    max_value = None
+
+                            freq_percent = (total / total_all) * 100 if total_all > 0 else None
+                            odds = (good / bad) if bad > 0 else None
+                            good_bad_ratio = odds
+                            try:
+                                index_value = ( (dist_good / dist_bad) * 100 ) if (dist_bad and dist_bad > 0) else None
+                            except Exception:
+                                index_value = None
+                            try:
+                                odds_index = ( (odds / overall_odds) * 100 ) if (odds is not None and overall_odds and overall_odds > 0) else None
+                            except Exception:
+                                odds_index = None
+
+                            bin_entry = {
+                                'bin_number': bin_number,
+                                'bin_label': bin_label,
+                                'min_value': min_value,
+                                'max_value': max_value,
+                                'range_text': range_text,
+                                'good_count': good,
+                                'bad_count': bad,
+                                'total_count': total,
+                                'dist_good': dist_good,
+                                'dist_bad': dist_bad,
+                                'woe': woe,
+                                'iv': iv_bin,
+                                'freq_percent': freq_percent,
+                                'odds': odds,
+                                'good_bad_ratio': good_bad_ratio,
+                                'index_value': index_value,
+                                'odds_index': odds_index
+                            }
+                            bins_data.append(bin_entry)
+                        except Exception:
+                            continue
+
+                    if bins_data:
+                        create_bins_batch(step_id, bins_data)
+
+                    # Create/update binning totals
+                    try:
+                        total_good = sum(int(b.get('good_count', 0)) for b in bins_data)
+                        total_bad = sum(int(b.get('bad_count', 0)) for b in bins_data)
+                        total_count = sum(int(b.get('total_count', 0)) for b in bins_data)
+                        create_binning_totals(binning_step_id=step_id, total_good=total_good, total_bad=total_bad, total_count=total_count, iv=float(iv_value) if iv_value is not None else None)
+                    except Exception:
+                        pass
+
+                    # Persist merged bin groups when provided
+                    try:
+                        if merges_per_var.get(var_name):
+                            save_finebin_details_db(dataset_id, var_name, merges_per_var.get(var_name))
+                    except Exception:
+                        pass
+
+                except Exception as e_inner:
+                    print(f"WOE/IV PERSIST WARNING: failed to persist {var_name}: {e_inner}")
+                    import traceback
+                    traceback.print_exc()
 
         print(f"WOE/IV DEBUG: Completed successfully for {len(results)} variables")
         return jsonify(results)
@@ -2000,36 +2591,20 @@ def woe_iv_api():
 @app.route('/api/save-record', methods=['POST'])
 def save_record():
     """
-    Save a record of the analysis, including dataset path, columns, and results.
+    DEPRECATED: This endpoint is now a no-op. Use /api/upsert-single-record instead.
+    The new schema auto-saves changes through upsert-single-record.
+    Kept for backward compatibility only.
     """
+    print("\n[API] /api/save-record (POST) called - DEPRECATED endpoint")
     try:
-        data = request.get_json()
-        dataset_path = data.get('dataset_path', '')
-        discrete_columns = ','.join(data.get('discrete_columns', []))
-        continuous_columns = ','.join(data.get('continuous_columns', []))
-        selected_columns = ','.join(data.get('selected_columns', []))
-        # Only update dashboard_selected_columns if provided; otherwise keep existing
-        if 'dashboard_selected_columns' in data:
-            dsc = data.get('dashboard_selected_columns')
-            if isinstance(dsc, list):
-                dashboard_selected_columns = ','.join(dsc)
-            elif isinstance(dsc, str):
-                dashboard_selected_columns = dsc
-            else:
-                dashboard_selected_columns = ''
-        else:
-            dashboard_selected_columns = None
-        target_variable = data.get('target_variable', '')
-        univariate_results = data.get('univariate_results', '')
-        finebin_results = data.get('finebin_results', '')
-        crosstab_results = data.get('crosstab_results', '')
-        record_id = save_record_db(
-            dataset_path, discrete_columns, continuous_columns,
-            selected_columns, dashboard_selected_columns, target_variable, univariate_results,
-            finebin_results, crosstab_results
-        )
-        return jsonify({"success": True, "id": record_id})
+        # Get the latest dataset ID to return
+        latest = get_latest_dataset()
+        dataset_id = latest['id'] if latest else None
+        return jsonify({"success": True, "id": dataset_id})
     except Exception as e:
+        print(f"[save_record] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 # ----------- Upsert Single Record -----------
@@ -2040,8 +2615,10 @@ def upsert_single_record():
     If no dataset exists, insert one; otherwise update the latest dataset.
     This supports the UX where only one record should exist and be updated across actions.
     """
+    print("\n[API] /api/upsert-single-record called")
     try:
         data = request.get_json()
+        print(f"[upsert_single_record] Payload keys: {list(data.keys()) if data else 'None'}")
         try:
             print('[backend] upsert_single_record payload keys:', list(data.keys()) if isinstance(data, dict) else type(data))
         except Exception:
@@ -2062,7 +2639,7 @@ def upsert_single_record():
             dataset_id = create_dataset(
                 name=f"Dataset {dataset_path}",
                 file_path=dataset_path,
-                target_column=target_variable
+                target_variable=target_variable
             )
             print(f'[backend] Created new dataset with id: {dataset_id}')
         else:
@@ -2070,17 +2647,15 @@ def upsert_single_record():
             dataset_id = latest['id']
             update_dataset(
                 dataset_id=dataset_id,
-                target_column=target_variable,
+                target_variable=target_variable,
                 file_path=dataset_path
             )
             print(f'[backend] Updated dataset with id: {dataset_id}')
         
         # Update features for this dataset
-        # First, get existing features
         existing_features = get_features_by_dataset(dataset_id)
         existing_feature_names = {f['name'] for f in existing_features}
         
-        # Determine all columns mentioned
         all_columns = set(discrete_columns + continuous_columns)
         
         # Create new features that don't exist
@@ -2091,61 +2666,74 @@ def upsert_single_record():
                 create_feature(
                     dataset_id=dataset_id,
                     name=col,
-                    variable_type=var_type,
+                    feature_type=var_type,
                     selected=is_selected
                 )
         
-        # Update selection status for all features
-        selection_updates = {}
-        for col in all_columns:
-            selection_updates[col] = col in selected_columns
+        # Update existing features (type and selection)
+        for feature in existing_features:
+            if feature['name'] in all_columns:
+                new_type = 'discrete' if feature['name'] in discrete_columns else 'continuous'
+                is_selected = feature['name'] in selected_columns
+                if feature['type'] != new_type or feature['selected'] != is_selected:
+                    update_feature(feature['id'], type=new_type, selected=is_selected)
         
-        if selection_updates:
-            update_features_selection(dataset_id, selection_updates)
+        # Update dataset aggregate counts
+        final_features = get_features_by_dataset(dataset_id)
+        discrete_count = sum(1 for f in final_features if f.get('type') == 'discrete')
+        continuous_count = sum(1 for f in final_features if f.get('type') == 'continuous')
+        total_count = len(final_features)
+        
+        print(f'[upsert_single_record] Updating dataset counts: discrete={discrete_count}, continuous={continuous_count}, total={total_count}')
+        update_dataset(
+            dataset_id=dataset_id,
+            total_features=total_count,
+            discrete_features=discrete_count,
+            continuous_features=continuous_count
+        )
         
         return jsonify({"success": True, "id": dataset_id})
     except Exception as e:
+        print(f"[upsert_single_record] ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-# ----------- Get Records -----------
 @app.route('/api/records', methods=['GET'])
 def get_records():
     """
-    List all analysis records (summary only) - now fetches from datasets table.
+    List all analysis records (summary only) - returns datasets in NEW format.
     """
+    print("\\n[API] /api/records (GET) called")
     try:
-        # Fetch all datasets from new schema
         datasets = get_all_datasets()
+        print(f"[get_records] Found {len(datasets)} datasets")
         
-        # Transform datasets to match old records format for frontend compatibility
-        records = []
+        # Return datasets directly without conversion
+        result = []
         for dataset in datasets:
-            # Get features for this dataset to build column lists
             features = get_features_by_dataset(dataset['id'])
             
-            discrete_cols = [f['name'] for f in features if f.get('variable_type') == 'discrete']
-            continuous_cols = [f['name'] for f in features if f.get('variable_type') == 'continuous']
+            discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
+            continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
             selected_cols = [f['name'] for f in features if f.get('selected') is True]
             
-            record = {
+            result.append({
                 'id': dataset['id'],
-                'dataset_path': dataset.get('file_path', 'uploaded.csv'),
-                'discrete_columns': ','.join(discrete_cols),
-                'continuous_columns': ','.join(continuous_cols),
-                'selected_columns': ','.join(selected_cols),
-                'target_variable': dataset.get('target_column', ''),
-                'created_at': dataset.get('created_at', ''),
-                'univariate_results': '',  # Will be populated from binning results
-                'finebin_results': '',
-                'crosstab_results': '',
-                'woe_iv_results': ''
-            }
-            records.append(record)
+                'dataset_path': dataset.get('file_path', ''),
+                'discrete_columns': discrete_cols,  # Array instead of comma-separated string
+                'continuous_columns': continuous_cols,  # Array instead of comma-separated string
+                'selected_columns': selected_cols,  # Array instead of comma-separated string
+                'target_variable': dataset.get('target_variable', ''),
+                'created_at': str(dataset.get('created_at', '')),
+                'total_features': dataset.get('total_features', 0),
+                'discrete_features': dataset.get('discrete_features', 0),
+                'continuous_features': dataset.get('continuous_features', 0)
+            })
         
-        return jsonify(records)
+        return jsonify(result)
     except Exception as e:
+        print(f"[get_records] ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2157,10 +2745,19 @@ def latest_record_dataset_path():
     Returns the dataset_path of the latest record and whether the file exists.
     """
     try:
-        dataset_path, resolved_path, valid = get_latest_record_dataset_path_db()
+        dataset = get_latest_dataset()
+        if not dataset:
+            return jsonify({"dataset_path": None, "resolved_path": None, "valid": False})
+        
+        dataset_path = dataset.get('file_path')
+        resolved = dataset_path
+        if dataset_path and not os.path.isabs(dataset_path):
+            resolved = os.path.join(os.path.dirname(__file__), dataset_path)
+        valid = bool(resolved and os.path.exists(resolved))
+        
         return jsonify({
             "dataset_path": dataset_path,
-            "resolved_path": resolved_path,
+            "resolved_path": resolved,
             "valid": valid
         })
     except Exception as e:
@@ -2170,58 +2767,74 @@ def latest_record_dataset_path():
 @app.route('/api/record/<int:record_id>', methods=['GET'])
 def get_record(record_id):
     """
-    Get a specific analysis record (full details).
+    Get a specific analysis record with binning data in NEW format.
     """
     try:
-        # Try old records table first (backward compatibility)
-        try:
-            record = get_record_db(record_id)
-            if record:
-                try:
-                    print('[backend] get_record returning dashboard_selected_columns:', record.get('dashboard_selected_columns'))
-                except Exception:
-                    pass
-                try:
-                    # Ensure types are serializable and add parsing indicators
-                    dbg = record.get('dashboard_selected_columns')
-                    print('[backend] get_record raw dashboard_selected_columns type:', type(dbg), 'value:', dbg)
-                except Exception:
-                    pass
-                # Ensure woe_iv_results is parsed if it's a JSON string
-                if record.get('woe_iv_results'):
-                    try:
-                        record['woe_iv_results'] = json.loads(record['woe_iv_results'])
-                    except json.JSONDecodeError:
-                        record['woe_iv_results'] = {}
-                return jsonify(record)
-        except Exception as e:
-            # Old table might not exist, continue to datasets
-            print(f"[get_record] Old records table query failed (expected if using new schema): {e}")
-
-        # Fallback: the frontend may request a dataset id (new schema). Build a compatible record
         dataset = get_dataset(record_id)
-        if dataset:
-            features = get_features_by_dataset(dataset['id'])
-            discrete_cols = [f['name'] for f in features if f.get('variable_type') == 'discrete']
-            continuous_cols = [f['name'] for f in features if f.get('variable_type') == 'continuous']
-            selected_cols = [f['name'] for f in features if f.get('selected') is True]
-
-            built = {
-                'id': dataset['id'],
-                'dataset_path': dataset.get('file_path', ''),
-                'discrete_columns': ','.join(discrete_cols),
-                'continuous_columns': ','.join(continuous_cols),
-                'selected_columns': ','.join(selected_cols),
-                'target_variable': dataset.get('target_column', ''),
-                'created_at': dataset.get('created_at', ''),
-                'univariate_results': '',
-                'finebin_results': '',
-                'crosstab_results': '',
-                'woe_iv_results': {}
+        if not dataset:
+            return jsonify({"error": "Record not found"}), 404
+        
+        features = get_features_by_dataset(dataset['id'])
+        
+        discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
+        continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
+        selected_cols = [f['name'] for f in features if f.get('selected') is True]
+        
+        # Build binning results for each feature
+        binning_data = {}
+        for feature in features:
+            feature_binning = {
+                'coarse': None,
+                'fine': None,
+                'woe_iv': None
             }
-            return jsonify(built)
-
-        return jsonify({"error": "Record not found"}), 404
+            
+            # Get coarse binning
+            coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+            if coarse_step:
+                coarse_bins = get_bins_by_step(coarse_step['id'])
+                feature_binning['coarse'] = {
+                    'type': feature['type'],
+                    'bins': coarse_bins
+                }
+            
+            # Get fine binning
+            fine_step = get_binning_step_by_type(feature['id'], 'fine')
+            if fine_step:
+                fine_bins = get_bins_by_step(fine_step['id'])
+                merged_bins = get_merged_bins_by_step(fine_step['id'])
+                feature_binning['fine'] = {
+                    'bins': fine_bins,
+                    'merged_bins': merged_bins,
+                    'iv': float(fine_step.get('iv_value', 0)) if fine_step.get('iv_value') else None
+                }
+            
+            # Get WOE/IV (use fine if available, else coarse)
+            woe_step = fine_step if fine_step else coarse_step
+            if woe_step and woe_step.get('iv_value') is not None:
+                woe_bins = get_bins_by_step(woe_step['id'])
+                feature_binning['woe_iv'] = {
+                    'iv': float(woe_step['iv_value']),
+                    'bins': woe_bins
+                }
+            
+            binning_data[feature['name']] = feature_binning
+        
+        result = {
+            'id': dataset['id'],
+            'dataset_path': dataset.get('file_path', ''),
+            'discrete_columns': discrete_cols,
+            'continuous_columns': continuous_cols,
+            'selected_columns': selected_cols,
+            'target_variable': dataset.get('target_variable', ''),
+            'created_at': str(dataset.get('created_at', '')),
+            'total_features': dataset.get('total_features', 0),
+            'discrete_features': dataset.get('discrete_features', 0),
+            'continuous_features': dataset.get('continuous_features', 0),
+            'binning_data': binning_data  # New structured binning data
+        }
+        
+        return jsonify(result)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -3176,26 +3789,14 @@ def _create_woe_mask(df, var, bin_range):
 def delete_record(record_id):
     """
     Delete a specific analysis record/dataset by ID.
-    Supports both old records table and new datasets table.
+    Cascade delete handles all related features, binning_steps, bins, etc.
     """
     try:
-        # Try deleting from old records table first (backward compat)
-        try:
-            old_record = get_record_db(record_id)
-            if old_record:
-                success = delete_record_db(record_id)
-                return jsonify({"success": success})
-        except Exception as e:
-            # Old table might not exist (new schema), continue to datasets
-            print(f"[delete_record] Old records table query failed (expected if using new schema): {e}")
-        
-        # Fallback: delete from new datasets table (CASCADE will handle related rows)
         dataset = get_dataset(record_id)
         if dataset:
             delete_dataset(record_id)
             return jsonify({"success": True})
-        
-        return jsonify({"error": "Record/Dataset not found"}), 404
+        return jsonify({"error": "Dataset not found"}), 404
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -3205,30 +3806,130 @@ def delete_record(record_id):
 @app.route('/api/finebin-details', methods=['POST'])
 def save_finebin_details():
     """
-    Upsert fine binning details for a specific record and column.
-    Expects payload: { record_id, column_name, bin_merges: { <group_id>: [bins], ... } }
+    Save fine binning details (merged bins) for a specific dataset and feature.
+    Expects payload: { record_id (dataset_id), column_name, bin_merges: { <group_id>: [bins], ... } }
+    
+    bin_merges format: { "1": [0, 1, 2], "2": [3, 4] }  means:
+    - Group 1 merges coarse bins 0, 1, 2
+    - Group 2 merges coarse bins 3, 4
     """
+    print("\n[API] /api/finebin-details (POST) called")
     data = request.get_json()
-    record_id = data.get('record_id')
+    print(f"[save_finebin_details] dataset_id={data.get('record_id')}, column={data.get('column_name')}")
+    dataset_id = data.get('record_id')  # Frontend still uses 'record_id'
     column_name = data.get('column_name')
-    bin_merges = data.get('bin_merges') # dict of group_id -> list of bins
-    if not record_id or not column_name or not isinstance(bin_merges, dict):
+    bin_merges = data.get('bin_merges')  # dict of group_id -> list of bin indices
+    
+    if not dataset_id or not column_name or not isinstance(bin_merges, dict):
         return jsonify({"error": "Missing or invalid fields (record_id, column_name, bin_merges)."}), 400
+    
     try:
-        success = save_finebin_details_db(record_id, column_name, bin_merges)
-        return jsonify({"success": success})
+        # Get the feature for this dataset/column
+        feature = get_feature_by_name(dataset_id, column_name)
+        if not feature:
+            return jsonify({"error": f"Feature {column_name} not found for dataset {dataset_id}"}), 404
+        
+        # Get the coarse binning step (needed to know what bins are being merged)
+        coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+        if not coarse_step:
+            return jsonify({"error": f"No coarse binning found for {column_name}"}), 404
+        
+        # Get coarse bins
+        coarse_bins = get_bins_by_step(coarse_step['id'])
+        
+        # Get or create the fine binning step
+        fine_step = get_binning_step_by_type(feature['id'], 'fine')
+        if not fine_step:
+            # Create a new fine binning step
+            fine_step_id = create_binning_step(
+                feature_id=feature['id'],
+                step_type='fine',
+                method='manual'
+            )
+        else:
+            fine_step_id = fine_step['id']
+            # Delete existing merged bins for this step
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM merged_bins WHERE fine_step_id = %s', (fine_step_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+        
+        # Create merged bin records
+        # bin_merges looks like: {"1": [0, 1, 2], "2": [3, 4]}
+        for merged_bin_number_str, original_bin_indices in bin_merges.items():
+            merged_bin_number = int(merged_bin_number_str)
+            
+            # Get the original bin IDs and labels
+            original_bin_ids = []
+            original_bin_labels = []
+            for idx in original_bin_indices:
+                if idx < len(coarse_bins):
+                    original_bin_ids.append(coarse_bins[idx]['id'])
+                    original_bin_labels.append(coarse_bins[idx].get('bin_label', f'Bin {idx}'))
+            
+            if original_bin_ids:
+                create_merged_bin(
+                    fine_step_id=fine_step_id,
+                    merged_bin_number=merged_bin_number,
+                    original_bin_ids=original_bin_ids,
+                    original_bin_labels=original_bin_labels
+                )
+        
+        return jsonify({"success": True})
     except Exception as e:
+        print(f"[save_finebin_details] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/finebin-details/<int:record_id>/<string:column_name>', methods=['GET'])
 def get_finebin_details(record_id, column_name):
     """
-    Retrieve fine binning details for a specific record and column.
+    Retrieve fine binning details (merged bins) for a specific dataset and feature.
+    Returns format: {"bin_merges": {"1": [0, 1, 2], "2": [3, 4]}}
     """
+    print(f"\n[API] /api/finebin-details/{record_id}/{column_name} (GET) called")
     try:
-        finebin_details = get_finebin_details_db(record_id, column_name)
-        return jsonify(finebin_details)
+        dataset_id = record_id  # Frontend still uses record_id
+        
+        # Get the feature
+        feature = get_feature_by_name(dataset_id, column_name)
+        if not feature:
+            return jsonify({"bin_merges": {}})
+        
+        # Get the fine binning step
+        fine_step = get_binning_step_by_type(feature['id'], 'fine')
+        if not fine_step:
+            return jsonify({"bin_merges": {}})
+        
+        # Get coarse binning step to map bin IDs to indices
+        coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+        if not coarse_step:
+            return jsonify({"bin_merges": {}})
+        
+        coarse_bins = get_bins_by_step(coarse_step['id'])
+        # Create a mapping of bin_id -> bin_index
+        bin_id_to_index = {bin_data['id']: idx for idx, bin_data in enumerate(coarse_bins)}
+        
+        # Get merged bins for this step
+        merged_bins = get_merged_bins_by_step(fine_step['id'])
+        
+        # Convert to old format: {merged_bin_number: [original_bin_indices]}
+        bin_merges = {}
+        for mb in merged_bins:
+            merged_num = str(mb['merged_bin_number'])
+            original_ids = mb['original_bin_ids']  # List of original bin IDs
+            # Convert IDs to indices
+            original_indices = [bin_id_to_index.get(bid, bid) for bid in original_ids]
+            bin_merges[merged_num] = original_indices
+        
+        return jsonify({"bin_merges": bin_merges})
     except Exception as e:
+        print(f"[get_finebin_details] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 # ----------- Debug Binning -----------
@@ -3238,7 +3939,16 @@ def debug_binning(variable):
     Debug endpoint to see what's happening with binning for a specific variable.
     """
     try:
-        df = pd.read_csv(get_csv_path())
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
         
         if variable not in df.columns:
             return jsonify({"error": f"Variable {variable} not found"}), 400
@@ -3293,7 +4003,16 @@ def generate_scorecard():
             return jsonify({"error": "woe_transformed_data must be a dictionary"}), 400
 
         # Load dataset
-        df = pd.read_csv(get_csv_path())
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
 
         # Validate columns
         if target not in df.columns:
@@ -3596,7 +4315,17 @@ def apply_scorecard():
         if not selected_variables or not target or not woe_transformed_data:
             return jsonify({"error": "Missing required data: selected_variables, target, or woe_transformed_data"}), 400
 
-        df = pd.read_csv(get_csv_path())
+        try:
+            csv_path = get_csv_path()
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        try:
+            df = pd.read_csv(csv_path)
+        except FileNotFoundError as fe:
+            return jsonify({"error": str(fe)}), 400
+        except Exception as e:
+            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
+
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
 
