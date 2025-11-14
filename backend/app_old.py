@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from werkzeug.utils import secure_filename
 import pandas as pd
 import numpy as np
 import os
@@ -22,32 +21,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
-# Import new database layer functions
-from db import (
-    get_db_connection, init_db,
-    # Dataset operations
-    create_dataset, get_dataset, get_all_datasets, get_latest_dataset, update_dataset, delete_dataset,
-    # Feature operations
-    create_feature, create_features_batch, get_feature, get_features_by_dataset, 
-    get_feature_by_name, update_feature, update_features_selection,
-    # Binning step operations
-    create_binning_step, get_binning_step, get_binning_steps_by_feature, 
-    get_binning_step_by_type, delete_binning_step,
-    # Bin operations
-    create_bin, create_bins_batch, get_bins_by_step, get_bin,
-    # Merged bins operations
-    create_merged_bin, get_merged_bins_by_step,
-    # Binning totals operations
-    create_binning_totals, get_binning_totals, get_all_binning_totals_by_dataset,
-    # Helper functions
-    get_complete_binning_results, get_dataset_with_all_results, delete_all_binning_for_feature
-)
-# Import old database functions (temporary - until full migration)
-from db_old import (
-    upsert_single_record_db, get_records_db, get_record_db, 
-    get_latest_record_dataset_path_db, delete_record_db,
-    save_finebin_details_db, get_finebin_details_db, save_record_db
-)
+from db import get_db_connection, init_db, save_record_db, upsert_single_record_db, get_records_db, get_latest_record_dataset_path_db, get_record_db, delete_record_db, save_finebin_details_db, get_finebin_details_db
 import traceback
 import logging
 from auto_monotonic_binning import auto_monotonic_binning, compute_woe, compute_iv
@@ -68,20 +42,6 @@ CORS(app, origins=["http://localhost:5173"])
 # Helper function to get the CSV path consistently
 def get_csv_path():
     """Returns the absolute path to uploaded.csv in the backend directory."""
-    # Prefer the latest dataset's stored file_path (keeps uploads organized).
-    try:
-        dataset = get_latest_dataset()
-        if dataset and dataset.get('file_path'):
-            candidate = os.path.join(os.path.dirname(__file__), dataset.get('file_path'))
-            if os.path.exists(candidate):
-                return candidate
-            # Fall back to absolute path stored (if any)
-            fp = dataset.get('file_path')
-            if fp and os.path.isabs(fp) and os.path.exists(fp):
-                return fp
-    except Exception:
-        # If DB isn't available yet, fall back to the legacy uploaded.csv
-        pass
     return os.path.join(os.path.dirname(__file__), "uploaded.csv")
 
 # Helper function to safely save CSV with retry logic
@@ -169,8 +129,7 @@ def db_health():
 @app.route('/api/upload-csv', methods=['POST'])
 def upload_csv():
     """
-    Handles CSV file uploads, saves the file, creates dataset and feature records.
-    Returns dataset_id and column information.
+    Handles CSV file uploads, saves the file, and returns column information.
     """
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
@@ -182,53 +141,15 @@ def upload_csv():
             df = pd.read_csv(file)
             if df.empty:
                 return jsonify({"error": "Uploaded CSV is empty"}), 400
-
-            # timestamp values: one safe for filenames, one human-readable for DB/response
-            ts_fname = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-            # Save to a dedicated uploads folder using the original filename + timestamp
-            uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
-            os.makedirs(uploads_dir, exist_ok=True)
-            original_name = secure_filename(file.filename)
-            base, ext = os.path.splitext(original_name)
-            timestamped_name = f"{base}_{ts_fname}{ext}"
-            save_path = os.path.join(uploads_dir, timestamped_name)
+            # Save to a known location in backend folder
+            save_path = os.path.join(os.path.dirname(__file__), "uploaded.csv")
             df.to_csv(save_path, index=False)
-
-            # Create dataset record
-            dataset_name = file.filename.replace('.csv', '')
-
-            # Store a relative path in the dataset record (so DB does not hold machine-specific absolute paths)
-            rel_path = os.path.join('uploads', timestamped_name)
-            dataset_id = create_dataset(
-                name=f"{dataset_name}_{timestamp}",
-                file_path=rel_path,
-                total_features=len(df.columns),
-                discrete_features=0,  # Will be updated after classification
-                continuous_features=0,  # Will be updated after classification
-                target_variable=None  # Will be updated when target is selected
-            )
-            
-            # Create feature records for all columns (initially unclassified)
-            features_data = [
-                {
-                    'name': col,
-                    'type': 'continuous',  # Default, will be updated by classification
-                    'selected': False
-                }
-                for col in df.columns
-            ]
-            create_features_batch(dataset_id, features_data)
-            
             return jsonify({
                 "success": True,
-                "dataset_id": dataset_id,
                 "columns": df.columns.tolist(),
                 "rowCount": len(df),
-                "timestamp": timestamp,
-                # dataset_path shows the stored (relative) path; resolved_path has the absolute path on server
-                "dataset_path": rel_path,
+                "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "dataset_path": "uploaded.csv",
                 "resolved_path": save_path
             })
         except Exception as e:
@@ -2036,8 +1957,7 @@ def save_record():
 @app.route('/api/upsert-single-record', methods=['POST'])
 def upsert_single_record():
     """
-    Create or update a single record using the new datasets/features schema.
-    If no dataset exists, insert one; otherwise update the latest dataset.
+    Create or update a single record. If no record exists, insert one; otherwise update the latest record.
     This supports the UX where only one record should exist and be updated across actions.
     """
     try:
@@ -2046,108 +1966,53 @@ def upsert_single_record():
             print('[backend] upsert_single_record payload keys:', list(data.keys()) if isinstance(data, dict) else type(data))
         except Exception:
             pass
-        
-        dataset_path = data.get('dataset_path', 'uploaded.csv')
-        discrete_columns = data.get('discrete_columns', [])
-        continuous_columns = data.get('continuous_columns', [])
-        selected_columns = data.get('selected_columns', [])
-        dashboard_selected_columns = data.get('dashboard_selected_columns', [])
-        target_variable = data.get('target_variable', '')
-        
-        # Get latest dataset or create new one
-        latest = get_latest_dataset()
-        
-        if latest is None:
-            # Create new dataset
-            dataset_id = create_dataset(
-                name=f"Dataset {dataset_path}",
-                file_path=dataset_path,
-                target_column=target_variable
-            )
-            print(f'[backend] Created new dataset with id: {dataset_id}')
+        dataset_path = data.get('dataset_path', '')
+        discrete_columns = ','.join(data.get('discrete_columns', []))
+        continuous_columns = ','.join(data.get('continuous_columns', []))
+        selected_columns = ','.join(data.get('selected_columns', []))
+        # Preserve existing dashboard_selected_columns unless explicitly provided
+        if 'dashboard_selected_columns' in data:
+            dsc = data.get('dashboard_selected_columns')
+            if isinstance(dsc, list):
+                dashboard_selected_columns = ','.join(dsc)
+            elif isinstance(dsc, str):
+                dashboard_selected_columns = dsc
+            else:
+                dashboard_selected_columns = ''
+            try:
+                print('[backend] upsert_single_record dashboard_selected_columns (provided):', dashboard_selected_columns)
+            except Exception:
+                pass
         else:
-            # Update existing dataset
-            dataset_id = latest['id']
-            update_dataset(
-                dataset_id=dataset_id,
-                target_column=target_variable,
-                file_path=dataset_path
-            )
-            print(f'[backend] Updated dataset with id: {dataset_id}')
-        
-        # Update features for this dataset
-        # First, get existing features
-        existing_features = get_features_by_dataset(dataset_id)
-        existing_feature_names = {f['name'] for f in existing_features}
-        
-        # Determine all columns mentioned
-        all_columns = set(discrete_columns + continuous_columns)
-        
-        # Create new features that don't exist
-        for col in all_columns:
-            if col not in existing_feature_names:
-                var_type = 'discrete' if col in discrete_columns else 'continuous'
-                is_selected = col in selected_columns
-                create_feature(
-                    dataset_id=dataset_id,
-                    name=col,
-                    variable_type=var_type,
-                    selected=is_selected
-                )
-        
-        # Update selection status for all features
-        selection_updates = {}
-        for col in all_columns:
-            selection_updates[col] = col in selected_columns
-        
-        if selection_updates:
-            update_features_selection(dataset_id, selection_updates)
-        
-        return jsonify({"success": True, "id": dataset_id})
+            dashboard_selected_columns = None  # triggers COALESCE to keep existing
+            try:
+                print('[backend] upsert_single_record dashboard_selected_columns not provided -> preserve existing')
+            except Exception:
+                pass
+        target_variable = data.get('target_variable', '')
+        univariate_results = data.get('univariate_results', '')
+        finebin_results = data.get('finebin_results', '')
+        crosstab_results = data.get('crosstab_results', '')
+        woe_iv_results = data.get('woe_iv_results', '')
+        record_id = upsert_single_record_db(
+            dataset_path, discrete_columns, continuous_columns,
+            selected_columns, dashboard_selected_columns, target_variable, univariate_results,
+            finebin_results, crosstab_results, woe_iv_results
+        )
+        return jsonify({"success": True, "id": record_id})
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 # ----------- Get Records -----------
 @app.route('/api/records', methods=['GET'])
 def get_records():
     """
-    List all analysis records (summary only) - now fetches from datasets table.
+    List all analysis records (summary only).
     """
     try:
-        # Fetch all datasets from new schema
-        datasets = get_all_datasets()
-        
-        # Transform datasets to match old records format for frontend compatibility
-        records = []
-        for dataset in datasets:
-            # Get features for this dataset to build column lists
-            features = get_features_by_dataset(dataset['id'])
-            
-            discrete_cols = [f['name'] for f in features if f.get('variable_type') == 'discrete']
-            continuous_cols = [f['name'] for f in features if f.get('variable_type') == 'continuous']
-            selected_cols = [f['name'] for f in features if f.get('selected') is True]
-            
-            record = {
-                'id': dataset['id'],
-                'dataset_path': dataset.get('file_path', 'uploaded.csv'),
-                'discrete_columns': ','.join(discrete_cols),
-                'continuous_columns': ','.join(continuous_cols),
-                'selected_columns': ','.join(selected_cols),
-                'target_variable': dataset.get('target_column', ''),
-                'created_at': dataset.get('created_at', ''),
-                'univariate_results': '',  # Will be populated from binning results
-                'finebin_results': '',
-                'crosstab_results': '',
-                'woe_iv_results': ''
-            }
-            records.append(record)
-        
+        records = get_records_db()
         return jsonify(records)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 # ----------- Latest Record Dataset Path -----------
@@ -2173,58 +2038,28 @@ def get_record(record_id):
     Get a specific analysis record (full details).
     """
     try:
-        # Try old records table first (backward compatibility)
-        try:
-            record = get_record_db(record_id)
-            if record:
+        record = get_record_db(record_id)
+        if record:
+            try:
+                print('[backend] get_record returning dashboard_selected_columns:', record.get('dashboard_selected_columns'))
+            except Exception:
+                pass
+            try:
+                # Ensure types are serializable and add parsing indicators
+                dbg = record.get('dashboard_selected_columns')
+                print('[backend] get_record raw dashboard_selected_columns type:', type(dbg), 'value:', dbg)
+            except Exception:
+                pass
+            # Ensure woe_iv_results is parsed if it's a JSON string
+            if record.get('woe_iv_results'):
                 try:
-                    print('[backend] get_record returning dashboard_selected_columns:', record.get('dashboard_selected_columns'))
-                except Exception:
-                    pass
-                try:
-                    # Ensure types are serializable and add parsing indicators
-                    dbg = record.get('dashboard_selected_columns')
-                    print('[backend] get_record raw dashboard_selected_columns type:', type(dbg), 'value:', dbg)
-                except Exception:
-                    pass
-                # Ensure woe_iv_results is parsed if it's a JSON string
-                if record.get('woe_iv_results'):
-                    try:
-                        record['woe_iv_results'] = json.loads(record['woe_iv_results'])
-                    except json.JSONDecodeError:
-                        record['woe_iv_results'] = {}
-                return jsonify(record)
-        except Exception as e:
-            # Old table might not exist, continue to datasets
-            print(f"[get_record] Old records table query failed (expected if using new schema): {e}")
-
-        # Fallback: the frontend may request a dataset id (new schema). Build a compatible record
-        dataset = get_dataset(record_id)
-        if dataset:
-            features = get_features_by_dataset(dataset['id'])
-            discrete_cols = [f['name'] for f in features if f.get('variable_type') == 'discrete']
-            continuous_cols = [f['name'] for f in features if f.get('variable_type') == 'continuous']
-            selected_cols = [f['name'] for f in features if f.get('selected') is True]
-
-            built = {
-                'id': dataset['id'],
-                'dataset_path': dataset.get('file_path', ''),
-                'discrete_columns': ','.join(discrete_cols),
-                'continuous_columns': ','.join(continuous_cols),
-                'selected_columns': ','.join(selected_cols),
-                'target_variable': dataset.get('target_column', ''),
-                'created_at': dataset.get('created_at', ''),
-                'univariate_results': '',
-                'finebin_results': '',
-                'crosstab_results': '',
-                'woe_iv_results': {}
-            }
-            return jsonify(built)
-
-        return jsonify({"error": "Record not found"}), 404
+                    record['woe_iv_results'] = json.loads(record['woe_iv_results'])
+                except json.JSONDecodeError:
+                    record['woe_iv_results'] = {}
+            return jsonify(record)
+        else:
+            return jsonify({"error": "Record not found"}), 404
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/record/<int:record_id>/load-dataset', methods=['GET'])
@@ -2233,26 +2068,12 @@ def load_record_dataset(record_id):
     Loads the dataset for a given record and returns it as JSON.
     """
     try:
-        # Try old records table first (backwards compat)
-        dataset_path = None
-        try:
-            record = get_record_db(record_id)
-            if record:
-                dataset_path = record.get('dataset_path')
-        except Exception as e:
-            # Old table might not exist, continue to datasets
-            print(f"[load_record_dataset] Old records table query failed (expected if using new schema): {e}")
-
-        # Fallback to datasets table
+        record = get_record_db(record_id)
+        if not record:
+            return jsonify({"error": "Record not found"}), 404
+        dataset_path = record.get('dataset_path')
         if not dataset_path:
-            dataset = get_dataset(record_id)
-            if not dataset:
-                return jsonify({"error": "Record/Dataset not found"}), 404
-            dataset_path = dataset.get('file_path')
-
-        if not dataset_path:
-            return jsonify({"error": "No dataset_path available for this id"}), 404
-
+            return jsonify({"error": "No dataset_path in record"}), 404
         # Resolve relative path if needed
         if not os.path.isabs(dataset_path):
             dataset_path = os.path.join(os.path.dirname(__file__), dataset_path)
@@ -2261,8 +2082,6 @@ def load_record_dataset(record_id):
         df = pd.read_csv(dataset_path)
         return jsonify({"data": df.to_dict(orient="records"), "columns": df.columns.tolist()})
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 # ----------- Logistic Regression Analysis -----------
 @app.route('/api/logistic-regression', methods=['POST'])
@@ -3175,30 +2994,12 @@ def _create_woe_mask(df, var, bin_range):
 @app.route('/api/record/<int:record_id>', methods=['DELETE'])
 def delete_record(record_id):
     """
-    Delete a specific analysis record/dataset by ID.
-    Supports both old records table and new datasets table.
+    Delete a specific analysis record by ID, and remove any related finebin_details rows.
     """
     try:
-        # Try deleting from old records table first (backward compat)
-        try:
-            old_record = get_record_db(record_id)
-            if old_record:
-                success = delete_record_db(record_id)
-                return jsonify({"success": success})
-        except Exception as e:
-            # Old table might not exist (new schema), continue to datasets
-            print(f"[delete_record] Old records table query failed (expected if using new schema): {e}")
-        
-        # Fallback: delete from new datasets table (CASCADE will handle related rows)
-        dataset = get_dataset(record_id)
-        if dataset:
-            delete_dataset(record_id)
-            return jsonify({"success": True})
-        
-        return jsonify({"error": "Record/Dataset not found"}), 404
+        success = delete_record_db(record_id)
+        return jsonify({"success": success})
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 # ----------- Finebin Details API -----------
@@ -3999,14 +3800,5 @@ def classify_with_heuristics(column_name, samples):
 
 if __name__ == '__main__':
     init_db()
-    
-    # Register new v2 endpoints using new database schema
-    try:
-        from api_endpoints_new import register_new_endpoints
-        register_new_endpoints(app, coarse_bin_continuous, coarse_bin_discrete)
-        print("✅ New v2 API endpoints successfully registered")
-    except Exception as e:
-        print(f"⚠️  Warning: Could not register new v2 endpoints: {e}")
-    
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=True, host='0.0.0.0', port=port)

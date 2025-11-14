@@ -39,6 +39,7 @@ const SelectedColumnsPage = () => {
   const [binMergeHistory, setBinMergeHistory] = useState<Record<string, Record<string, any[]>>>({});
   const [recordId, setRecordId] = useState<number | undefined>(initialRecordId);
   const [woeIvResults, setWoeIvResults] = useState<Record<string, any>>({});
+  const woeIvResultsRef = useRef<Record<string, any>>({});
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
   const [selectedForModeling, setSelectedForModeling] = useState<string[]>([]);
   const [notification, setNotification] = useState<string | null>(null);
@@ -486,9 +487,9 @@ const SelectedColumnsPage = () => {
       const { merges } = await loadSavedFineBins(col, varType);
       const mergePayload = merges && Object.keys(merges).length > 0 ? merges : undefined;
       
-      const woeSuccess = await fetchWoeIv(col, mergePayload, false);
+      const updatedWoe = await fetchWoeIv(col, mergePayload, false);
       
-      if (woeSuccess) {
+      if (updatedWoe) {
         setWoeReadyColumns((prev) => new Set(prev).add(col));
       }
     } catch {
@@ -548,8 +549,11 @@ const SelectedColumnsPage = () => {
         }),
       });
       const coarseData = await coarseRes.json();
-      setUnivariateResults(prev => ({ ...prev, [col]: coarseData[col] || coarseData }));
-      setCoarseBinResults(prev => ({ ...prev, [col]: coarseData[col]?.stats || [] }));
+      const coarseStats = coarseData[col]?.stats || [];
+      const updatedUnivariate = { ...univariateResults, [col]: coarseData[col] || coarseData };
+      const updatedCoarse = { ...coarseBinResults, [col]: coarseStats };
+      setUnivariateResults(updatedUnivariate);
+      setCoarseBinResults(updatedCoarse);
 
       // Run fine binning
       const fineRes = await fetch('http://localhost:5000/api/fine-bin', {
@@ -569,8 +573,10 @@ const SelectedColumnsPage = () => {
       if (!fineData.success) throw new Error(fineData.error);
 
       const mergesReturned = fineData.bin_merges || payloadMerges;
-      setFineBinResults(prev => ({ ...prev, [col]: fineData.stats || [] }));
-      setBinMergeHistory(prev => ({ ...prev, [col]: mergesReturned }));
+      const updatedFine = { ...fineBinResults, [col]: fineData.stats || [] };
+      const updatedHistory = { ...binMergeHistory, [col]: mergesReturned };
+      setFineBinResults(updatedFine);
+      setBinMergeHistory(updatedHistory);
       setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
 
       // Recalculate bin scoring metrics (G/B odd, index, combined index, etc.) for the updated bins
@@ -580,11 +586,17 @@ const SelectedColumnsPage = () => {
         
       }
 
-      const persistedRecordId = await persistFineBinColumn(col, mergesReturned);
+      const latestWoe = await fetchWoeIv(col, mergesReturned, false);
+      if (latestWoe) {
+        setWoeReadyColumns(prev => new Set(prev).add(col));
+      }
 
-      // Recompute WOE/IV with correct merges and persist using the latest record id
-      await fetchWoeIv(col, mergesReturned, false, { recordIdOverride: persistedRecordId });
-      setWoeReadyColumns(prev => new Set(prev).add(col));
+      const persistedRecordId = await persistFineBinColumn(col, mergesReturned, {
+        univariateResults: updatedUnivariate,
+        fineBinResults: updatedFine,
+        crosstabResults: updatedCoarse,
+        woeIvResults: latestWoe ?? woeIvResultsRef.current,
+      });
       showNotification(`Binning completed for ${col}`);
     } catch (err) {
       
@@ -652,8 +664,10 @@ const SelectedColumnsPage = () => {
     const data = await res.json();
     if (!data.success) throw new Error(data.error);
 
-    setFineBinResults(prev => ({ ...prev, [col]: data.stats || [] }));
-    setBinMergeHistory(prev => ({ ...prev, [col]: data.bin_merges || newHistory }));
+    const updatedFine = { ...fineBinResults, [col]: data.stats || [] };
+    const updatedHistory = { ...binMergeHistory, [col]: data.bin_merges || newHistory };
+    setFineBinResults(updatedFine);
+    setBinMergeHistory(updatedHistory);
     setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
 
     // Recalculate metrics for the updated bins
@@ -663,9 +677,16 @@ const SelectedColumnsPage = () => {
       
     }
 
-    const persistedRecordId = await persistFineBinColumn(col, data.bin_merges || newHistory);
-    await fetchWoeIv(col, data.bin_merges || newHistory, false, { recordIdOverride: persistedRecordId });
-    setWoeReadyColumns(prev => new Set(prev).add(col));
+    const latestWoe = await fetchWoeIv(col, data.bin_merges || newHistory, false);
+    if (latestWoe) {
+      setWoeReadyColumns(prev => new Set(prev).add(col));
+    }
+    await persistFineBinColumn(col, data.bin_merges || newHistory, {
+      fineBinResults: updatedFine,
+      woeIvResults: latestWoe ?? woeIvResultsRef.current,
+      crosstabResults: coarseBinResults,
+      univariateResults,
+    });
 
     showNotification(`Unmerged '${mergedLabel}'`);
   };
@@ -673,8 +694,10 @@ const SelectedColumnsPage = () => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
 
     // Reset UI state
-    setFineBinResults(prev => ({ ...prev, [col]: [] }));
-    setBinMergeHistory(prev => ({ ...prev, [col]: {} }));
+    const clearedFine = { ...fineBinResults, [col]: [] };
+    const clearedHistory = { ...binMergeHistory, [col]: {} };
+    setFineBinResults(clearedFine);
+    setBinMergeHistory(clearedHistory);
     setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
 
     // Re-run coarse
@@ -688,9 +711,14 @@ const SelectedColumnsPage = () => {
       }),
     });
     const data = await res.json();
-    setCoarseBinResults(prev => ({ ...prev, [col]: data[col]?.stats || [] }));
-    const newStats = data[col]?.stats || [];
-    setFineBinResults(prev => ({ ...prev, [col]: newStats }));
+    const columnResult = data[col] || data;
+    const newStats = columnResult?.stats || [];
+    const updatedUnivariate = { ...univariateResults, [col]: columnResult };
+    const updatedCoarse = { ...coarseBinResults, [col]: newStats };
+    const updatedFine = { ...clearedFine, [col]: newStats };
+    setUnivariateResults(updatedUnivariate);
+    setCoarseBinResults(updatedCoarse);
+    setFineBinResults(updatedFine);
 
     // Recompute metrics for reset bins
     try {
@@ -699,11 +727,17 @@ const SelectedColumnsPage = () => {
       
     }
 
-    const persistedRecordId = await persistFineBinColumn(col, {});
+    const latestWoe = await fetchWoeIv(col, {}, false);
+    if (latestWoe) {
+      setWoeReadyColumns(prev => new Set(prev).add(col));
+    }
 
-    // Recompute WOE with NO merges
-    await fetchWoeIv(col, {}, false, { recordIdOverride: persistedRecordId });
-    setWoeReadyColumns(prev => new Set(prev).add(col));
+    await persistFineBinColumn(col, {}, {
+      univariateResults: updatedUnivariate,
+      fineBinResults: updatedFine,
+      crosstabResults: updatedCoarse,
+      woeIvResults: latestWoe ?? woeIvResultsRef.current,
+    });
 
     showNotification(`Binning reset for ${col}`);
   };
@@ -736,8 +770,10 @@ const SelectedColumnsPage = () => {
       }
 
       // Update UI with results
-      setFineBinResults(prev => ({ ...prev, [col]: data.stats || [] }));
-      setBinMergeHistory(prev => ({ ...prev, [col]: data.bin_merges || {} }));
+      const updatedFine = { ...fineBinResults, [col]: data.stats || [] };
+      const updatedHistory = { ...binMergeHistory, [col]: data.bin_merges || {} };
+      setFineBinResults(updatedFine);
+      setBinMergeHistory(updatedHistory);
       setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
 
       // Recalculate bin scoring metrics
@@ -747,11 +783,17 @@ const SelectedColumnsPage = () => {
         
       }
 
-      const persistedRecordId = await persistFineBinColumn(col, data.bin_merges || {});
+      const latestWoe = await fetchWoeIv(col, data.bin_merges || {}, false);
+      if (latestWoe) {
+        setWoeReadyColumns(prev => new Set(prev).add(col));
+      }
 
-      // Recompute WOE/IV
-      await fetchWoeIv(col, data.bin_merges || {}, false, { recordIdOverride: persistedRecordId });
-      setWoeReadyColumns(prev => new Set(prev).add(col));
+      await persistFineBinColumn(col, data.bin_merges || {}, {
+        fineBinResults: updatedFine,
+        crosstabResults: coarseBinResults,
+        univariateResults,
+        woeIvResults: latestWoe ?? woeIvResultsRef.current,
+      });
 
       // Show success message with details
       const message = `Auto-binning completed for ${col}: ${data.num_merges} merges performed, ` +
@@ -869,9 +911,29 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  const persistFineBinColumn = async (col: string, merges: Record<string, any[]>): Promise<number | undefined> => {
+  type PersistStateOverrides = {
+    univariateResults?: Record<string, any>;
+    fineBinResults?: Record<string, any[]>;
+    crosstabResults?: Record<string, any[]>;
+    woeIvResults?: Record<string, any>;
+    selectedColumns?: string[];
+    dashboardSelectedColumns?: string[];
+  };
+
+  const persistFineBinColumn = async (
+    col: string,
+    merges: Record<string, any[]>,
+    overrides: PersistStateOverrides = {}
+  ): Promise<number | undefined> => {
     let current = recordId;
     try {
+      const payloadSelectedColumns = overrides.selectedColumns ?? selectedColumns ?? [];
+      const payloadDashboard = overrides.dashboardSelectedColumns ?? selectedForModeling ?? [];
+      const payloadUnivariate = overrides.univariateResults ?? univariateResults ?? {};
+      const payloadFine = overrides.fineBinResults ?? fineBinResults ?? {};
+      const payloadCrosstab = overrides.crosstabResults ?? coarseBinResults ?? {};
+      const payloadWoe = overrides.woeIvResults ?? woeIvResults ?? {};
+
       const upsertResp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -879,13 +941,13 @@ const SelectedColumnsPage = () => {
           dataset_path: 'uploaded.csv',
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
-          selected_columns: selectedColumns,
-          dashboard_selected_columns: selectedForModeling,
+          selected_columns: payloadSelectedColumns,
+          dashboard_selected_columns: payloadDashboard,
           target_variable: targetVariable || '',
-          univariate_results: JSON.stringify(univariateResults || {}),
-          finebin_results: JSON.stringify(fineBinResults || {}),
-          crosstab_results: '',
-          woe_iv_results: JSON.stringify(woeIvResults || {}),
+          univariate_results: JSON.stringify(payloadUnivariate),
+          finebin_results: JSON.stringify(payloadFine),
+          crosstab_results: JSON.stringify(payloadCrosstab),
+          woe_iv_results: JSON.stringify(payloadWoe),
         }),
       });
       const up = await upsertResp.json();
@@ -952,12 +1014,15 @@ const SelectedColumnsPage = () => {
   useEffect(() => {
     
   }, [selectedForModeling]);
+  useEffect(() => {
+    woeIvResultsRef.current = woeIvResults;
+  }, [woeIvResults]);
   const fetchWoeIv = async (
     col: string,
     merges?: Record<string, any[]>,
     addToModeling: boolean = true,
     options?: { recordIdOverride?: number },
-  ): Promise<boolean> => {
+  ): Promise<Record<string, any> | null> => {
     try {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
       const resolvedRecordId = options?.recordIdOverride ?? recordId;
@@ -990,18 +1055,19 @@ const SelectedColumnsPage = () => {
       }
 
       if (!data.error && data[col]) {
-        setWoeIvResults((prev) => ({ ...prev, [col]: data[col] }));
+        const mergedResults = { ...woeIvResultsRef.current, [col]: data[col] };
+        setWoeIvResults(mergedResults);
         if (addToModeling) {
           setSelectedForModeling((prev) => [...new Set([...prev, col])]);
         }
-        return true;
+        return mergedResults;
       } else {
         
       }
     } catch (e) {
       
     }
-    return false;
+    return null;
   };
 
   // Show woeIvResults for the active column whenever it changes (helps debugging)

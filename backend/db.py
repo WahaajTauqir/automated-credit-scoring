@@ -1,34 +1,32 @@
+"""
+New Database Layer for Credit Scoring Application
+Uses the restructured schema with datasets, features, binning_steps, bins, and merged_bins tables
+"""
+
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 import os
 import json
+from typing import Optional, Dict, List, Tuple, Any
 
 
-# PostgreSQL connection details (replace with your actual credentials)
-def init_db():
-    """
-    Stub for database initialization. No-op for PostgreSQL.
-    """
-    pass
-# Prefer a full DATABASE_URL if provided; fall back to individual PG_* vars.
+# PostgreSQL connection details
 DATABASE_URL = os.getenv('DATABASE_URL')
-PG_DBNAME = os.getenv('PG_DBNAME', 'your_db_name')
-PG_USER = os.getenv('PG_USER', 'your_db_user')
-PG_PASSWORD = os.getenv('PG_PASSWORD', 'your_db_password')
+PG_DBNAME = os.getenv('PG_DBNAME', 'mydb')
+PG_USER = os.getenv('PG_USER', 'myuser')
+PG_PASSWORD = os.getenv('PG_PASSWORD', 'mypassword')
 PG_HOST = os.getenv('PG_HOST', 'localhost')
 PG_PORT = os.getenv('PG_PORT', '5432')
 
 
 def get_db_connection():
     """
-    Return a psycopg2 connection. If DATABASE_URL is set, use it directly
-    (recommended). Otherwise use individual PG_* environment variables.
+    Return a psycopg2 connection. If DATABASE_URL is set, use it directly.
+    Otherwise use individual PG_* environment variables.
     """
     if DATABASE_URL:
-        # Let psycopg2 parse the full connection string / DSN
         return psycopg2.connect(DATABASE_URL)
-
-    # Fallback to component-wise connection
+    
     conn = psycopg2.connect(
         dbname=PG_DBNAME,
         user=PG_USER,
@@ -39,164 +37,806 @@ def get_db_connection():
     return conn
 
 
-def save_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results):
+def init_db():
+    """Initialize the database schema if needed."""
+    # Note: Schema should be created using validate_and_migrate_schema.py
+    pass
+
+
+# =====================================================
+# DATASET OPERATIONS
+# =====================================================
+
+def create_dataset(name: str, file_path: str, total_features: int,
+                  discrete_features: int, continuous_features: int,
+                  target_variable: str) -> int:
     """
-    Save a record of the analysis to the database.
-    Returns the ID of the inserted record.
+    Create a new dataset record.
+    
+    Returns:
+        int: The ID of the created dataset
     """
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO records (dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    
+    cur.execute("""
+        INSERT INTO datasets (name, file_path, total_features, discrete_features, 
+                            continuous_features, target_variable)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING id;
-        """,
-        (dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
-    )
-    record_id = cur.fetchone()[0]
+    """, (name, file_path, total_features, discrete_features, continuous_features, target_variable))
+    
+    dataset_id = cur.fetchone()[0]
     conn.commit()
+    cur.close()
     conn.close()
-    return record_id
+    
+    return dataset_id
 
-def upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results):
-    """
-    Create or update a single record in the database. If no record exists, insert one; otherwise update the latest record.
-    Returns the ID of the inserted or updated record.
-    """
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM records ORDER BY created_at DESC LIMIT 1")
-    row = cur.fetchone()
-    if row is None:
-        cur.execute(
-            """
-            INSERT INTO records (dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id;
-            """,
-            (dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results)
-        )
-        record_id = cur.fetchone()[0]
-        conn.commit()
-    else:
-        record_id = row[0]
-        cur.execute(
-            """
-            UPDATE records
-            SET dataset_path = %s,
-                discrete_columns = %s,
-                continuous_columns = %s,
-                selected_columns = %s,
-                dashboard_selected_columns = COALESCE(%s, dashboard_selected_columns),
-                target_variable = %s,
-                univariate_results = %s,
-                finebin_results = %s,
-                crosstab_results = %s,
-                woe_iv_results = %s
-            WHERE id = %s
-            """,
-            (dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results, record_id)
-        )
-        conn.commit()
-    conn.close()
-    return record_id
 
-def get_records_db():
-    """
-    List all analysis records (summary only) from the database.
-    """
+def get_dataset(dataset_id: int) -> Optional[Dict]:
+    """Get a dataset by ID."""
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT id, dataset_path, discrete_columns, continuous_columns, selected_columns, target_variable, created_at FROM records ORDER BY created_at DESC")
-    records = cur.fetchall()
+    
+    cur.execute("SELECT * FROM datasets WHERE id = %s", (dataset_id,))
+    dataset = cur.fetchone()
+    
+    cur.close()
     conn.close()
-    return records
+    
+    return dict(dataset) if dataset else None
 
-def get_latest_record_dataset_path_db():
-    """
-    Returns the dataset_path of the latest record and whether the file exists.
-    """
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT dataset_path FROM records ORDER BY created_at DESC LIMIT 1")
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return None, None, False
-    dataset_path = row[0]
-    resolved = dataset_path
-    if dataset_path and not os.path.isabs(dataset_path):
-        resolved = os.path.join(os.path.dirname(__file__), dataset_path)
-    valid = bool(resolved and os.path.exists(resolved))
-    return dataset_path, resolved, valid
 
-def get_record_db(record_id):
-    """
-    Get a specific analysis record (full details) from the database.
-    """
+def get_all_datasets() -> List[Dict]:
+    """Get all datasets."""
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT * FROM records WHERE id = %s", (record_id,))
-    row = cur.fetchone()
+    
+    cur.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+    datasets = cur.fetchall()
+    
+    cur.close()
     conn.close()
-    if row:
-        return dict(row)
-    return None
+    
+    return [dict(d) for d in datasets]
 
-def delete_record_db(record_id):
+
+def get_latest_dataset() -> Optional[Dict]:
+    """Get the most recently created dataset."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("SELECT * FROM datasets ORDER BY created_at DESC LIMIT 1")
+    dataset = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    return dict(dataset) if dataset else None
+
+
+def update_dataset(dataset_id: int, **kwargs) -> bool:
     """
-    Delete a specific analysis record by ID, and remove any related finebin_details rows.
+    Update dataset fields.
+    
+    Args:
+        dataset_id: ID of dataset to update
+        **kwargs: Fields to update (name, file_path, total_features, etc.)
+    
+    Returns:
+        bool: True if successful
     """
+    if not kwargs:
+        return False
+    
     conn = get_db_connection()
     cur = conn.cursor()
-    try:
-        cur.execute("DELETE FROM finebin_details WHERE record_id = %s", (record_id,))
-    except Exception:
-        pass
-    cur.execute("DELETE FROM records WHERE id = %s", (record_id,))
+    
+    # Build SET clause dynamically
+    set_clause = ", ".join([f"{key} = %s" for key in kwargs.keys()])
+    values = list(kwargs.values()) + [dataset_id]
+    
+    cur.execute(f"""
+        UPDATE datasets 
+        SET {set_clause}
+        WHERE id = %s
+    """, values)
+    
     conn.commit()
+    cur.close()
     conn.close()
+    
     return True
 
-def save_finebin_details_db(record_id, column_name, bin_merges):
+
+def delete_dataset(dataset_id: int) -> bool:
+    """Delete a dataset and all related data (cascade)."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("DELETE FROM datasets WHERE id = %s", (dataset_id,))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return True
+
+
+# =====================================================
+# FEATURE OPERATIONS
+# =====================================================
+
+def create_feature(dataset_id: int, name: str, feature_type: str, selected: bool = False) -> int:
     """
-    Upsert fine binning details for a specific record and column.
+    Create a new feature record.
+    
+    Args:
+        dataset_id: ID of the parent dataset
+        name: Name of the feature/column
+        feature_type: 'discrete' or 'continuous'
+        selected: Whether this feature is selected for analysis
+    
+    Returns:
+        int: The ID of the created feature
     """
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM finebin_details WHERE record_id = %s AND column_name = %s",
-        (record_id, column_name)
-    )
-    for group_id, bins in bin_merges.items():
-        cur.execute(
-            """
-            INSERT INTO finebin_details (record_id, column_name, group_id, merged_bins)
+    
+    cur.execute("""
+        INSERT INTO features (dataset_id, name, type, selected)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id;
+    """, (dataset_id, name, feature_type, selected))
+    
+    feature_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return feature_id
+
+
+def create_features_batch(dataset_id: int, features: List[Dict]) -> List[int]:
+    """
+    Create multiple features at once.
+    
+    Args:
+        dataset_id: ID of the parent dataset
+        features: List of dicts with 'name', 'type', and optionally 'selected'
+    
+    Returns:
+        List[int]: List of created feature IDs
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    feature_ids = []
+    for feature in features:
+        name = feature['name']
+        feature_type = feature['type']
+        selected = feature.get('selected', False)
+        
+        cur.execute("""
+            INSERT INTO features (dataset_id, name, type, selected)
             VALUES (%s, %s, %s, %s)
-            """,
-            (record_id, column_name, str(group_id), json.dumps(bins))
-        )
+            RETURNING id;
+        """, (dataset_id, name, feature_type, selected))
+        
+        feature_ids.append(cur.fetchone()[0])
+    
     conn.commit()
+    cur.close()
     conn.close()
+    
+    return feature_ids
+
+
+def get_feature(feature_id: int) -> Optional[Dict]:
+    """Get a feature by ID."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("SELECT * FROM features WHERE id = %s", (feature_id,))
+    feature = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    return dict(feature) if feature else None
+
+
+def get_features_by_dataset(dataset_id: int) -> List[Dict]:
+    """Get all features for a dataset."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("SELECT * FROM features WHERE dataset_id = %s ORDER BY name", (dataset_id,))
+    features = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return [dict(f) for f in features]
+
+
+def get_feature_by_name(dataset_id: int, name: str) -> Optional[Dict]:
+    """Get a feature by dataset ID and name."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("SELECT * FROM features WHERE dataset_id = %s AND name = %s", (dataset_id, name))
+    feature = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    return dict(feature) if feature else None
+
+
+def update_feature(feature_id: int, **kwargs) -> bool:
+    """Update feature fields (selected, type, etc.)."""
+    if not kwargs:
+        return False
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    set_clause = ", ".join([f"{key} = %s" for key in kwargs.keys()])
+    values = list(kwargs.values()) + [feature_id]
+    
+    cur.execute(f"""
+        UPDATE features 
+        SET {set_clause}
+        WHERE id = %s
+    """, values)
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
     return True
 
-def get_finebin_details_db(record_id, column_name):
+
+def update_features_selection(dataset_id: int, selected_feature_names: List[str]) -> bool:
     """
-    Retrieve fine binning details for a specific record and column.
+    Update which features are selected for analysis.
+    
+    Args:
+        dataset_id: ID of the dataset
+        selected_feature_names: List of feature names that should be selected
+    
+    Returns:
+        bool: True if successful
     """
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT group_id, merged_bins FROM finebin_details
-        WHERE record_id = %s AND column_name = %s
-        """,
-        (record_id, column_name)
-    )
-    rows = cur.fetchall()
+    
+    # First, deselect all features for this dataset
+    cur.execute("UPDATE features SET selected = FALSE WHERE dataset_id = %s", (dataset_id,))
+    
+    # Then, select the specified features
+    if selected_feature_names:
+        cur.execute("""
+            UPDATE features 
+            SET selected = TRUE 
+            WHERE dataset_id = %s AND name = ANY(%s)
+        """, (dataset_id, selected_feature_names))
+    
+    conn.commit()
+    cur.close()
     conn.close()
-    finebin_details = [
-        {"group_id": row[0], "merged_bins": row[1]} for row in rows
-    ]
-    return finebin_details
+    
+    return True
+
+
+# =====================================================
+# BINNING STEP OPERATIONS
+# =====================================================
+
+def create_binning_step(feature_id: int, step_type: str, method: str = None,
+                       num_bins: int = None, is_monotonic: bool = False,
+                       monotonic_direction: str = None, iv_value: float = None) -> int:
+    """
+    Create a new binning step record.
+    
+    Args:
+        feature_id: ID of the feature
+        step_type: 'coarse' or 'fine'
+        method: Binning method used (e.g., 'qcut', 'merged', 'auto_monotonic')
+        num_bins: Number of bins created
+        is_monotonic: Whether WOE is monotonic
+        monotonic_direction: 'increasing', 'decreasing', or None
+        iv_value: Information Value for this binning
+    
+    Returns:
+        int: The ID of the created binning step
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        INSERT INTO binning_steps (feature_id, step_type, method, num_bins, 
+                                  is_monotonic, monotonic_direction, iv_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (feature_id, step_type) 
+        DO UPDATE SET 
+            method = EXCLUDED.method,
+            num_bins = EXCLUDED.num_bins,
+            is_monotonic = EXCLUDED.is_monotonic,
+            monotonic_direction = EXCLUDED.monotonic_direction,
+            iv_value = EXCLUDED.iv_value,
+            created_at = NOW()
+        RETURNING id;
+    """, (feature_id, step_type, method, num_bins, is_monotonic, monotonic_direction, iv_value))
+    
+    step_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return step_id
+
+
+def get_binning_step(step_id: int) -> Optional[Dict]:
+    """Get a binning step by ID."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("SELECT * FROM binning_steps WHERE id = %s", (step_id,))
+    step = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    return dict(step) if step else None
+
+
+def get_binning_steps_by_feature(feature_id: int) -> List[Dict]:
+    """Get all binning steps for a feature."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("SELECT * FROM binning_steps WHERE feature_id = %s ORDER BY step_type", (feature_id,))
+    steps = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return [dict(s) for s in steps]
+
+
+def get_binning_step_by_type(feature_id: int, step_type: str) -> Optional[Dict]:
+    """Get a specific binning step (coarse or fine) for a feature."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("""
+        SELECT * FROM binning_steps 
+        WHERE feature_id = %s AND step_type = %s
+    """, (feature_id, step_type))
+    step = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    return dict(step) if step else None
+
+
+def delete_binning_step(step_id: int) -> bool:
+    """Delete a binning step and all related bins (cascade)."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("DELETE FROM binning_steps WHERE id = %s", (step_id,))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return True
+
+
+# =====================================================
+# BIN OPERATIONS
+# =====================================================
+
+def create_bin(binning_step_id: int, bin_number: int, bin_label: str = None,
+              min_value: float = None, max_value: float = None, range_text: str = None,
+              good_count: int = 0, bad_count: int = 0, total_count: int = 0,
+              **kwargs) -> int:
+    """
+    Create a new bin record.
+    
+    Args:
+        binning_step_id: ID of the parent binning step
+        bin_number: Sequential bin number (1, 2, 3, ...)
+        bin_label: Human-readable bin label
+        min_value: Minimum value (for continuous)
+        max_value: Maximum value (for continuous)
+        range_text: Text representation (for discrete)
+        good_count: Count of Good cases
+        bad_count: Count of Bad cases
+        total_count: Total count
+        **kwargs: Additional metrics (woe, iv, dist_good, dist_bad, etc.)
+    
+    Returns:
+        int: The ID of the created bin
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Extract additional metrics from kwargs
+    good_bad_ratio = kwargs.get('good_bad_ratio')
+    bad_rate = kwargs.get('bad_rate')
+    freq_percent = kwargs.get('freq_percent')
+    odds = kwargs.get('odds')
+    index_value = kwargs.get('index_value')
+    odds_index = kwargs.get('odds_index')
+    dist_good = kwargs.get('dist_good')
+    dist_bad = kwargs.get('dist_bad')
+    woe = kwargs.get('woe')
+    iv = kwargs.get('iv')
+    
+    cur.execute("""
+        INSERT INTO bins (
+            binning_step_id, bin_number, bin_label, min_value, max_value, range_text,
+            good_count, bad_count, total_count, good_bad_ratio, bad_rate, freq_percent,
+            odds, index_value, odds_index, dist_good, dist_bad, woe, iv
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (binning_step_id, bin_number)
+        DO UPDATE SET
+            bin_label = EXCLUDED.bin_label,
+            min_value = EXCLUDED.min_value,
+            max_value = EXCLUDED.max_value,
+            range_text = EXCLUDED.range_text,
+            good_count = EXCLUDED.good_count,
+            bad_count = EXCLUDED.bad_count,
+            total_count = EXCLUDED.total_count,
+            good_bad_ratio = EXCLUDED.good_bad_ratio,
+            bad_rate = EXCLUDED.bad_rate,
+            freq_percent = EXCLUDED.freq_percent,
+            odds = EXCLUDED.odds,
+            index_value = EXCLUDED.index_value,
+            odds_index = EXCLUDED.odds_index,
+            dist_good = EXCLUDED.dist_good,
+            dist_bad = EXCLUDED.dist_bad,
+            woe = EXCLUDED.woe,
+            iv = EXCLUDED.iv
+        RETURNING id;
+    """, (binning_step_id, bin_number, bin_label, min_value, max_value, range_text,
+          good_count, bad_count, total_count, good_bad_ratio, bad_rate, freq_percent,
+          odds, index_value, odds_index, dist_good, dist_bad, woe, iv))
+    
+    bin_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return bin_id
+
+
+def create_bins_batch(binning_step_id: int, bins_data: List[Dict]) -> List[int]:
+    """
+    Create multiple bins at once.
+    
+    Args:
+        binning_step_id: ID of the parent binning step
+        bins_data: List of dicts containing bin data
+    
+    Returns:
+        List[int]: List of created bin IDs
+    """
+    bin_ids = []
+    for bin_data in bins_data:
+        bin_id = create_bin(binning_step_id, **bin_data)
+        bin_ids.append(bin_id)
+    
+    return bin_ids
+
+
+def get_bins_by_step(binning_step_id: int) -> List[Dict]:
+    """Get all bins for a binning step."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("""
+        SELECT * FROM bins 
+        WHERE binning_step_id = %s 
+        ORDER BY bin_number
+    """, (binning_step_id,))
+    bins = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return [dict(b) for b in bins]
+
+
+def get_bin(bin_id: int) -> Optional[Dict]:
+    """Get a bin by ID."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("SELECT * FROM bins WHERE id = %s", (bin_id,))
+    bin_data = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    return dict(bin_data) if bin_data else None
+
+
+# =====================================================
+# MERGED BINS OPERATIONS
+# =====================================================
+
+def create_merged_bin(fine_step_id: int, merged_bin_number: int,
+                     original_bin_ids: List[int], original_bin_labels: List[str]) -> int:
+    """
+    Create a merged bin record.
+    
+    Args:
+        fine_step_id: ID of the fine binning step
+        merged_bin_number: The resulting bin number after merge
+        original_bin_ids: List of original bin IDs that were merged
+        original_bin_labels: List of original bin labels that were merged
+    
+    Returns:
+        int: The ID of the created merged bin record
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        INSERT INTO merged_bins (fine_step_id, merged_bin_number, original_bin_ids, original_bin_labels)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id;
+    """, (fine_step_id, merged_bin_number, original_bin_ids, original_bin_labels))
+    
+    merged_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return merged_id
+
+
+def get_merged_bins_by_step(fine_step_id: int) -> List[Dict]:
+    """Get all merged bins for a fine binning step."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("""
+        SELECT * FROM merged_bins 
+        WHERE fine_step_id = %s 
+        ORDER BY merged_bin_number
+    """, (fine_step_id,))
+    merged_bins = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return [dict(mb) for mb in merged_bins]
+
+
+# =====================================================
+# BINNING TOTALS OPERATIONS
+# =====================================================
+
+def create_binning_totals(binning_step_id: int, total_good: int, total_bad: int,
+                         total_count: int, good_bad_ratio: float = None,
+                         bad_rate: float = None, freq_percent: float = 100.0,
+                         iv: float = None) -> int:
+    """
+    Create or update binning totals for a binning step.
+    
+    Args:
+        binning_step_id: ID of the binning step
+        total_good: Total count of Good cases
+        total_bad: Total count of Bad cases
+        total_count: Total count (Good + Bad)
+        good_bad_ratio: Overall ratio of Good to Bad
+        bad_rate: Overall percentage of Bad cases
+        freq_percent: Frequency percentage (typically 100%)
+        iv: Total Information Value
+    
+    Returns:
+        int: The ID of the created/updated binning totals record
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        INSERT INTO binning_totals (
+            binning_step_id, total_good, total_bad, total_count,
+            good_bad_ratio, bad_rate, freq_percent, iv
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (binning_step_id)
+        DO UPDATE SET
+            total_good = EXCLUDED.total_good,
+            total_bad = EXCLUDED.total_bad,
+            total_count = EXCLUDED.total_count,
+            good_bad_ratio = EXCLUDED.good_bad_ratio,
+            bad_rate = EXCLUDED.bad_rate,
+            freq_percent = EXCLUDED.freq_percent,
+            iv = EXCLUDED.iv,
+            created_at = NOW()
+        RETURNING id;
+    """, (binning_step_id, total_good, total_bad, total_count,
+          good_bad_ratio, bad_rate, freq_percent, iv))
+    
+    totals_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return totals_id
+
+
+def get_binning_totals(binning_step_id: int) -> Optional[Dict]:
+    """Get binning totals for a binning step."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("""
+        SELECT * FROM binning_totals 
+        WHERE binning_step_id = %s
+    """, (binning_step_id,))
+    totals = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    return dict(totals) if totals else None
+
+
+def get_all_binning_totals_by_dataset(dataset_id: int) -> List[Dict]:
+    """
+    Get all binning totals for all features in a dataset.
+    Joins with features and binning_steps to provide complete context.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("""
+        SELECT 
+            bt.*,
+            bs.step_type,
+            bs.method,
+            bs.is_monotonic,
+            f.name AS feature_name,
+            f.type AS feature_type
+        FROM binning_totals bt
+        JOIN binning_steps bs ON bt.binning_step_id = bs.id
+        JOIN features f ON bs.feature_id = f.id
+        WHERE f.dataset_id = %s
+        ORDER BY f.name, bs.step_type
+    """, (dataset_id,))
+    totals = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return [dict(t) for t in totals]
+
+
+# =====================================================
+# HELPER FUNCTIONS FOR COMPLEX OPERATIONS
+# =====================================================
+
+def get_complete_binning_results(feature_id: int, step_type: str = 'fine') -> Optional[Dict]:
+    """
+    Get complete binning results for a feature including all bins, totals, and metadata.
+    
+    Args:
+        feature_id: ID of the feature
+        step_type: 'coarse' or 'fine' (default: 'fine')
+    
+    Returns:
+        Dict with feature info, binning step info, bins data, totals, and merged bins
+    """
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # Get feature info
+    feature = get_feature(feature_id)
+    if not feature:
+        return None
+    
+    # Get binning step
+    step = get_binning_step_by_type(feature_id, step_type)
+    if not step:
+        return None
+    
+    # Get bins
+    bins = get_bins_by_step(step['id'])
+    
+    # Get totals
+    totals = get_binning_totals(step['id'])
+    
+    # Get merged bins if fine binning
+    merged_bins = []
+    if step_type == 'fine':
+        merged_bins = get_merged_bins_by_step(step['id'])
+    
+    cur.close()
+    conn.close()
+    
+    return {
+        'feature': feature,
+        'binning_step': step,
+        'bins': bins,
+        'totals': totals,
+        'merged_bins': merged_bins
+    }
+
+
+def get_dataset_with_all_results(dataset_id: int) -> Optional[Dict]:
+    """
+    Get complete dataset information including all features and their binning results.
+    
+    Returns:
+        Dict with dataset info, features, and all binning results including totals
+    """
+    dataset = get_dataset(dataset_id)
+    if not dataset:
+        return None
+    
+    features = get_features_by_dataset(dataset_id)
+    
+    # For each feature, get its binning results
+    for feature in features:
+        feature['binning'] = {
+            'coarse': None,
+            'fine': None
+        }
+        
+        # Get coarse binning
+        coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+        if coarse_step:
+            coarse_bins = get_bins_by_step(coarse_step['id'])
+            coarse_totals = get_binning_totals(coarse_step['id'])
+            feature['binning']['coarse'] = {
+                'step': coarse_step,
+                'bins': coarse_bins,
+                'totals': coarse_totals
+            }
+        
+        # Get fine binning
+        fine_step = get_binning_step_by_type(feature['id'], 'fine')
+        if fine_step:
+            fine_bins = get_bins_by_step(fine_step['id'])
+            fine_totals = get_binning_totals(fine_step['id'])
+            merged_bins = get_merged_bins_by_step(fine_step['id'])
+            feature['binning']['fine'] = {
+                'step': fine_step,
+                'bins': fine_bins,
+                'totals': fine_totals,
+                'merged_bins': merged_bins
+            }
+    
+    return {
+        'dataset': dataset,
+        'features': features
+    }
+
+
+def delete_all_binning_for_feature(feature_id: int) -> bool:
+    """
+    Delete all binning results (coarse and fine) for a feature.
+    Useful for resetting a feature's binning.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("DELETE FROM binning_steps WHERE feature_id = %s", (feature_id,))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return True
