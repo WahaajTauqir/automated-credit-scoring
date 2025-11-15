@@ -32,54 +32,103 @@ const AdminPanel: React.FC = () => {
       .catch(() => setLoading(false));
   }, []);
 
-  // When view is clicked, fetch the full record and navigate to main page with state
-  const handleView = (id: number) => {
-    fetch(`http://localhost:5000/api/record/${id}`)
-      .then(res => res.json())
-      .then(async data => {
-        // Load columns from uploaded.csv (first row)
-        let columns: string[] = [];
-        try {
-          const csvRes = await fetch('http://localhost:5000/api/uploaded-csv-columns');
-          if (csvRes.ok) {
-            const csvData = await csvRes.json();
-            columns = csvData.columns || [];
-          }
-        } catch {}
-        
-        // Extract binning results from new format
-        const univariateResults: Record<string, any> = {};
-        const fineBinResults: Record<string, any> = {};
-        const woeIvResults: Record<string, any> = {};
-        
-        if (data.binning_data) {
-          Object.entries(data.binning_data).forEach(([column, binning]: [string, any]) => {
-            if (binning.coarse) {
-              univariateResults[column] = binning.coarse;
-            }
-            if (binning.fine) {
-              fineBinResults[column] = binning.fine.bins;
-            }
-            if (binning.woe_iv) {
-              woeIvResults[column] = binning.woe_iv;
-            }
-          });
+  // When view is clicked, fetch the full record and navigate to selected columns page with state
+  const handleView = async (id: number) => {
+    try {
+      // Fetch the record
+      const res = await fetch(`http://localhost:5000/api/record/${id}`);
+      const data = await res.json();
+      
+      console.log('📊 Loaded record:', data);
+      
+      // Load columns from the dataset file for this specific record
+      let columns: string[] = [];
+      try {
+        const loadDatasetRes = await fetch(`http://localhost:5000/api/record/${id}/load-dataset`);
+        if (loadDatasetRes.ok) {
+          const loadDatasetData = await loadDatasetRes.json();
+          columns = loadDatasetData.columns || [];
+          console.log('✅ Loaded columns from dataset:', columns.length, 'columns');
         }
-        
-        // Build state with NEW format (arrays instead of comma-separated strings)
-        const state = {
-          columns,
-          discreteColumns: data.discrete_columns || [],  // Already an array
-          continuousColumns: data.continuous_columns || [],  // Already an array
-          selectedForUnivariate: data.selected_columns || [],  // Already an array
-          targetVariable: data.target_variable,
-          univariateResults,
-          fineBinResults,
-          woeIvResults,
-          recordId: id,
-        };
-        navigate('/', { state });
+      } catch (e) {
+        console.error('❌ Failed to load dataset columns:', e);
+      }
+      
+      // Fallback: infer columns from record data
+      if (columns.length === 0) {
+        const allCols = new Set<string>();
+        if (Array.isArray(data.discrete_columns)) {
+          data.discrete_columns.forEach((col: string) => allCols.add(col));
+        }
+        if (Array.isArray(data.continuous_columns)) {
+          data.continuous_columns.forEach((col: string) => allCols.add(col));
+        }
+        if (Array.isArray(data.selected_columns)) {
+          data.selected_columns.forEach((col: string) => allCols.add(col));
+        }
+        columns = Array.from(allCols);
+        console.log('⚠️ Using inferred columns:', columns.length, 'columns');
+      }
+      
+      // Extract binning results from new format
+      const univariateResults: Record<string, any> = {};
+      const fineBinResults: Record<string, any> = {};
+      const woeIvResults: Record<string, any> = {};
+      
+      console.log('🔍 Checking binning_data:', {
+        hasBinningData: !!data.binning_data,
+        binningDataKeys: data.binning_data ? Object.keys(data.binning_data).length : 0,
+        sampleColumn: data.binning_data ? Object.keys(data.binning_data)[0] : 'none'
       });
+      
+      if (data.binning_data) {
+        Object.entries(data.binning_data).forEach(([column, binning]: [string, any]) => {
+          console.log(`   Column ${column}:`, {
+            hasCoarse: !!binning.coarse,
+            hasFine: !!binning.fine,
+            hasWoe: !!binning.woe_iv,
+            coarseBins: binning.coarse?.bins?.length || 0,
+            fineBins: binning.fine?.bins?.length || 0,
+            woeBins: binning.woe_iv?.bins?.length || 0
+          });
+          
+          if (binning.coarse && binning.coarse.bins && binning.coarse.bins.length > 0) {
+            univariateResults[column] = binning.coarse;
+          }
+          if (binning.fine && binning.fine.bins && binning.fine.bins.length > 0) {
+            fineBinResults[column] = binning.fine.bins;
+          }
+          if (binning.woe_iv && binning.woe_iv.bins && binning.woe_iv.bins.length > 0) {
+            woeIvResults[column] = binning.woe_iv;
+          }
+        });
+      }
+      
+      console.log('📈 Extracted results:', {
+        univariate: Object.keys(univariateResults).length,
+        fineBin: Object.keys(fineBinResults).length,
+        woeIv: Object.keys(woeIvResults).length
+      });
+      
+      // Build state and navigate to SelectedColumnsPage directly
+      const state = {
+        selectedColumns: data.selected_columns || [],
+        discreteColumns: data.discrete_columns || [],
+        continuousColumns: data.continuous_columns || [],
+        targetVariable: data.target_variable || '',
+        recordId: id,
+        datasetPath: data.dataset_path || '',
+        univariateResults,
+        fineBinResults,
+        woeIvResults,
+      };
+      
+      console.log('🚀 Navigating to /selected-columns with state');
+      navigate('/selected-columns', { state });
+    } catch (error) {
+      console.error('❌ Error loading record:', error);
+      alert('Failed to load record: ' + error);
+    }
   };
 
   // Delete record

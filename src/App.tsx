@@ -39,7 +39,7 @@ function App() {
   const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
 
   const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, any[]>>({});
-  const [datasetPath, setDatasetPath] = useState<string>('uploaded.csv');
+  const [datasetPath, setDatasetPath] = useState<string>('');
   const [restoring, setRestoring] = useState<boolean>(false);
   const [expectedColumnsForRecord, setExpectedColumnsForRecord] = useState<string[] | undefined>(undefined);
 
@@ -144,6 +144,7 @@ function App() {
           continuousColumns,
           targetVariable,
           recordId: newRecordId || undefined,
+          datasetPath: datasetPath,
           // pass-through analysis results so SelectedColumnsPage can initialize immediately
           univariateResults,
           fineBinResults,
@@ -158,7 +159,8 @@ function App() {
           selectedColumns: selectedForUnivariate,
           discreteColumns,
           continuousColumns,
-          targetVariable
+          targetVariable,
+          datasetPath: datasetPath
         }
       });
     }
@@ -440,6 +442,7 @@ function App() {
             continuousColumns: continuousArr,
             selectedForUnivariate: selectedArr,
             targetVariable: data.target_variable || '',
+            datasetPath: data.dataset_path || '',
             univariateResults: uni,
             fineBinResults: fine,
     crossTabResults: cross,
@@ -552,6 +555,7 @@ function App() {
             restoring={restoring}
             expectedColumns={expectedColumnsForRecord}
             onUploadReplacement={(headers, rows, path) => handleCSVUploaded(headers, rows, path)}
+            datasetPath={datasetPath}
           />
         }
       />

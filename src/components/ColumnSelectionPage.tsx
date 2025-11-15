@@ -30,6 +30,7 @@ interface ColumnSelectionPageProps {
   restoring?: boolean;
   expectedColumns?: string[];
   onUploadReplacement?: (headers: string[], rows: any[], path?: string) => void;
+  datasetPath: string;
 }
 
 const ColumnSelectionPage = ({
@@ -54,7 +55,8 @@ const ColumnSelectionPage = ({
   toggleSelectAllContinuous,
   restoring,
   expectedColumns,
-  onUploadReplacement
+  onUploadReplacement,
+  datasetPath
 }: ColumnSelectionPageProps) => {
   const needsUpload = restoring && columns.length === 0 && expectedColumns && expectedColumns.length > 0;
   const hasWrongCsv = !restoring && columns.length > 0 && expectedColumns && expectedColumns.length > 0 && expectedColumns.some(col => !columns.includes(col));
@@ -176,6 +178,7 @@ const ColumnSelectionPage = ({
               toggleSelectAllDiscrete={toggleSelectAllDiscrete}
               toggleSelectAllContinuous={toggleSelectAllContinuous}
               handleFineBin={handleFineBin}
+              datasetPath={datasetPath}
             />
 
             <div style={{ marginTop: '30px', textAlign: 'center' }}>

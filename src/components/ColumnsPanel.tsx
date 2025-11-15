@@ -20,6 +20,7 @@ interface ColumnPanelsProps {
   toggleSelectAllDiscrete?: (selectAll?: boolean) => void;
   toggleSelectAllContinuous?: (selectAll?: boolean) => void;
   handleFineBin: (column: string) => Promise<void>;
+  datasetPath: string;
 }
 
 const ColumnPanels = ({
@@ -40,6 +41,7 @@ const ColumnPanels = ({
   toggleSelectedForUnivariate,
   toggleSelectAllDiscrete,
   toggleSelectAllContinuous,
+  datasetPath,
 }: ColumnPanelsProps) => {
   return (
     <div className="columns-layout">
@@ -92,7 +94,7 @@ const ColumnPanels = ({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                  dataset_path: 'uploaded.csv',
+                  dataset_path: datasetPath,
                   discrete_columns: discreteColumns,
                   continuous_columns: remaining,
                   selected_columns: selectedForUnivariate,

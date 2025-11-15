@@ -25,8 +25,35 @@ from db import (
 
 
 def get_csv_path():
-    """Returns the absolute path to uploaded.csv in the backend directory."""
-    return os.path.join(os.path.dirname(__file__), "uploaded.csv")
+    """Returns the absolute path to the dataset CSV file from the database record."""
+    try:
+        dataset = get_latest_dataset()
+        if dataset and dataset.get('file_path'):
+            fp = dataset.get('file_path')
+            # First try relative to backend folder
+            candidate = os.path.join(os.path.dirname(__file__), fp)
+            if os.path.exists(candidate):
+                return candidate
+            # Next try if file_path is absolute on disk
+            if fp and os.path.isabs(fp) and os.path.exists(fp):
+                return fp
+            # Next try looking in the uploads folder for the stored name
+            uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
+            maybe = os.path.join(uploads_dir, os.path.basename(fp))
+            if os.path.exists(maybe):
+                return maybe
+    except Exception:
+        pass
+    # As a last resort, pick the most recent CSV in uploads/ if present
+    uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
+    if os.path.exists(uploads_dir):
+        files = [os.path.join(uploads_dir, f) for f in os.listdir(uploads_dir) if f.lower().endswith('.csv')]
+        if files:
+            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            return files[0]
+
+    # Nothing found — raise with helpful message so callers can return a proper error
+    raise FileNotFoundError('No dataset CSV found. Upload a CSV via /api/upload-csv first.')
 
 
 def calculate_woe_iv_for_bins(bins_df, target_col, total_good, total_bad):

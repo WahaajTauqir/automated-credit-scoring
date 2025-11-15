@@ -61,15 +61,14 @@ app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173"])
 
 # =====================================================================
-# MIGRATION HELPER FUNCTIONS - Convert between old and new schema formats
+# DATA FORMATTING FUNCTIONS - Convert database records to frontend format
 # =====================================================================
 
 def format_dataset_to_record(dataset_dict):
     """
-    Convert a dataset dictionary (from new schema) to the old record format
-    for backward compatibility with frontend expectations.
+    Convert a dataset dictionary from the database to the format expected by the frontend.
     """
-    print(f"[format_dataset_to_record] Converting dataset {dataset_dict.get('id')} to old format")
+    print(f"[format_dataset_to_record] Converting dataset {dataset_dict.get('id')} for frontend")
     features = get_features_by_dataset(dataset_dict['id'])
     print(f"[format_dataset_to_record] Found {len(features)} features")
     
@@ -128,6 +127,20 @@ def format_dataset_to_record(dataset_dict):
 
 def format_bin_to_dict(bin_record):
     """Convert a bin database record to dictionary format expected by frontend."""
+    import math
+    
+    def safe_float(value):
+        """Safely convert to float, handling None and NaN values."""
+        if value is None:
+            return None
+        try:
+            f_val = float(value)
+            if math.isnan(f_val) or math.isinf(f_val):
+                return None
+            return f_val
+        except (ValueError, TypeError):
+            return None
+    
     result = {
         'Bin': bin_record.get('bin_label', ''),
         'Good': int(bin_record.get('good_count', 0)),
@@ -135,11 +148,15 @@ def format_bin_to_dict(bin_record):
         'Total': int(bin_record.get('total_count', 0))
     }
     
-    # Add Min/Max for continuous, Range for discrete
-    if bin_record.get('min_value') is not None:
-        result['Min'] = float(bin_record['min_value'])
-    if bin_record.get('max_value') is not None:
-        result['Max'] = float(bin_record['max_value'])
+    # Add Min/Max for continuous, Range for discrete (only if not None or NaN)
+    min_val = safe_float(bin_record.get('min_value'))
+    if min_val is not None:
+        result['Min'] = min_val
+    
+    max_val = safe_float(bin_record.get('max_value'))
+    if max_val is not None:
+        result['Max'] = max_val
+    
     if bin_record.get('range_text'):
         result['Range'] = bin_record['range_text']
     
@@ -148,17 +165,99 @@ def format_bin_to_dict(bin_record):
 
 def format_bin_to_woe_dict(bin_record):
     """Convert a bin database record to WOE/IV format."""
+    import math
+    
+    def safe_float(value, default=0):
+        """Safely convert to float, handling None and NaN values."""
+        if value is None:
+            return default
+        try:
+            f_val = float(value)
+            if math.isnan(f_val) or math.isinf(f_val):
+                return default
+            return f_val
+        except (ValueError, TypeError):
+            return default
+    
     return {
         'Bin': bin_record.get('bin_label', ''),
         'Good': int(bin_record.get('good_count', 0)),
         'Bad': int(bin_record.get('bad_count', 0)),
         'Total': int(bin_record.get('total_count', 0)),
-        'Dist_Good_%': float(bin_record.get('dist_good', 0)),
-        'Dist_Bad_%': float(bin_record.get('dist_bad', 0)),
-        'WOE': float(bin_record.get('woe', 0)),
-        'IV': float(bin_record.get('iv', 0)),
+        'Dist_Good_%': safe_float(bin_record.get('dist_good'), 0),
+        'Dist_Bad_%': safe_float(bin_record.get('dist_bad'), 0),
+        'WOE': safe_float(bin_record.get('woe'), 0),
+        'IV': safe_float(bin_record.get('iv'), 0),
         'Range': bin_record.get('range_text', bin_record.get('bin_label', ''))
     }
+
+
+def format_db_bins_to_stats_format(bins):
+    """
+    Convert database bin records to the format expected by univariate analysis frontend.
+    Maps database column names (good_count, bad_count, etc.) to frontend names (Good, Bad, etc.).
+    """
+    import math
+    
+    def safe_float(value, default=0, decimal_places=None):
+        """Safely convert to float, handling None and NaN values."""
+        if value is None:
+            return None
+        try:
+            f_val = float(value)
+            if math.isnan(f_val) or math.isinf(f_val):
+                return None
+            if decimal_places is not None:
+                return round(f_val, decimal_places)
+            return f_val
+        except (ValueError, TypeError):
+            return default
+    
+    formatted_bins = []
+    for bin_rec in bins:
+        formatted = {
+            'Bin': bin_rec.get('bin_label', ''),
+            'Good': int(bin_rec.get('good_count', 0)),
+            'Bad': int(bin_rec.get('bad_count', 0)),
+            'Total': int(bin_rec.get('total_count', 0)),
+            'Bad Rate': safe_float(bin_rec.get('bad_rate'), 0, 4),
+            'Freq%': safe_float(bin_rec.get('freq_percent'), 0, 4),
+        }
+        
+        # Add Min/Max for continuous variables (only if not None or NaN)
+        min_val = safe_float(bin_rec.get('min_value'))
+        if min_val is not None:
+            formatted['Min'] = min_val
+        
+        max_val = safe_float(bin_rec.get('max_value'))
+        if max_val is not None:
+            formatted['Max'] = max_val
+        
+        # Add Range for discrete variables
+        if bin_rec.get('range_text'):
+            formatted['Range'] = bin_rec.get('range_text')
+        
+        # Add WOE/IV if available (only if not None or NaN)
+        woe_val = safe_float(bin_rec.get('woe'), decimal_places=1)
+        if woe_val is not None:
+            formatted['WOE'] = woe_val
+        
+        iv_val = safe_float(bin_rec.get('iv'), decimal_places=4)
+        if iv_val is not None:
+            formatted['IV'] = iv_val
+        
+        # Add distribution percentages if available (only if not None or NaN)
+        dist_good = safe_float(bin_rec.get('dist_good'), decimal_places=4)
+        if dist_good is not None:
+            formatted['Dist_Good_%'] = dist_good
+        
+        dist_bad = safe_float(bin_rec.get('dist_bad'), decimal_places=4)
+        if dist_bad is not None:
+            formatted['Dist_Bad_%'] = dist_bad
+        
+        formatted_bins.append(formatted)
+    
+    return formatted_bins
 
 
 def save_coarse_binning_to_db(feature_id, bins_df, var_type):
@@ -167,15 +266,8 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
     Returns the binning_step_id.
     """
     print(f"[save_coarse_binning_to_db] Saving coarse binning for feature {feature_id}, type={var_type}, bins={len(bins_df)}")
-    # Create binning step
-    step_id = create_binning_step(
-        feature_id=feature_id,
-        step_type='coarse',
-        method='qcut' if var_type == 'continuous' else 'bad_rate',
-        num_bins=len(bins_df)
-    )
     
-    # Create bins
+    # Create bins data first to calculate WOE for monotonicity detection
     bins_data = []
     total_good = int(bins_df['Good'].sum())
     total_bad = int(bins_df['Bad'].sum())
@@ -183,6 +275,9 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
 
     # Overall odds for index calculations
     overall_odds = (total_good / total_bad) if total_bad > 0 else None
+    
+    # Track WOE values for monotonicity detection
+    woe_values = []
 
     for idx, row in bins_df.iterrows():
         good = int(row['Good'])
@@ -214,8 +309,10 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
             bin_data['range_text'] = str(row['Range'])
 
         # Calculate distributions and rates
-        bin_data['dist_good'] = (good / total_good) * 100 if total_good > 0 else None
-        bin_data['dist_bad'] = (bad / total_bad) * 100 if total_bad > 0 else None
+        dist_good = (good / total_good) * 100 if total_good > 0 else None
+        dist_bad = (bad / total_bad) * 100 if total_bad > 0 else None
+        bin_data['dist_good'] = dist_good
+        bin_data['dist_bad'] = dist_bad
         bin_data['bad_rate'] = (bad / total) * 100 if total > 0 else None
         bin_data['freq_percent'] = (total / total_all) * 100 if total_all > 0 else None
 
@@ -225,7 +322,7 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
 
         # Index metrics: index_value = dist_good / dist_bad, odds_index = odds / overall_odds
         try:
-            bin_data['index_value'] = (bin_data['dist_good'] / bin_data['dist_bad']) * 100 if (bin_data['dist_bad'] and bin_data['dist_bad'] > 0) else None
+            bin_data['index_value'] = (dist_good / dist_bad) * 100 if (dist_bad and dist_bad > 0) else None
         except Exception:
             bin_data['index_value'] = None
         try:
@@ -233,7 +330,33 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
         except Exception:
             bin_data['odds_index'] = None
 
+        # Calculate WOE for monotonicity detection
+        if dist_good and dist_good > 0 and dist_bad and dist_bad > 0:
+            try:
+                import math
+                woe = round(math.log(dist_good / dist_bad) * 100.0, 1)
+                bin_data['woe'] = woe
+                woe_values.append(woe)
+            except Exception:
+                bin_data['woe'] = None
+        else:
+            bin_data['woe'] = None
+
         bins_data.append(bin_data)
+
+    # CRITICAL FIX: Detect monotonic direction
+    monotonic_dir = detect_monotonic_direction(woe_values)
+    is_monotonic = monotonic_dir is not None
+
+    # Create binning step with monotonic_direction
+    step_id = create_binning_step(
+        feature_id=feature_id,
+        step_type='coarse',
+        method='qcut' if var_type == 'continuous' else 'bad_rate',
+        num_bins=len(bins_df),
+        is_monotonic=is_monotonic,
+        monotonic_direction=monotonic_dir
+    )
 
     # Persist bins and totals
     if bins_data:
@@ -254,7 +377,7 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
 
 # Helper function to get the CSV path consistently
 def get_csv_path():
-    """Returns the absolute path to uploaded.csv in the backend directory."""
+    """Returns the absolute path to the dataset CSV file from the database record."""
     # Prefer the latest dataset's stored file_path (keeps uploads organized).
     try:
         dataset = get_latest_dataset()
@@ -287,11 +410,10 @@ def get_csv_path():
     raise FileNotFoundError('No dataset CSV found. Upload a CSV via /api/upload-csv first.')
 
 
-# ---------------- Compatibility shims for legacy db_old APIs ----------------
+# ---------------- Database Query Helpers ----------------
 def get_record_db(record_id):
     """
-    Compatibility wrapper that returns a legacy-style record dict (matching old `records` table)
-    by querying the new normalized `datasets`/`features` tables.
+    Get a record dict by querying the `datasets` and `features` tables.
     """
     try:
         dataset = get_dataset(record_id)
@@ -302,8 +424,8 @@ def get_record_db(record_id):
         continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
         selected_cols = [f['name'] for f in features if f.get('selected')]
 
-        # Build minimal legacy payload similar to db_old.get_record_db
-        legacy = {
+        # Build record payload from database tables
+        record = {
             'id': dataset['id'],
             'dataset_path': dataset.get('file_path', ''),
             'discrete_columns': discrete_cols,
@@ -312,22 +434,21 @@ def get_record_db(record_id):
             'dashboard_selected_columns': selected_cols,
             'target_variable': dataset.get('target_variable', ''),
             'created_at': str(dataset.get('created_at', '')),
-            # Results placeholders (return structured objects/lists, not JSON strings)
+            # Results placeholders
             'univariate_results': {},
             'finebin_results': {},
             'crosstab_results': [],
             'woe_iv_results': {}
         }
-        return legacy
+        return record
     except Exception:
         return None
 
 
 def get_finebin_details_db(record_id, column_name):
     """
-    Compatibility wrapper that returns fine-bin merged groups in the old `finebin_details` format:
-    list of dicts with keys `group_id` and `merged_bins` (as JSON string).
-    Uses new schema functions to reconstruct the data.
+    Returns fine-bin merged groups for a given record and column.
+    Returns a list of dicts with keys `group_id` and `merged_bins`.
     """
     try:
         dataset_id = record_id
@@ -357,9 +478,25 @@ def upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, 
         ds = get_latest_dataset()
         if ds:
             return ds['id']
-        # Create a minimal dataset record
-        name = os.path.basename(dataset_path) if dataset_path else 'uploaded'
-        dataset_id = create_dataset(name=name, file_path=dataset_path or 'uploaded.csv', total_features=0, discrete_features=0, continuous_features=0, target_variable=target_variable or '')
+        # Create a minimal dataset record - extract clean name from path
+        if dataset_path:
+            name = os.path.basename(dataset_path)
+            if name.endswith('.csv'):
+                name = name[:-4]
+            # Remove timestamp patterns
+            import re
+            name = re.sub(r'_\d{8}_\d{6}$', '', name)
+        else:
+            name = 'Dataset'
+        
+        dataset_id = create_dataset(
+            name=name, 
+            file_path=dataset_path or '', 
+            total_features=0, 
+            discrete_features=0, 
+            continuous_features=0, 
+            target_variable=target_variable or ''
+        )
         return dataset_id
     except Exception:
         return None
@@ -367,7 +504,7 @@ def upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, 
 
 def save_finebin_details_db(record_id, column_name, bin_merges):
     """
-    Compatibility wrapper to persist merged bin groups into the new `merged_bins` table.
+    Persist merged bin groups to the `merged_bins` table.
     `bin_merges` is expected to be a mapping of merged_label -> list(original_bin_indices).
     """
     try:
@@ -469,7 +606,7 @@ def save_finebin_details_db(record_id, column_name, bin_merges):
 # Helper function to safely save CSV with retry logic
 def safe_save_csv(df, max_retries=3):
     """
-    Safely saves DataFrame to uploaded.csv with retry logic for Windows permission issues.
+    Safely saves DataFrame to dataset CSV file with retry logic for Windows permission issues.
     """
     csv_path = get_csv_path()
     import time
@@ -676,11 +813,15 @@ def coarse_bin_continuous(df, var, target, bins=10):
         min_max_values = df.groupby(f'{var}_binned')[var].agg(['min', 'max']).reset_index()
         tab = tab.merge(min_max_values, on=f'{var}_binned', how='left')
         
+        # Calculate Bad Rate and Freq%
+        tab['Bad Rate'] = (tab['Bad'] / tab['Total']) * 100
+        tab['Freq%'] = (tab['Total'] / tab['Total'].sum()) * 100
+        
         # Rename column for consistency: use 'Bin' instead of variable-prefixed name
         tab = tab.rename(columns={f'{var}_binned': 'Bin', 'min': 'Min', 'max': 'Max'})
         
-        # Reorder columns - store only essential data (no derived metrics)
-        columns_order = ['Bin', 'Min', 'Max', 'Good', 'Bad', 'Total']
+        # Reorder columns - include Bad Rate and Freq%
+        columns_order = ['Bin', 'Min', 'Max', 'Good', 'Bad', 'Total', 'Bad Rate', 'Freq%']
         tab = tab[columns_order]
         
         return tab, df[f'{var}_binned']
@@ -895,6 +1036,10 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
         cross_tab['Min'] = cross_tab[fine_binned_col].map(lambda x: bin_ranges.get(x, (None, None))[0])
         cross_tab['Max'] = cross_tab[fine_binned_col].map(lambda x: bin_ranges.get(x, (None, None))[1])
         
+        # Calculate Bad Rate and Freq%
+        cross_tab['Bad Rate'] = (cross_tab['Bad'] / cross_tab['Total']) * 100
+        cross_tab['Freq%'] = (cross_tab['Total'] / cross_tab['Total'].sum()) * 100
+        
         # Rename column for consistency: use 'Bin' instead of variable-prefixed name
         cross_tab = cross_tab.rename(columns={fine_binned_col: 'Bin'})
         
@@ -905,8 +1050,8 @@ def fine_bin_continuous(df, var, target, bin_merges=None):
         except Exception:
             pass
 
-        # Reorder - store only essential data
-        columns_order = ['Bin', 'Min', 'Max', 'Good', 'Bad', 'Total']
+        # Reorder - include Bad Rate and Freq%
+        columns_order = ['Bin', 'Min', 'Max', 'Good', 'Bad', 'Total', 'Bad Rate', 'Freq%']
         cross_tab = cross_tab[columns_order]
         return cross_tab, df[fine_binned_col], updated_merges, bin_ranges
     except Exception as e:
@@ -985,12 +1130,16 @@ def fine_bin_discrete(df, var, target, bin_merges=None, bin_mapping=None):
 
         # ✅ FIX: Always use str keys for bin_ranges lookup
         cross_tab['Range'] = cross_tab[fine_binned_col].astype(str).map(lambda x: ', '.join(map(str, bin_ranges.get(x, ['N/A']))))
+        
+        # Calculate Bad Rate and Freq%
+        cross_tab['Bad Rate'] = (cross_tab['Bad'] / cross_tab['Total']) * 100
+        cross_tab['Freq%'] = (cross_tab['Total'] / cross_tab['Total'].sum()) * 100
 
         # Rename column for consistency: use 'Bin' instead of variable-prefixed name
         cross_tab = cross_tab.rename(columns={fine_binned_col: 'Bin'})
 
-        # Final order - store only essential data
-        columns_order = ['Bin', 'Range', 'Good', 'Bad', 'Total']
+        # Final order - include Bad Rate and Freq%
+        columns_order = ['Bin', 'Range', 'Good', 'Bad', 'Total', 'Bad Rate', 'Freq%']
         cross_tab = cross_tab[columns_order]
 
         return cross_tab, df[fine_binned_col], bin_merges
@@ -1068,7 +1217,7 @@ def fine_bin_api():
 
         if dataset_id is None:
             # Create a minimal dataset record to attach feature/binning results
-            dataset_id = create_dataset(name='uploaded', file_path='uploaded.csv', total_features=0, discrete_features=0, continuous_features=0, target_variable=target)
+            dataset_id = create_dataset(name='Auto Analysis', file_path='', total_features=0, discrete_features=0, continuous_features=0, target_variable=target)
 
         # Ensure feature exists in new schema
         feature = get_feature_by_name(dataset_id, var)
@@ -1313,7 +1462,7 @@ def auto_monotonic_binning_api():
             dataset_id = latest_ds['id'] if latest_ds else None
 
         if dataset_id is None:
-            dataset_id = create_dataset(name='uploaded', file_path='uploaded.csv', total_features=0, discrete_features=0, continuous_features=0, target_variable=target)
+            dataset_id = create_dataset(name='Auto Binning', file_path='', total_features=0, discrete_features=0, continuous_features=0, target_variable=target)
 
         # Ensure feature exists
         feature = get_feature_by_name(dataset_id, var)
@@ -1527,19 +1676,46 @@ def univariate_analysis():
         for col in discrete_cols:
             if col != target and col in df.columns:
                 try:
-                    stats, _, _ = coarse_bin_discrete(df, col, target)
-                    results[col] = {
-                        'type': 'discrete',
-                        'stats': stats.to_dict(orient='records')
-                    }
-                    print(f"[univariate_analysis] Processed discrete: {col}")
+                    stats = None
+                    stats_dict = None
                     
-                    # Optionally persist to DB if record_id provided
+                    # Try to retrieve from database if record_id is provided
+                    from_db = False
                     if record_id:
                         dataset_id = record_id
                         feature = get_feature_by_name(dataset_id, col)
                         if feature:
-                            save_coarse_binning_to_db(feature['id'], stats, 'discrete')
+                            # Check if coarse binning already exists
+                            coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+                            if coarse_step:
+                                # Data exists in database - retrieve it
+                                bins = get_bins_by_step(coarse_step['id'])
+                                if bins:
+                                    # Convert database bins to frontend-expected format
+                                    stats_dict = format_db_bins_to_stats_format(bins)
+                                    from_db = True
+                                    print(f"[univariate_analysis] ✓ Retrieved discrete from DB: {col} ({len(bins)} bins)")
+                    
+                    # If not in database, calculate fresh
+                    if stats_dict is None:
+                        stats, _, _ = coarse_bin_discrete(df, col, target)
+                        print(f"[univariate_analysis] ⚙️  Calculated discrete: {col}")
+                        
+                        # Persist to DB if record_id provided
+                        if record_id:
+                            dataset_id = record_id
+                            feature = get_feature_by_name(dataset_id, col)
+                            if feature:
+                                save_coarse_binning_to_db(feature['id'], stats, 'discrete')
+                                print(f"[univariate_analysis] 💾 Saved discrete to DB: {col}")
+                        
+                        stats_dict = stats.to_dict(orient='records')
+                    
+                    results[col] = {
+                        'type': 'discrete',
+                        'stats': stats_dict,
+                        'from_db': from_db  # Indicate if data was retrieved from DB
+                    }
                 except Exception as e:
                     print(f"[univariate_analysis] Error processing discrete column {col}: {e}")
                     results[col] = {'type': 'discrete', 'error': str(e)}
@@ -1548,19 +1724,46 @@ def univariate_analysis():
         for col in continuous_cols:
             if col != target and col in df.columns:
                 try:
-                    stats, _ = coarse_bin_continuous(df, col, target)
-                    results[col] = {
-                        'type': 'continuous',
-                        'stats': stats.to_dict(orient='records')
-                    }
-                    print(f"[univariate_analysis] Processed continuous: {col}")
+                    stats = None
+                    stats_dict = None
                     
-                    # Optionally persist to DB if record_id provided
+                    # Try to retrieve from database if record_id is provided
+                    from_db = False
                     if record_id:
                         dataset_id = record_id
                         feature = get_feature_by_name(dataset_id, col)
                         if feature:
-                            save_coarse_binning_to_db(feature['id'], stats, 'continuous')
+                            # Check if coarse binning already exists
+                            coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+                            if coarse_step:
+                                # Data exists in database - retrieve it
+                                bins = get_bins_by_step(coarse_step['id'])
+                                if bins:
+                                    # Convert database bins to frontend-expected format
+                                    stats_dict = format_db_bins_to_stats_format(bins)
+                                    from_db = True
+                                    print(f"[univariate_analysis] ✓ Retrieved continuous from DB: {col} ({len(bins)} bins)")
+                    
+                    # If not in database, calculate fresh
+                    if stats_dict is None:
+                        stats, _ = coarse_bin_continuous(df, col, target)
+                        print(f"[univariate_analysis] ⚙️  Calculated continuous: {col}")
+                        
+                        # Persist to DB if record_id provided
+                        if record_id:
+                            dataset_id = record_id
+                            feature = get_feature_by_name(dataset_id, col)
+                            if feature:
+                                save_coarse_binning_to_db(feature['id'], stats, 'continuous')
+                                print(f"[univariate_analysis] 💾 Saved continuous to DB: {col}")
+                        
+                        stats_dict = stats.to_dict(orient='records')
+                    
+                    results[col] = {
+                        'type': 'continuous',
+                        'stats': stats_dict,
+                        'from_db': from_db  # Indicate if data was retrieved from DB
+                    }
                 except Exception as e:
                     print(f"[univariate_analysis] Error processing continuous column {col}: {e}")
                     results[col] = {'type': 'continuous', 'error': str(e)}
@@ -2004,6 +2207,39 @@ def calculate_bin_metrics():
         
     except Exception as e:
         return jsonify({"error": f"Failed to calculate bin metrics: {str(e)}"}), 500
+
+# ----------- Helper function to detect monotonicity -----------
+def detect_monotonic_direction(woe_values):
+    """
+    Detect if WOE values are monotonically increasing, decreasing, or neither.
+    
+    Args:
+        woe_values: List of WOE values in bin order
+        
+    Returns:
+        str: 'increasing', 'decreasing', or None
+    """
+    if not woe_values or len(woe_values) < 2:
+        return None
+    
+    # Filter out None/NaN values
+    clean_woe = [w for w in woe_values if w is not None and not (isinstance(w, float) and math.isnan(w))]
+    
+    if len(clean_woe) < 2:
+        return None
+    
+    # Check if monotonically increasing
+    is_increasing = all(clean_woe[i] <= clean_woe[i+1] for i in range(len(clean_woe)-1))
+    
+    # Check if monotonically decreasing
+    is_decreasing = all(clean_woe[i] >= clean_woe[i+1] for i in range(len(clean_woe)-1))
+    
+    if is_increasing and not is_decreasing:
+        return 'increasing'
+    elif is_decreasing and not is_increasing:
+        return 'decreasing'
+    else:
+        return None
 
 # ----------- WOE/IV Calculation -----------
 def calculate_woe_iv(df, variable, target, bin_merges=None, var_type=None):
@@ -2470,13 +2706,20 @@ def woe_iv_api():
                     # Determine if we should use fine or coarse step
                     step_type = 'fine' if merges_per_var.get(var_name) else 'coarse'
 
-                    # Create or update binning step with IV and num_bins
+                    # CRITICAL FIX: Detect monotonic direction from WOE values
+                    woe_values = [float(s.get('WOE', s.get('woe', 0))) for s in stats if isinstance(s, dict)]
+                    monotonic_dir = detect_monotonic_direction(woe_values)
+                    is_monotonic = monotonic_dir is not None
+
+                    # Create or update binning step with IV, num_bins, and monotonic_direction
                     num_bins = len(stats) if isinstance(stats, (list, tuple)) else 0
                     step_id = create_binning_step(
                         feature_id=feature['id'],
                         step_type=step_type,
                         method='calculated',
                         num_bins=num_bins,
+                        is_monotonic=is_monotonic,
+                        monotonic_direction=monotonic_dir,
                         iv_value=float(iv_value) if iv_value is not None else None
                     )
 
@@ -2522,6 +2765,8 @@ def woe_iv_api():
                             freq_percent = (total / total_all) * 100 if total_all > 0 else None
                             odds = (good / bad) if bad > 0 else None
                             good_bad_ratio = odds
+                            # CRITICAL FIX: Calculate bad_rate (percentage of bad cases in this bin)
+                            bad_rate = (bad / total) * 100 if total > 0 else None
                             try:
                                 index_value = ( (dist_good / dist_bad) * 100 ) if (dist_bad and dist_bad > 0) else None
                             except Exception:
@@ -2547,6 +2792,7 @@ def woe_iv_api():
                                 'freq_percent': freq_percent,
                                 'odds': odds,
                                 'good_bad_ratio': good_bad_ratio,
+                                'bad_rate': bad_rate,
                                 'index_value': index_value,
                                 'odds_index': odds_index
                             }
@@ -2557,16 +2803,71 @@ def woe_iv_api():
                     if bins_data:
                         create_bins_batch(step_id, bins_data)
 
-                    # Create/update binning totals
+                    # Create/update binning totals with proper calculations
                     try:
                         total_good = sum(int(b.get('good_count', 0)) for b in bins_data)
                         total_bad = sum(int(b.get('bad_count', 0)) for b in bins_data)
                         total_count = sum(int(b.get('total_count', 0)) for b in bins_data)
-                        create_binning_totals(binning_step_id=step_id, total_good=total_good, total_bad=total_bad, total_count=total_count, iv=float(iv_value) if iv_value is not None else None)
-                    except Exception:
+                        
+                        # CRITICAL FIX: Calculate good_bad_ratio and bad_rate for totals
+                        overall_good_bad_ratio = (total_good / total_bad) if total_bad > 0 else None
+                        overall_bad_rate = (total_bad / total_count) * 100 if total_count > 0 else None
+                        
+                        create_binning_totals(
+                            binning_step_id=step_id, 
+                            total_good=total_good, 
+                            total_bad=total_bad, 
+                            total_count=total_count,
+                            good_bad_ratio=overall_good_bad_ratio,
+                            bad_rate=overall_bad_rate,
+                            iv=float(iv_value) if iv_value is not None else None
+                        )
+                    except Exception as totals_err:
+                        print(f"WOE/IV WARNING: Failed to create totals for {var_name}: {totals_err}")
                         pass
 
-                    # Persist merged bin groups when provided
+                    # CRITICAL FIX: Populate merged_bins table for fine binning
+                    if step_type == 'fine' and merges_per_var.get(var_name):
+                        try:
+                            merge_groups = merges_per_var.get(var_name)
+                            for merge_key, original_bins in merge_groups.items():
+                                # Find the bin_number for this merged group
+                                merged_bin_num = None
+                                for bin_data in bins_data:
+                                    if str(bin_data.get('bin_label', '')).strip() == str(merge_key).strip():
+                                        merged_bin_num = bin_data.get('bin_number')
+                                        break
+                                
+                                if merged_bin_num is not None and original_bins:
+                                    # Get the coarse step to find original bin IDs
+                                    coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+                                    if coarse_step:
+                                        coarse_bins = get_bins_by_step(coarse_step['id'])
+                                        
+                                        # Find original bin IDs that match the labels being merged
+                                        original_bin_ids = []
+                                        original_bin_labels = []
+                                        for orig_label in original_bins:
+                                            for cb in coarse_bins:
+                                                if str(cb.get('bin_label', '')).strip() == str(orig_label).strip():
+                                                    original_bin_ids.append(cb['id'])
+                                                    original_bin_labels.append(str(orig_label).strip())
+                                                    break
+                                        
+                                        if original_bin_ids:
+                                            create_merged_bin(
+                                                fine_step_id=step_id,
+                                                merged_bin_number=merged_bin_num,
+                                                original_bin_ids=original_bin_ids,
+                                                original_bin_labels=original_bin_labels
+                                            )
+                                            print(f"WOE/IV DEBUG: Created merged_bin entry for {var_name}, bin {merged_bin_num} from {len(original_bin_ids)} original bins")
+                        except Exception as merge_err:
+                            print(f"WOE/IV WARNING: Failed to create merged_bins for {var_name}: {merge_err}")
+                            import traceback
+                            traceback.print_exc()
+
+                    # Persist merged bin groups when provided (legacy function, kept for compatibility)
                     try:
                         if merges_per_var.get(var_name):
                             save_finebin_details_db(dataset_id, var_name, merges_per_var.get(var_name))
@@ -2592,8 +2893,7 @@ def woe_iv_api():
 def save_record():
     """
     DEPRECATED: This endpoint is now a no-op. Use /api/upsert-single-record instead.
-    The new schema auto-saves changes through upsert-single-record.
-    Kept for backward compatibility only.
+    All changes are auto-saved through upsert-single-record.
     """
     print("\n[API] /api/save-record (POST) called - DEPRECATED endpoint")
     try:
@@ -2611,7 +2911,7 @@ def save_record():
 @app.route('/api/upsert-single-record', methods=['POST'])
 def upsert_single_record():
     """
-    Create or update a single record using the new datasets/features schema.
+    Create or update a single dataset record.
     If no dataset exists, insert one; otherwise update the latest dataset.
     This supports the UX where only one record should exist and be updated across actions.
     """
@@ -2624,33 +2924,86 @@ def upsert_single_record():
         except Exception:
             pass
         
-        dataset_path = data.get('dataset_path', 'uploaded.csv')
+        dataset_path = data.get('dataset_path')
+        record_id = data.get('record_id')
         discrete_columns = data.get('discrete_columns', [])
         continuous_columns = data.get('continuous_columns', [])
         selected_columns = data.get('selected_columns', [])
         dashboard_selected_columns = data.get('dashboard_selected_columns', [])
         target_variable = data.get('target_variable', '')
         
-        # Get latest dataset or create new one
-        latest = get_latest_dataset()
-        
-        if latest is None:
-            # Create new dataset
-            dataset_id = create_dataset(
-                name=f"Dataset {dataset_path}",
-                file_path=dataset_path,
-                target_variable=target_variable
-            )
-            print(f'[backend] Created new dataset with id: {dataset_id}')
+        # Extract clean dataset name from path
+        if dataset_path:
+            # Get just the filename without path
+            dataset_name = os.path.basename(dataset_path)
+            # Remove .csv extension and any timestamp suffix
+            if dataset_name.endswith('.csv'):
+                dataset_name = dataset_name[:-4]
+            # Remove timestamp patterns like _20231115_143022
+            import re
+            dataset_name = re.sub(r'_\d{8}_\d{6}$', '', dataset_name)
         else:
-            # Update existing dataset
-            dataset_id = latest['id']
-            update_dataset(
-                dataset_id=dataset_id,
-                target_variable=target_variable,
-                file_path=dataset_path
-            )
-            print(f'[backend] Updated dataset with id: {dataset_id}')
+            dataset_name = "Dataset"
+        
+        # Determine which dataset to use
+        if record_id:
+            # Use the specific record provided
+            dataset = get_dataset(record_id)
+            if dataset:
+                dataset_id = dataset['id']
+                # If dataset_path not provided, use existing one
+                if not dataset_path:
+                    dataset_path = dataset.get('file_path', '')
+                    if dataset_path:
+                        # Extract name from existing path
+                        dataset_name = os.path.basename(dataset_path)
+                        if dataset_name.endswith('.csv'):
+                            dataset_name = dataset_name[:-4]
+                        import re
+                        dataset_name = re.sub(r'_\d{8}_\d{6}$', '', dataset_name)
+                # Update the existing dataset
+                update_dataset(
+                    dataset_id=dataset_id,
+                    name=dataset_name,
+                    target_variable=target_variable,
+                    file_path=dataset_path if dataset_path else None
+                )
+                print(f'[backend] Updated dataset {dataset_id} (from record_id)')
+            else:
+                print(f'[backend] WARNING: record_id {record_id} not found, creating new dataset')
+                dataset_id = create_dataset(
+                    name=dataset_name,
+                    file_path=dataset_path or '',
+                    target_variable=target_variable
+                )
+                print(f'[backend] Created new dataset with id: {dataset_id}')
+        else:
+            # No record_id provided - get latest or create new
+            latest = get_latest_dataset()
+            
+            if latest is None:
+                # Create new dataset
+                if not dataset_path:
+                    print('[backend] WARNING: Creating new dataset without dataset_path')
+                dataset_id = create_dataset(
+                    name=dataset_name,
+                    file_path=dataset_path or '',
+                    target_variable=target_variable
+                )
+                print(f'[backend] Created new dataset with id: {dataset_id}')
+            else:
+                # Update existing dataset
+                dataset_id = latest['id']
+                # If dataset_path not provided, keep existing one
+                if not dataset_path:
+                    dataset_path = latest.get('file_path', '')
+                update_dataset(
+                    dataset_id=dataset_id,
+                    name=dataset_name,
+                    target_variable=target_variable,
+                    file_path=dataset_path if dataset_path else None
+                )
+                print(f'[backend] Updated latest dataset with id: {dataset_id}')
         
         # Update features for this dataset
         existing_features = get_features_by_dataset(dataset_id)
@@ -2720,6 +3073,7 @@ def get_records():
             
             result.append({
                 'id': dataset['id'],
+                'name': dataset.get('name', ''),  # Add dataset name
                 'dataset_path': dataset.get('file_path', ''),
                 'discrete_columns': discrete_cols,  # Array instead of comma-separated string
                 'continuous_columns': continuous_cols,  # Array instead of comma-separated string
@@ -2770,18 +3124,25 @@ def get_record(record_id):
     Get a specific analysis record with binning data in NEW format.
     """
     try:
+        print(f"\n[get_record] Loading record {record_id}")
         dataset = get_dataset(record_id)
         if not dataset:
+            print(f"[get_record] ❌ Dataset {record_id} not found")
             return jsonify({"error": "Record not found"}), 404
         
+        print(f"[get_record] ✅ Found dataset: {dataset.get('name', 'unnamed')}")
         features = get_features_by_dataset(dataset['id'])
+        print(f"[get_record] Found {len(features)} features")
         
         discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
         continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
         selected_cols = [f['name'] for f in features if f.get('selected') is True]
         
+        print(f"[get_record] Discrete: {len(discrete_cols)}, Continuous: {len(continuous_cols)}, Selected: {len(selected_cols)}")
+        
         # Build binning results for each feature
         binning_data = {}
+        features_with_data = 0
         for feature in features:
             feature_binning = {
                 'coarse': None,
@@ -2818,7 +3179,13 @@ def get_record(record_id):
                     'bins': woe_bins
                 }
             
+            # Track features with data
+            if coarse_step or fine_step or (woe_step and woe_step.get('iv_value') is not None):
+                features_with_data += 1
+            
             binning_data[feature['name']] = feature_binning
+        
+        print(f"[get_record] 📊 Features with binning data: {features_with_data}/{len(features)}")
         
         result = {
             'id': dataset['id'],
@@ -2846,17 +3213,16 @@ def load_record_dataset(record_id):
     Loads the dataset for a given record and returns it as JSON.
     """
     try:
-        # Try old records table first (backwards compat)
+        # Get dataset path from database
         dataset_path = None
         try:
             record = get_record_db(record_id)
             if record:
                 dataset_path = record.get('dataset_path')
         except Exception as e:
-            # Old table might not exist, continue to datasets
-            print(f"[load_record_dataset] Old records table query failed (expected if using new schema): {e}")
+            print(f"[load_record_dataset] Failed to query record: {e}")
 
-        # Fallback to datasets table
+        # Try getting path from datasets table
         if not dataset_path:
             dataset = get_dataset(record_id)
             if not dataset:
@@ -3857,19 +4223,62 @@ def save_finebin_details():
             conn.close()
         
         # Create merged bin records
-        # bin_merges looks like: {"1": [0, 1, 2], "2": [3, 4]}
-        for merged_bin_number_str, original_bin_indices in bin_merges.items():
-            merged_bin_number = int(merged_bin_number_str)
-            
-            # Get the original bin IDs and labels
+        # bin_merges can be in two formats:
+        # 1. Numeric indices: {"1": [0, 1, 2], "2": [3, 4]}
+        # 2. Bin labels from auto-binning: {"Bin_3_Bin_4_Bin_5_Bin_6": ["Bin_3", "Bin_4", "Bin_5", "Bin_6"]}
+        
+        # Create mapping of bin labels to bin records for label-based lookups
+        bin_label_map = {str(bin.get('bin_label', '')): bin for bin in coarse_bins}
+        
+        merged_bin_counter = 1
+        for merged_bin_key, original_bin_values in bin_merges.items():
+            # Determine if we're dealing with numeric indices or bin labels
             original_bin_ids = []
             original_bin_labels = []
-            for idx in original_bin_indices:
-                if idx < len(coarse_bins):
-                    original_bin_ids.append(coarse_bins[idx]['id'])
-                    original_bin_labels.append(coarse_bins[idx].get('bin_label', f'Bin {idx}'))
+            
+            # Check if original_bin_values are numeric indices or labels
+            if original_bin_values and isinstance(original_bin_values[0], (int, float)):
+                # Format 1: Numeric indices [0, 1, 2]
+                for idx in original_bin_values:
+                    try:
+                        idx_int = int(idx)
+                        if 0 <= idx_int < len(coarse_bins):
+                            original_bin_ids.append(coarse_bins[idx_int]['id'])
+                            original_bin_labels.append(coarse_bins[idx_int].get('bin_label', f'Bin_{idx_int}'))
+                    except (ValueError, TypeError):
+                        continue
+            else:
+                # Format 2: Bin labels ["Bin_3", "Bin_4", "Bin_5", "Bin_6"]
+                for label in original_bin_values:
+                    label_str = str(label).strip()
+                    # Try direct label match
+                    if label_str in bin_label_map:
+                        bin_record = bin_label_map[label_str]
+                        original_bin_ids.append(bin_record['id'])
+                        original_bin_labels.append(label_str)
+                    else:
+                        # Try extracting numeric part and matching by bin_number
+                        # e.g., "Bin_3" -> bin_number=3
+                        import re
+                        match = re.search(r'_?(\d+)', label_str)
+                        if match:
+                            bin_num = int(match.group(1))
+                            # Find bin by bin_number
+                            matching_bin = next((b for b in coarse_bins if b.get('bin_number') == bin_num), None)
+                            if matching_bin:
+                                original_bin_ids.append(matching_bin['id'])
+                                original_bin_labels.append(matching_bin.get('bin_label', label_str))
             
             if original_bin_ids:
+                # Try to extract merged bin number from key, or use counter
+                try:
+                    # Try to parse as integer first
+                    merged_bin_number = int(merged_bin_key)
+                except ValueError:
+                    # If key is a string like "Bin_3_Bin_4_Bin_5_Bin_6", use counter
+                    merged_bin_number = merged_bin_counter
+                    merged_bin_counter += 1
+                
                 create_merged_bin(
                     fine_step_id=fine_step_id,
                     merged_bin_number=merged_bin_number,
@@ -3888,7 +4297,7 @@ def save_finebin_details():
 def get_finebin_details(record_id, column_name):
     """
     Retrieve fine binning details (merged bins) for a specific dataset and feature.
-    Returns format: {"bin_merges": {"1": [0, 1, 2], "2": [3, 4]}}
+    Returns format compatible with frontend: array of {group_id, merged_bins}
     """
     print(f"\n[API] /api/finebin-details/{record_id}/{column_name} (GET) called")
     try:
@@ -3897,40 +4306,51 @@ def get_finebin_details(record_id, column_name):
         # Get the feature
         feature = get_feature_by_name(dataset_id, column_name)
         if not feature:
-            return jsonify({"bin_merges": {}})
+            return jsonify([])  # Return empty array for compatibility
         
         # Get the fine binning step
         fine_step = get_binning_step_by_type(feature['id'], 'fine')
         if not fine_step:
-            return jsonify({"bin_merges": {}})
+            return jsonify([])  # Return empty array for compatibility
         
-        # Get coarse binning step to map bin IDs to indices
+        # Get coarse binning step to map bin IDs to labels
         coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
         if not coarse_step:
-            return jsonify({"bin_merges": {}})
+            return jsonify([])
         
         coarse_bins = get_bins_by_step(coarse_step['id'])
-        # Create a mapping of bin_id -> bin_index
-        bin_id_to_index = {bin_data['id']: idx for idx, bin_data in enumerate(coarse_bins)}
+        # Create mappings: bin_id -> bin_label
+        bin_id_to_label = {bin_data['id']: bin_data.get('bin_label', f"Bin_{bin_data.get('bin_number', 0)}") for bin_data in coarse_bins}
         
         # Get merged bins for this step
         merged_bins = get_merged_bins_by_step(fine_step['id'])
         
-        # Convert to old format: {merged_bin_number: [original_bin_indices]}
-        bin_merges = {}
+        # Convert to frontend-compatible format: array of {group_id, merged_bins}
+        # merged_bins should contain bin labels, not IDs
+        details = []
         for mb in merged_bins:
-            merged_num = str(mb['merged_bin_number'])
+            group_id = str(mb['merged_bin_number'])
             original_ids = mb['original_bin_ids']  # List of original bin IDs
-            # Convert IDs to indices
-            original_indices = [bin_id_to_index.get(bid, bid) for bid in original_ids]
-            bin_merges[merged_num] = original_indices
+            original_labels = mb.get('original_bin_labels', [])  # List of original bin labels
+            
+            # Use original_bin_labels if available, otherwise map IDs to labels
+            if original_labels and len(original_labels) == len(original_ids):
+                bin_labels = original_labels
+            else:
+                bin_labels = [bin_id_to_label.get(bid, f"Bin_{bid}") for bid in original_ids]
+            
+            details.append({
+                'group_id': group_id,
+                'merged_bins': bin_labels  # Return as array of labels
+            })
         
-        return jsonify({"bin_merges": bin_merges})
+        print(f"[get_finebin_details] Returning {len(details)} merge groups for {column_name}")
+        return jsonify(details)  # Return array directly
     except Exception as e:
         print(f"[get_finebin_details] ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify([])  # Return empty array on error
 
 # ----------- Debug Binning -----------
 @app.route('/api/debug-binning/<string:variable>', methods=['GET'])
