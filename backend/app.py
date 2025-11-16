@@ -22,11 +22,14 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
+from decimal import Decimal
+from typing import Optional, Dict, Any
 # Import ONLY new database layer functions - NO MORE db_old imports!
 from db import (
     get_db_connection, init_db,
     # Dataset operations
-    create_dataset, get_dataset, get_all_datasets, get_latest_dataset, update_dataset, delete_dataset,
+    create_dataset, get_dataset, get_all_datasets, get_all_datasets_with_features,
+    get_latest_dataset, update_dataset, delete_dataset,
     # Feature operations
     create_feature, create_features_batch, get_feature, get_features_by_dataset, 
     get_feature_by_name, update_feature, update_features_selection,
@@ -40,7 +43,8 @@ from db import (
     # Binning totals operations
     create_binning_totals, get_binning_totals, get_all_binning_totals_by_dataset,
     # Helper functions
-    get_complete_binning_results, get_dataset_with_all_results, delete_all_binning_for_feature
+    get_complete_binning_results, get_dataset_with_all_results,
+    delete_all_binning_for_feature
 )
 import traceback
 import logging
@@ -59,207 +63,6 @@ logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173"])
-
-# =====================================================================
-# DATA FORMATTING FUNCTIONS - Convert database records to frontend format
-# =====================================================================
-
-def format_dataset_to_record(dataset_dict):
-    """
-    Convert a dataset dictionary from the database to the format expected by the frontend.
-    """
-    print(f"[format_dataset_to_record] Converting dataset {dataset_dict.get('id')} for frontend")
-    features = get_features_by_dataset(dataset_dict['id'])
-    print(f"[format_dataset_to_record] Found {len(features)} features")
-    
-    discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
-    continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
-    selected_cols = [f['name'] for f in features if f.get('selected') is True]
-    
-    # Build univariate_results from binning_steps (coarse binning)
-    univariate_results = {}
-    for feature in features:
-        coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
-        if coarse_step:
-            bins = get_bins_by_step(coarse_step['id'])
-            univariate_results[feature['name']] = {
-                'type': feature['type'],
-                'stats': [format_bin_to_dict(b) for b in bins]
-            }
-    
-    # Build finebin_results from binning_steps (fine binning)
-    finebin_results = {}
-    for feature in features:
-        fine_step = get_binning_step_by_type(feature['id'], 'fine')
-        if fine_step:
-            bins = get_bins_by_step(fine_step['id'])
-            finebin_results[feature['name']] = [format_bin_to_dict(b) for b in bins]
-    
-    # Build woe_iv_results from binning_steps (IV values)
-    woe_iv_results = {}
-    for feature in features:
-        # Use fine binning if available, otherwise coarse
-        fine_step = get_binning_step_by_type(feature['id'], 'fine')
-        step = fine_step if fine_step else get_binning_step_by_type(feature['id'], 'coarse')
-        if step and step.get('iv_value') is not None:
-            bins = get_bins_by_step(step['id'])
-            woe_iv_results[feature['name']] = {
-                'iv': float(step['iv_value']),
-                'stats': [format_bin_to_woe_dict(b) for b in bins]
-            }
-    
-    # Return structured objects/lists (do NOT stringify) - frontend expects structured data
-    return {
-        'id': dataset_dict['id'],
-        'dataset_path': dataset_dict.get('file_path', ''),
-        'discrete_columns': discrete_cols,
-        'continuous_columns': continuous_cols,
-        'selected_columns': selected_cols,
-        'dashboard_selected_columns': selected_cols,
-        'target_variable': dataset_dict.get('target_variable', ''),
-        'created_at': str(dataset_dict.get('created_at', '')),
-        'univariate_results': univariate_results,
-        'finebin_results': finebin_results,
-        'crosstab_results': [],
-        'woe_iv_results': woe_iv_results
-    }
-
-
-def format_bin_to_dict(bin_record):
-    """Convert a bin database record to dictionary format expected by frontend."""
-    import math
-    
-    def safe_float(value):
-        """Safely convert to float, handling None and NaN values."""
-        if value is None:
-            return None
-        try:
-            f_val = float(value)
-            if math.isnan(f_val) or math.isinf(f_val):
-                return None
-            return f_val
-        except (ValueError, TypeError):
-            return None
-    
-    result = {
-        'Bin': bin_record.get('bin_label', ''),
-        'Good': int(bin_record.get('good_count', 0)),
-        'Bad': int(bin_record.get('bad_count', 0)),
-        'Total': int(bin_record.get('total_count', 0))
-    }
-    
-    # Add Min/Max for continuous, Range for discrete (only if not None or NaN)
-    min_val = safe_float(bin_record.get('min_value'))
-    if min_val is not None:
-        result['Min'] = min_val
-    
-    max_val = safe_float(bin_record.get('max_value'))
-    if max_val is not None:
-        result['Max'] = max_val
-    
-    if bin_record.get('range_text'):
-        result['Range'] = bin_record['range_text']
-    
-    return result
-
-
-def format_bin_to_woe_dict(bin_record):
-    """Convert a bin database record to WOE/IV format."""
-    import math
-    
-    def safe_float(value, default=0):
-        """Safely convert to float, handling None and NaN values."""
-        if value is None:
-            return default
-        try:
-            f_val = float(value)
-            if math.isnan(f_val) or math.isinf(f_val):
-                return default
-            return f_val
-        except (ValueError, TypeError):
-            return default
-    
-    return {
-        'Bin': bin_record.get('bin_label', ''),
-        'Good': int(bin_record.get('good_count', 0)),
-        'Bad': int(bin_record.get('bad_count', 0)),
-        'Total': int(bin_record.get('total_count', 0)),
-        'Dist_Good_%': safe_float(bin_record.get('dist_good'), 0),
-        'Dist_Bad_%': safe_float(bin_record.get('dist_bad'), 0),
-        'WOE': safe_float(bin_record.get('woe'), 0),
-        'IV': safe_float(bin_record.get('iv'), 0),
-        'Range': bin_record.get('range_text', bin_record.get('bin_label', ''))
-    }
-
-
-def format_db_bins_to_stats_format(bins):
-    """
-    Convert database bin records to the format expected by univariate analysis frontend.
-    Maps database column names (good_count, bad_count, etc.) to frontend names (Good, Bad, etc.).
-    """
-    import math
-    
-    def safe_float(value, default=0, decimal_places=None):
-        """Safely convert to float, handling None and NaN values."""
-        if value is None:
-            return None
-        try:
-            f_val = float(value)
-            if math.isnan(f_val) or math.isinf(f_val):
-                return None
-            if decimal_places is not None:
-                return round(f_val, decimal_places)
-            return f_val
-        except (ValueError, TypeError):
-            return default
-    
-    formatted_bins = []
-    for bin_rec in bins:
-        formatted = {
-            'Bin': bin_rec.get('bin_label', ''),
-            'Good': int(bin_rec.get('good_count', 0)),
-            'Bad': int(bin_rec.get('bad_count', 0)),
-            'Total': int(bin_rec.get('total_count', 0)),
-            'Bad Rate': safe_float(bin_rec.get('bad_rate'), 0, 4),
-            'Freq%': safe_float(bin_rec.get('freq_percent'), 0, 4),
-        }
-        
-        # Add Min/Max for continuous variables (only if not None or NaN)
-        min_val = safe_float(bin_rec.get('min_value'))
-        if min_val is not None:
-            formatted['Min'] = min_val
-        
-        max_val = safe_float(bin_rec.get('max_value'))
-        if max_val is not None:
-            formatted['Max'] = max_val
-        
-        # Add Range for discrete variables
-        if bin_rec.get('range_text'):
-            formatted['Range'] = bin_rec.get('range_text')
-        
-        # Add WOE/IV if available (only if not None or NaN)
-        woe_val = safe_float(bin_rec.get('woe'), decimal_places=1)
-        if woe_val is not None:
-            formatted['WOE'] = woe_val
-        
-        iv_val = safe_float(bin_rec.get('iv'), decimal_places=4)
-        if iv_val is not None:
-            formatted['IV'] = iv_val
-        
-        # Add distribution percentages if available (only if not None or NaN)
-        dist_good = safe_float(bin_rec.get('dist_good'), decimal_places=4)
-        if dist_good is not None:
-            formatted['Dist_Good_%'] = dist_good
-        
-        dist_bad = safe_float(bin_rec.get('dist_bad'), decimal_places=4)
-        if dist_bad is not None:
-            formatted['Dist_Bad_%'] = dist_bad
-        
-        formatted_bins.append(formatted)
-    
-    return formatted_bins
-
-
 def save_coarse_binning_to_db(feature_id, bins_df, var_type):
     """
     Save coarse binning results to the new normalized schema.
@@ -375,76 +178,7 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
     
     return step_id
 
-# Helper function to get the CSV path consistently
-def get_csv_path():
-    """Returns the absolute path to the dataset CSV file from the database record."""
-    # Prefer the latest dataset's stored file_path (keeps uploads organized).
-    try:
-        dataset = get_latest_dataset()
-        if dataset and dataset.get('file_path'):
-            fp = dataset.get('file_path')
-            # First try relative to backend folder
-            candidate = os.path.join(os.path.dirname(__file__), fp)
-            if os.path.exists(candidate):
-                return candidate
-            # Next try if file_path is absolute on disk
-            if fp and os.path.isabs(fp) and os.path.exists(fp):
-                return fp
-            # Next try looking in the uploads folder for the stored name
-            uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
-            maybe = os.path.join(uploads_dir, os.path.basename(fp))
-            if os.path.exists(maybe):
-                return maybe
-    except Exception:
-        # If DB isn't available yet, fall back to the legacy uploaded.csv
-        pass
-    # As a last resort, pick the most recent CSV in uploads/ if present
-    uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
-    if os.path.exists(uploads_dir):
-        files = [os.path.join(uploads_dir, f) for f in os.listdir(uploads_dir) if f.lower().endswith('.csv')]
-        if files:
-            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            return files[0]
-
-    # Nothing found — raise with helpful message so callers can return a proper error
-    raise FileNotFoundError('No dataset CSV found. Upload a CSV via /api/upload-csv first.')
-
-
 # ---------------- Database Query Helpers ----------------
-def get_record_db(record_id):
-    """
-    Get a record dict by querying the `datasets` and `features` tables.
-    """
-    try:
-        dataset = get_dataset(record_id)
-        if not dataset:
-            return None
-        features = get_features_by_dataset(dataset['id'])
-        discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
-        continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
-        selected_cols = [f['name'] for f in features if f.get('selected')]
-
-        # Build record payload from database tables
-        record = {
-            'id': dataset['id'],
-            'dataset_path': dataset.get('file_path', ''),
-            'discrete_columns': discrete_cols,
-            'continuous_columns': continuous_cols,
-            'selected_columns': selected_cols,
-            'dashboard_selected_columns': selected_cols,
-            'target_variable': dataset.get('target_variable', ''),
-            'created_at': str(dataset.get('created_at', '')),
-            # Results placeholders
-            'univariate_results': {},
-            'finebin_results': {},
-            'crosstab_results': [],
-            'woe_iv_results': {}
-        }
-        return record
-    except Exception:
-        return None
-
-
 def get_finebin_details_db(record_id, column_name):
     """
     Returns fine-bin merged groups for a given record and column.
@@ -466,40 +200,6 @@ def get_finebin_details_db(record_id, column_name):
         return rows
     except Exception:
         return []
-
-
-def upsert_single_record_db(dataset_path, discrete_columns, continuous_columns, selected_columns, dashboard_selected_columns, target_variable, univariate_results, finebin_results, crosstab_results, woe_iv_results):
-    """
-    Lightweight compatibility function to ensure code paths that expect an 'upsert_single_record_db'
-    function return a stable record id. This will try to use the latest dataset (new schema) or
-    create a minimal dataset if none exists.
-    """
-    try:
-        ds = get_latest_dataset()
-        if ds:
-            return ds['id']
-        # Create a minimal dataset record - extract clean name from path
-        if dataset_path:
-            name = os.path.basename(dataset_path)
-            if name.endswith('.csv'):
-                name = name[:-4]
-            # Remove timestamp patterns
-            import re
-            name = re.sub(r'_\d{8}_\d{6}$', '', name)
-        else:
-            name = 'Dataset'
-        
-        dataset_id = create_dataset(
-            name=name, 
-            file_path=dataset_path or '', 
-            total_features=0, 
-            discrete_features=0, 
-            continuous_features=0, 
-            target_variable=target_variable or ''
-        )
-        return dataset_id
-    except Exception:
-        return None
 
 
 def save_finebin_details_db(record_id, column_name, bin_merges):
@@ -603,12 +303,91 @@ def save_finebin_details_db(record_id, column_name, bin_merges):
         return False
 
 
+# Helper utilities for working with dataset CSV files
+def _normalize_dataset_id(value):
+    """Return an integer dataset id when possible, otherwise None."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_dataset_file_path(file_path: Optional[str]) -> Optional[str]:
+    """Resolve relative/absolute dataset paths and ensure the file exists."""
+    if not file_path:
+        return None
+    if os.path.isabs(file_path) and os.path.exists(file_path):
+        return file_path
+    base_dir = os.path.dirname(__file__)
+    candidate = os.path.join(base_dir, file_path)
+    if os.path.exists(candidate):
+        return candidate
+    uploads_dir = os.path.join(base_dir, 'uploads')
+    fallback = os.path.join(uploads_dir, os.path.basename(file_path))
+    if os.path.exists(fallback):
+        return fallback
+    return None
+
+
+def _row_to_native_types(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert Decimal/NumPy types in DB rows to JSON-serializable primitives."""
+    normalized = {}
+    for key, value in row.items():
+        if isinstance(value, Decimal):
+            normalized[key] = float(value)
+        elif hasattr(value, 'item'):
+            try:
+                normalized[key] = value.item()
+            except Exception:
+                normalized[key] = value
+        else:
+            normalized[key] = value
+    return normalized
+
+
+def get_csv_path(dataset_id: Optional[int] = None):
+    """Returns the absolute path to the dataset CSV file."""
+    dataset = None
+    normalized_id = _normalize_dataset_id(dataset_id)
+    if normalized_id:
+        dataset = get_dataset(normalized_id)
+        if dataset:
+            resolved = _resolve_dataset_file_path(dataset.get('file_path'))
+            if resolved:
+                return resolved
+    
+    latest = get_latest_dataset()
+    if latest:
+        resolved = _resolve_dataset_file_path(latest.get('file_path'))
+        if resolved:
+            return resolved
+    
+    uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
+    if os.path.exists(uploads_dir):
+        files = [
+            os.path.join(uploads_dir, f)
+            for f in os.listdir(uploads_dir)
+            if f.lower().endswith('.csv')
+        ]
+        if files:
+            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            return files[0]
+
+    raise FileNotFoundError('No dataset CSV found. Upload a CSV via /api/upload-csv first.')
+
+
 # Helper function to safely save CSV with retry logic
-def safe_save_csv(df, max_retries=3):
+def safe_save_csv(df, dataset_id: Optional[int] = None, max_retries=3):
     """
     Safely saves DataFrame to dataset CSV file with retry logic for Windows permission issues.
     """
-    csv_path = get_csv_path()
+    csv_path = get_csv_path(dataset_id)
     import time
     for attempt in range(max_retries):
         try:
@@ -629,7 +408,8 @@ def get_uploaded_csv_columns():
     Returns the column headers from the uploaded.csv file.
     """
     try:
-        csv_path = get_csv_path()
+        dataset_id = request.args.get('dataset_id') or request.args.get('record_id')
+        csv_path = get_csv_path(dataset_id)
     except FileNotFoundError as fe:
         return jsonify({"error": str(fe)}), 400
     try:
@@ -766,8 +546,15 @@ def target_distribution():
     Computes and returns the value counts for a specified target column.
     """
     try:
+        data = request.get_json(silent=True) or {}
+        dataset_id = (
+            data.get('record_id')
+            or data.get('dataset_id')
+            or data.get('recordId')
+            or data.get('datasetId')
+        )
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(dataset_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         try:
@@ -776,7 +563,6 @@ def target_distribution():
             return jsonify({"error": str(fe)}), 400
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-        data = request.get_json()
         col = data.get('column')
         if not col or col not in df.columns:
             return jsonify({"error": f"Column '{col}' not found in dataset"}), 400
@@ -1161,8 +947,14 @@ def fine_bin_api():
             return jsonify({"error": "Missing required fields"}), 400
         
         # Use configured CSV path (prefers dataset file_path when available)
+        dataset_id = (
+            req.get('recordId')
+            or req.get('record_id')
+            or req.get('dataset_id')
+            or req.get('datasetId')
+        )
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(dataset_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         try:
@@ -1350,9 +1142,15 @@ def auto_monotonic_binning_api():
         if not var or not target or not var_type:
             return jsonify({"error": "Missing required fields: variable, target, type"}), 400
         
+        dataset_id = (
+            record_id
+            or req.get('dataset_id')
+            or req.get('recordId')
+            or req.get('datasetId')
+        )
         # Load data
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(dataset_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         try:
@@ -1577,7 +1375,7 @@ def cross_tab_api():
             return jsonify({"error": "Missing required fields: variables or target"}), 400
         
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(record_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         try:
@@ -1626,7 +1424,6 @@ def cross_tab_api():
             }
         
         # Save cross-tab results to PostgreSQL (if needed)
-        # Example: upsert_single_record_db(...)
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1650,7 +1447,7 @@ def univariate_analysis():
             return jsonify({"error": "Missing required field: target"}), 400
         
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(record_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         
@@ -1691,8 +1488,7 @@ def univariate_analysis():
                                 # Data exists in database - retrieve it
                                 bins = get_bins_by_step(coarse_step['id'])
                                 if bins:
-                                    # Convert database bins to frontend-expected format
-                                    stats_dict = format_db_bins_to_stats_format(bins)
+                                    stats_dict = [_row_to_native_types(dict(row)) for row in bins]
                                     from_db = True
                                     print(f"[univariate_analysis] ✓ Retrieved discrete from DB: {col} ({len(bins)} bins)")
                     
@@ -1706,10 +1502,12 @@ def univariate_analysis():
                             dataset_id = record_id
                             feature = get_feature_by_name(dataset_id, col)
                             if feature:
-                                save_coarse_binning_to_db(feature['id'], stats, 'discrete')
+                                step_id = save_coarse_binning_to_db(feature['id'], stats, 'discrete')
                                 print(f"[univariate_analysis] 💾 Saved discrete to DB: {col}")
-                        
-                        stats_dict = stats.to_dict(orient='records')
+                                bins = get_bins_by_step(step_id)
+                                stats_dict = [_row_to_native_types(dict(row)) for row in bins]
+                        if stats_dict is None:
+                            stats_dict = stats.to_dict(orient='records')
                     
                     results[col] = {
                         'type': 'discrete',
@@ -1739,8 +1537,7 @@ def univariate_analysis():
                                 # Data exists in database - retrieve it
                                 bins = get_bins_by_step(coarse_step['id'])
                                 if bins:
-                                    # Convert database bins to frontend-expected format
-                                    stats_dict = format_db_bins_to_stats_format(bins)
+                                    stats_dict = [_row_to_native_types(dict(row)) for row in bins]
                                     from_db = True
                                     print(f"[univariate_analysis] ✓ Retrieved continuous from DB: {col} ({len(bins)} bins)")
                     
@@ -1754,10 +1551,12 @@ def univariate_analysis():
                             dataset_id = record_id
                             feature = get_feature_by_name(dataset_id, col)
                             if feature:
-                                save_coarse_binning_to_db(feature['id'], stats, 'continuous')
+                                step_id = save_coarse_binning_to_db(feature['id'], stats, 'continuous')
                                 print(f"[univariate_analysis] 💾 Saved continuous to DB: {col}")
-                        
-                        stats_dict = stats.to_dict(orient='records')
+                                bins = get_bins_by_step(step_id)
+                                stats_dict = [_row_to_native_types(dict(row)) for row in bins]
+                        if stats_dict is None:
+                            stats_dict = stats.to_dict(orient='records')
                     
                     results[col] = {
                         'type': 'continuous',
@@ -1804,7 +1603,7 @@ def reset_bins_api():
         
         # Load data and perform coarse binning
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(record_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         try:
@@ -1859,8 +1658,14 @@ def get_csv_samples():
         payload = request.get_json() or {}
         columns = payload.get('columns', [])
         sample_size = payload.get('sample_size', 20)
+        dataset_id = (
+            payload.get('record_id')
+            or payload.get('dataset_id')
+            or payload.get('recordId')
+            or payload.get('datasetId')
+        )
         
-        csv_path = get_csv_path()
+        csv_path = get_csv_path(dataset_id)
         if not os.path.exists(csv_path):
             return jsonify({"error": "No CSV file uploaded"}), 400
             
@@ -2512,7 +2317,7 @@ def woe_iv_api():
             return jsonify({"error": "Missing required fields: variables or target"}), 400
         
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(record_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         
@@ -2550,35 +2355,8 @@ def woe_iv_api():
 
         results = {}
 
-        # Load saved coarse bins if record_id provided (record now returns structured objects)
-        existing_binned_columns = {}
-        if record_id:
-            try:
-                record_data = get_record_db(record_id)
-                if record_data and record_data.get('univariate_results'):
-                    univariate_results = record_data['univariate_results']
-                    for var in variables:
-                        if var in univariate_results:
-                            var_data = univariate_results[var]
-                            saved_type = var_data.get('type', None)
-                            # Use fresh data copy for each variable
-                            temp_df = df.copy()
-                            if saved_type == 'discrete':
-                                _, temp_df[f"{var}_binned"], _ = coarse_bin_discrete(temp_df, var, target)
-                            else:
-                                _, temp_df[f"{var}_binned"] = coarse_bin_continuous(temp_df, var, target)
-                            # Copy only the binned column back to main dataframe
-                            df[f"{var}_binned"] = temp_df[f"{var}_binned"]
-                            existing_binned_columns[var] = True
-                            print(f"WOE/IV DEBUG: Loaded saved bins for {var}, type: {saved_type}")
-            except Exception as e:
-                print(f"WOE/IV DEBUG: Could not load saved univariate results: {e}")
-
         # Create coarse bins for variables that are new
         for var in variables:
-            if var in existing_binned_columns:
-                continue
-                
             var_series = df[var]
             is_likely_id = any(k in var.lower() for k in ['id', 'key', 'code', 'no', 'num'])
             unique_cnt = var_series.nunique(dropna=True)
@@ -3059,25 +2837,23 @@ def get_records():
     """
     print("\\n[API] /api/records (GET) called")
     try:
-        datasets = get_all_datasets()
-        print(f"[get_records] Found {len(datasets)} datasets")
+        datasets = get_all_datasets_with_features()
+        print(f"[get_records] Found {len(datasets)} datasets (batched fetch)")
         
-        # Return datasets directly without conversion
         result = []
         for dataset in datasets:
-            features = get_features_by_dataset(dataset['id'])
-            
+            features = dataset.get('features', [])
             discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
             continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
-            selected_cols = [f['name'] for f in features if f.get('selected') is True]
+            selected_cols = [f['name'] for f in features if f.get('selected')]
             
             result.append({
                 'id': dataset['id'],
-                'name': dataset.get('name', ''),  # Add dataset name
+                'name': dataset.get('name', ''),
                 'dataset_path': dataset.get('file_path', ''),
-                'discrete_columns': discrete_cols,  # Array instead of comma-separated string
-                'continuous_columns': continuous_cols,  # Array instead of comma-separated string
-                'selected_columns': selected_cols,  # Array instead of comma-separated string
+                'discrete_columns': discrete_cols,
+                'continuous_columns': continuous_cols,
+                'selected_columns': selected_cols,
                 'target_variable': dataset.get('target_variable', ''),
                 'created_at': str(dataset.get('created_at', '')),
                 'total_features': dataset.get('total_features', 0),
@@ -3125,62 +2901,50 @@ def get_record(record_id):
     """
     try:
         print(f"\n[get_record] Loading record {record_id}")
-        dataset = get_dataset(record_id)
-        if not dataset:
+        dataset_context = get_dataset_with_all_results(record_id)
+        if not dataset_context:
             print(f"[get_record] ❌ Dataset {record_id} not found")
             return jsonify({"error": "Record not found"}), 404
         
-        print(f"[get_record] ✅ Found dataset: {dataset.get('name', 'unnamed')}")
-        features = get_features_by_dataset(dataset['id'])
-        print(f"[get_record] Found {len(features)} features")
+        dataset = dataset_context['dataset']
+        features = dataset_context.get('features', [])
+        print(f"[get_record] ✅ Found dataset: {dataset.get('name', 'unnamed')} with {len(features)} features (batched)")
         
         discrete_cols = [f['name'] for f in features if f.get('type') == 'discrete']
         continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
-        selected_cols = [f['name'] for f in features if f.get('selected') is True]
+        selected_cols = [f['name'] for f in features if f.get('selected')]
         
         print(f"[get_record] Discrete: {len(discrete_cols)}, Continuous: {len(continuous_cols)}, Selected: {len(selected_cols)}")
         
-        # Build binning results for each feature
         binning_data = {}
         features_with_data = 0
         for feature in features:
-            feature_binning = {
-                'coarse': None,
-                'fine': None,
-                'woe_iv': None
-            }
+            feature_binning = {'coarse': None, 'fine': None, 'woe_iv': None}
+            binning = feature.get('binning', {})
+            coarse = binning.get('coarse')
+            fine = binning.get('fine')
             
-            # Get coarse binning
-            coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
-            if coarse_step:
-                coarse_bins = get_bins_by_step(coarse_step['id'])
+            if coarse:
                 feature_binning['coarse'] = {
-                    'type': feature['type'],
-                    'bins': coarse_bins
+                    'type': feature.get('type'),
+                    'bins': coarse.get('bins', [])
                 }
-            
-            # Get fine binning
-            fine_step = get_binning_step_by_type(feature['id'], 'fine')
-            if fine_step:
-                fine_bins = get_bins_by_step(fine_step['id'])
-                merged_bins = get_merged_bins_by_step(fine_step['id'])
+            if fine:
                 feature_binning['fine'] = {
-                    'bins': fine_bins,
-                    'merged_bins': merged_bins,
-                    'iv': float(fine_step.get('iv_value', 0)) if fine_step.get('iv_value') else None
+                    'bins': fine.get('bins', []),
+                    'merged_bins': fine.get('merged_bins', []),
+                    'iv': fine.get('iv')
                 }
             
-            # Get WOE/IV (use fine if available, else coarse)
-            woe_step = fine_step if fine_step else coarse_step
-            if woe_step and woe_step.get('iv_value') is not None:
-                woe_bins = get_bins_by_step(woe_step['id'])
+            woe_source = fine if fine else coarse
+            step_meta = (woe_source or {}).get('step')
+            if step_meta and step_meta.get('iv_value') is not None:
                 feature_binning['woe_iv'] = {
-                    'iv': float(woe_step['iv_value']),
-                    'bins': woe_bins
+                    'iv': float(step_meta['iv_value']),
+                    'bins': (woe_source or {}).get('bins', [])
                 }
             
-            # Track features with data
-            if coarse_step or fine_step or (woe_step and woe_step.get('iv_value') is not None):
+            if coarse or fine:
                 features_with_data += 1
             
             binning_data[feature['name']] = feature_binning
@@ -3213,22 +2977,11 @@ def load_record_dataset(record_id):
     Loads the dataset for a given record and returns it as JSON.
     """
     try:
-        # Get dataset path from database
-        dataset_path = None
-        try:
-            record = get_record_db(record_id)
-            if record:
-                dataset_path = record.get('dataset_path')
-        except Exception as e:
-            print(f"[load_record_dataset] Failed to query record: {e}")
-
-        # Try getting path from datasets table
-        if not dataset_path:
-            dataset = get_dataset(record_id)
-            if not dataset:
-                return jsonify({"error": "Record/Dataset not found"}), 404
-            dataset_path = dataset.get('file_path')
-
+        dataset = get_dataset(record_id)
+        if not dataset:
+            return jsonify({"error": "Record/Dataset not found"}), 404
+        
+        dataset_path = dataset.get('file_path')
         if not dataset_path:
             return jsonify({"error": "No dataset_path available for this id"}), 404
 
@@ -3274,13 +3027,31 @@ def logistic_regression_analysis():
         selected_variables = data.get('selected_variables', [])
         target = data.get('target')
         woe_transformed_data = data.get('woe_transformed_data', {})
+        dataset_id = (
+            data.get('record_id')
+            or data.get('dataset_id')
+            or data.get('recordId')
+            or data.get('datasetId')
+        )
+        dataset_id = (
+            data.get('record_id')
+            or data.get('dataset_id')
+            or data.get('recordId')
+            or data.get('datasetId')
+        )
+        dataset_id = (
+            data.get('record_id')
+            or data.get('dataset_id')
+            or data.get('recordId')
+            or data.get('datasetId')
+        )
 
         if not selected_variables or not target:
             return jsonify({"error": "Missing selected_variables or target"}), 400
 
         # Load CSV into df at the very start
         try:
-            df = pd.read_csv(get_csv_path())
+            df = pd.read_csv(get_csv_path(dataset_id))
         except Exception as e:
             return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
 
@@ -3705,7 +3476,7 @@ def random_forest_analysis():
 
         # Load CSV into df
         try:
-            df = pd.read_csv(get_csv_path())
+            df = pd.read_csv(get_csv_path(dataset_id))
         except Exception as e:
             return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
 
@@ -3921,7 +3692,7 @@ def xgboost_analysis():
 
         # Load CSV into df
         try:
-            df = pd.read_csv(get_csv_path())
+            df = pd.read_csv(get_csv_path(dataset_id))
         except Exception as e:
             return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
 
@@ -4359,8 +4130,9 @@ def debug_binning(variable):
     Debug endpoint to see what's happening with binning for a specific variable.
     """
     try:
+        dataset_id = request.args.get('record_id') or request.args.get('dataset_id')
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(dataset_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         try:
@@ -4413,6 +4185,18 @@ def generate_scorecard():
         woe_transformed_data = data.get('woe_transformed_data', {})
         model_results = data.get('model_results', {})  # Accept pre-computed model results
         model_type = data.get('model_type', 'logistic')  # Accept model type
+        dataset_id = (
+            data.get('record_id')
+            or data.get('dataset_id')
+            or data.get('recordId')
+            or data.get('datasetId')
+        )
+        dataset_id = (
+            data.get('record_id')
+            or data.get('dataset_id')
+            or data.get('recordId')
+            or data.get('datasetId')
+        )
 
         # Input validation
         if not selected_variables or not target or not woe_transformed_data:
@@ -4424,7 +4208,7 @@ def generate_scorecard():
 
         # Load dataset
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(dataset_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         try:
@@ -4736,7 +4520,7 @@ def apply_scorecard():
             return jsonify({"error": "Missing required data: selected_variables, target, or woe_transformed_data"}), 400
 
         try:
-            csv_path = get_csv_path()
+            csv_path = get_csv_path(dataset_id)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         try:
