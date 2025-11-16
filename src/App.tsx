@@ -33,6 +33,9 @@ function App() {
   const [records, setRecords] = useState<AnalysisRecord[]>([]);
   const [recordsLoading, setRecordsLoading] = useState<boolean>(false);
   const [activeRecordId, setActiveRecordId] = useState<number | undefined>(undefined);
+  const [recordNames, setRecordNames] = useState<Record<number, string>>({});
+  const [editingRecordId, setEditingRecordId] = useState<number | null>(null);
+  const [editingRecordName, setEditingRecordName] = useState<string>('');
 
   // Fetch existing analysis records on mount
   useEffect(() => {
@@ -428,9 +431,46 @@ function App() {
       .then(res => {
         if (res.ok) {
           setRecords(prev => prev.filter(r => r.id !== id));
+          setRecordNames(prev => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
         }
       })
       .catch(() => {});
+  };
+
+  const handleRecordNameEdit = (id: number, currentName: string) => {
+    setEditingRecordId(id);
+    setEditingRecordName(currentName || '');
+  };
+
+  const handleRecordNameSave = (id: number) => {
+    setRecordNames(prev => ({ ...prev, [id]: editingRecordName }));
+    setEditingRecordId(null);
+    setEditingRecordName('');
+  };
+
+  const handleRecordNameCancel = () => {
+    setEditingRecordId(null);
+    setEditingRecordName('');
+  };
+
+  const getRecordName = (id: number): string => {
+    return recordNames[id] || `Record ${id}`;
+  };
+
+  // Dummy credit check history data
+  const creditCheckHistory = [
+    { id: 1, recordId: 1, checkedAt: '2024-01-15 10:30:00', score: 750, status: 'Approved' },
+    { id: 2, recordId: 1, checkedAt: '2024-01-14 14:20:00', score: 720, status: 'Approved' },
+    { id: 3, recordId: 2, checkedAt: '2024-01-13 09:15:00', score: 680, status: 'Pending' },
+  ];
+
+  // Check if score card is generated (dummy for now - always return true for records with id > 0)
+  const hasScoreCard = (recordId: number): boolean => {
+    return recordId > 0; // Dummy logic
   };
 
   return (
@@ -438,53 +478,241 @@ function App() {
       <Route
         path="/"
         element={
-          <div>
+          <div className="main-page-wrapper">
             <Navbar />
-            <div className="app-container">
-              <div className="upload-wrapper">
-                <CSVReader onCSVUploaded={handleCSVUploaded} />
+            {/* Full-width Info Section with Process Diagram */}
+            <div className="info-hero-section">
+              <h1 className="info-hero-title">Automated Credit Scoring System</h1>
+              <p className="info-hero-subtitle">
+                Build and deploy credit scoring models using advanced machine learning techniques powered by Generative AI
+              </p>
+              <p className="info-hero-description">
+                Upload your dataset, select features, perform statistical analysis, and generate scorecards for credit risk assessment.
+              </p>
+              
+              {/* Animated Process Diagram */}
+              <div className="process-diagram">
+                <div className="process-step" style={{ animationDelay: '0s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Upload Dataset</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.2s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Univariate Analysis</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.4s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="18" y1="20" x2="18" y2="10"></line>
+                      <line x1="12" y1="20" x2="12" y2="4"></line>
+                      <line x1="6" y1="20" x2="6" y2="14"></line>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Binning & WOE</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.6s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Feature Selection</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.8s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                      <path d="M2 17l10 5 10-5"></path>
+                      <path d="M2 12l10 5 10-5"></path>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">ML Training</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '1s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Model Validation</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '1.2s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                      <line x1="16" y1="13" x2="8" y2="13"></line>
+                      <line x1="16" y1="17" x2="8" y2="17"></line>
+                      <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Scorecard Generation</div>
+                </div>
+              </div>
+              <div className="gen-ai-badge">
+                <span className="gen-ai-icon">⚡</span>
+                <span>Powered by Generative AI</span>
+              </div>
+            </div>
+
+            <div className="main-page-container">
+              {/* Left Column: Upload and Credit History */}
+              <div className="main-page-left">
+                {/* Upload Section */}
+                <div className="upload-section">
+                  <CSVReader onCSVUploaded={handleCSVUploaded} />
+                </div>
+
+                {/* Credit Check History */}
+                <div className="records-section">
+                  <h2 className="records-section-title">
+                    Credit Check History
+                  </h2>
+                  <div className="history-list">
+                    {creditCheckHistory.map(item => (
+                      <div key={item.id} className="history-card">
+                        <div className="history-card-header">
+                          <span className="history-record-id">Record #{item.recordId}</span>
+                          <span className={`history-status history-status-${item.status.toLowerCase()}`}>
+                            {item.status}
+                          </span>
+                        </div>
+                        <div className="history-card-body">
+                          <div className="history-info-item">
+                            <span className="history-info-label">Score:</span>
+                            <span className="history-info-value history-score">{item.score}</span>
+                          </div>
+                          <div className="history-info-item">
+                            <span className="history-info-label">Checked:</span>
+                            <span className="history-info-value">{item.checkedAt}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
 
-              {/* Records Table Section */}
-              <div style={{ width: '100%', marginTop: '40px' }}>
-                <h2 style={{ textAlign: 'center', marginBottom: '12px' }}>Records</h2>
-                {recordsLoading ? (
-                  <div className="admin-loading">Loading records...</div>
-                ) : records.length === 0 ? (
-                  <div className="admin-empty">No analyses found.</div>
-                ) : (
-                  <div className="admin-panel-container" style={{ margin: '0 auto', maxWidth: '100%' }}>
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th style={{ textAlign: 'center' }}>ID</th>
-                          <th style={{ textAlign: 'center' }}>Dataset</th>
-                          <th style={{ textAlign: 'center' }}>Selected Columns</th>
-                          <th style={{ textAlign: 'center' }}>Date</th>
-                          <th style={{ textAlign: 'center' }}>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {records.map(rec => (
-                          <tr key={rec.id}>
-                            <td style={{ textAlign: 'center' }}>{rec.id}</td>
-                            <td style={{ textAlign: 'center' }}>{rec.dataset_path}</td>
-                            <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>
-                              {rec.selected_columns.join(', ')}
-                            </td>
-                            <td style={{ textAlign: 'center' }}>{rec.created_at}</td>
-                            <td style={{ textAlign: 'center' }}>
-                              <div style={{ display: 'inline-flex', gap: '8px' }}>
-                                <button className="admin-action-btn" title="View" onClick={() => handleRecordView(rec.id)}>View</button>
-                                <button className="admin-action-btn" title="Delete" onClick={() => handleRecordDelete(rec.id)}>Delete</button>
+              {/* Right Column: Records */}
+              <div className="main-page-right">
+                {/* Developed Score Card Records */}
+                <div className="records-section">
+                  <h2 className="records-section-title">
+                    Developed Score Card
+                  </h2>
+                  {recordsLoading ? (
+                    <div className="records-loading">Loading records...</div>
+                  ) : records.length === 0 ? (
+                    <div className="records-empty">No score cards developed yet.</div>
+                  ) : (
+                    <div className="records-list">
+                      {records.map(rec => (
+                        <div key={rec.id} className="record-card">
+                          <div className="record-card-header">
+                            {editingRecordId === rec.id ? (
+                              <div className="record-name-edit">
+                                <input
+                                  type="text"
+                                  value={editingRecordName}
+                                  onChange={(e) => setEditingRecordName(e.target.value)}
+                                  className="record-name-input"
+                                  placeholder="Enter record name"
+                                  autoFocus
+                                />
+                                <button
+                                  className="record-name-save-btn"
+                                  onClick={() => handleRecordNameSave(rec.id)}
+                                  title="Save"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  className="record-name-cancel-btn"
+                                  onClick={handleRecordNameCancel}
+                                  title="Cancel"
+                                >
+                                  Cancel
+                                </button>
                               </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                            ) : (
+                              <div className="record-name-display">
+                                <span className="record-name">{getRecordName(rec.id)}</span>
+                                <button
+                                  className="record-name-edit-btn"
+                                  onClick={() => handleRecordNameEdit(rec.id, recordNames[rec.id] || '')}
+                                  title="Edit name"
+                                >
+                                  Edit
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          <div className="record-card-body">
+                            <div className="record-info-item">
+                              <span className="record-info-label">ID:</span>
+                              <span className="record-info-value">{rec.id}</span>
+                            </div>
+                            <div className="record-info-item">
+                              <span className="record-info-label">Dataset:</span>
+                              <span className="record-info-value" title={rec.dataset_path}>
+                                {rec.dataset_path.split('/').pop() || rec.dataset_path}
+                              </span>
+                            </div>
+                            <div className="record-info-item">
+                              <span className="record-info-label">Columns:</span>
+                              <span className="record-info-value">{rec.selected_columns.length}</span>
+                            </div>
+                            <div className="record-info-item">
+                              <span className="record-info-label">Created:</span>
+                              <span className="record-info-value">{new Date(rec.created_at).toLocaleDateString()}</span>
+                            </div>
+                          </div>
+                          <div className="record-card-actions">
+                            <button
+                              className="record-action-btn record-action-view"
+                              onClick={() => handleRecordView(rec.id)}
+                            >
+                              View
+                            </button>
+                            <button
+                              className="record-action-btn record-action-check"
+                              onClick={() => {
+                                // Dummy handler - will be implemented later
+                                alert(`Checking credit score for ${getRecordName(rec.id)}`);
+                              }}
+                              disabled={!hasScoreCard(rec.id)}
+                              title={hasScoreCard(rec.id) ? 'Check credit score' : 'Score card not generated yet'}
+                            >
+                              Check credit score
+                            </button>
+                            <button
+                              className="record-action-btn record-action-delete"
+                              onClick={() => handleRecordDelete(rec.id)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

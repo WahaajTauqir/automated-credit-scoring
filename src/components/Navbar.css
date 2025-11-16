@@ -1,8 +1,27 @@
+:root {
+  --bg-primary: #010409;
+  --bg-secondary: #0a0e14;
+  --bg-tertiary: #12171d;
+  --bg-quaternary: #1c2528;
+  --fg-primary: #f6f8fa;
+  --fg-secondary: #d1d5db;
+  --fg-tertiary: #8b949e;
+  --fg-accent-green: #2ea043;
+  --border-primary: #30363d;
+  --spacing-xs: clamp(0.25rem, 0.5vw, 0.5rem);
+  --spacing-sm: clamp(0.5rem, 1vw, 1rem);
+  --spacing-md: clamp(1rem, 2vw, 2rem);
+  --radius-small: 6px;
+  --radius-medium: 8px;
+  --transition-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 0.15s;
+}
+
 .navbar {
   width: 100%;
-  background-color: #0d1117;
+  background-color: var(--bg-secondary);
   padding: 12px 24px;
-  border-bottom: 1px solid #30363d;
+  border-bottom: 1px solid var(--border-primary);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -12,19 +31,51 @@
 }
 
 .navbar-brand {
-  color: #f0f6fc;
+  color: var(--fg-primary);
   font-weight: 600;
   font-size: 18px;
 }
 
-.navbar-links a {
-  color: #c9d1d9;
-  text-decoration: none;
-  margin-left: 16px;
-  font-size: 14px;
-  transition: color 0.2s;
+.navbar-links {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
 }
 
-.navbar-links a:hover {
-  color: #58a6ff;
+.navbar-icon-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-medium);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--duration-fast) var(--transition-smooth);
+}
+
+.navbar-icon-btn:hover {
+  background: var(--bg-quaternary);
+  border-color: var(--fg-accent-green);
+  color: var(--fg-primary);
+  transform: translateY(-1px);
+}
+
+.navbar-login-btn {
+  background: var(--fg-accent-green);
+  border: none;
+  border-radius: var(--radius-medium);
+  color: var(--fg-primary);
+  cursor: pointer;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all var(--duration-fast) var(--transition-smooth);
+}
+
+.navbar-login-btn:hover {
+  background: #26a641;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(46, 160, 67, 0.3);
 }

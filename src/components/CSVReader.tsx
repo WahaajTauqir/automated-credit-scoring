@@ -43,26 +43,35 @@ const CSVReader = ({ onCSVUploaded }: CSVReaderProps) => {
 
   return (
     <div className="csv-reader-container">
-      <div className="file-upload-container">
-        <p>Select a CSV file to upload:</p>
-        <label className="upload-button" htmlFor="csv-upload">Choose File</label>
-        <input
-          id="csv-upload"
-          type="file"
-          accept=".csv"
-          onChange={(e) => {
-            setError(null);
-            if (e.target.files?.length) {
-              const file = e.target.files[0];
-              processCSV(file);
-            }
-          }}
-          style={{ display: 'none' }}
-        />
-        {fileName && <p className="file-name">{fileName}</p>}
-        {isLoading && <p className="loading-indicator">Processing...</p>}
-        {error && <p className="error-message">{error}</p>}
-      </div>
+      <label className="csv-upload-button" htmlFor="csv-upload">
+        <div className="upload-icon-wrapper">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+        </div>
+        <div className="upload-text">
+          <span className="upload-text-main">Upload CSV File</span>
+          <span className="upload-text-sub">Click or drag and drop your file here</span>
+        </div>
+      </label>
+      <input
+        id="csv-upload"
+        type="file"
+        accept=".csv"
+        onChange={(e) => {
+          setError(null);
+          if (e.target.files?.length) {
+            const file = e.target.files[0];
+            processCSV(file);
+          }
+        }}
+        style={{ display: 'none' }}
+      />
+      {fileName && <div className="file-name-display">{fileName}</div>}
+      {isLoading && <div className="loading-indicator">Processing...</div>}
+      {error && <div className="error-message">{error}</div>}
     </div>
   );
 };

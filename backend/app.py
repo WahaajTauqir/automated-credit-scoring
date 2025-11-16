@@ -1322,7 +1322,12 @@ def auto_monotonic_binning_api():
         target = req.get('target')
         var_type = req.get('type')
         direction = req.get('direction')  # 'increasing', 'decreasing', or None
-        method = req.get('method', 'greedy')  # 'greedy' or 'exhaustive'
+        # For continuous variables, always use exhaustive algorithm
+        # For discrete variables, default to greedy (exhaustive not supported)
+        if var_type == 'continuous':
+            method = req.get('method', 'exhaustive')  # default to 'exhaustive' for continuous
+        else:
+            method = req.get('method', 'greedy')  # default to 'greedy' for discrete
         prioritize_iv = req.get('prioritize_iv', True)  # default to True
         record_id = req.get('record_id')
         
