@@ -24,6 +24,7 @@ import base64
 from io import BytesIO
 from decimal import Decimal
 from typing import Optional, Dict, Any
+
 # Import ONLY new database layer functions - NO MORE db_old imports!
 from db import (
     get_db_connection, init_db, ensure_final_selected_column, ensure_model_ready_column, sync_model_ready_to_final_selected,
@@ -689,104 +690,204 @@ def coarse_bin_continuous(df, var, target, bins=10):
         raise ValueError(f"Coarse binning (continuous) failed for '{var}': {str(e)}")
 
 # ----------- Coarse Binning: Discrete -----------
-import pandas as pd
-
-def coarse_bin_discrete(df, var, target, bad_label=1, bad_rate_diff=0.5):
+def coarse_bin_discrete(
+    df,
+    var,
+    target,
+    bad_label=1,
+    bad_rate_diff=0.5,
+):
     """
-    Coarse binning for discrete variables based on Bad Rate similarity.
-    
-    Parameters:
-    - df : DataFrame
-    - var : str, feature/column name
-    - target : str, binary target column (0/1)
-    - bad_label : value in target that indicates 'Bad' (default=1)
-    - bad_rate_diff : float, threshold difference in bad rate to create new bin
-    
-    Returns:
-    - final_tab : DataFrame with bin stats
-    - df[f'{var}_binned'] : Series with bin assignments
-    - bin_mapping : dict mapping original categories to bins
+    Coarse binning for discrete variables.
+    1. Categories are sorted by the numeric part of their label.
+    2. Bins are created using bad-rate similarity.
+    3. Final table is ordered **by bin number** (Missing/Other last).
+
+    Returns
+    -------
+    final_tab      : pd.DataFrame  (Bin, Range, Good, Bad, Total, Freq%, Bad Rate)
+    binned_series  : pd.Series     (binned column in original order)
+    bin_mapping    : dict          (original value → bin number)
     """
-    try:
-        if var not in df.columns or df[var].isna().all():
-            raise ValueError(f"Column '{var}' is missing or contains only NaN values")
-        if target not in df.columns:
-            raise ValueError(f"Target column '{target}' not found")
+    # --------------------------------------------------------------
+    # 0. Input validation
+    # --------------------------------------------------------------
+    if var not in df.columns or df[var].isna().all():
+        raise ValueError(f"Column '{var}' missing or all NaN")
+    if target not in df.columns:
+        raise ValueError(f"Target column '{target}' not found")
 
-        # Crosstab (auto-detect Good/Bad based on bad_label)
-        tab = pd.crosstab(df[var], df[target])
-        if bad_label not in tab.columns:
-            raise ValueError(f"Bad label '{bad_label}' not found in target column '{target}'")
+    df = df.copy()
 
-        tab['Bad'] = tab[bad_label]
-        tab['Good'] = tab.drop(columns=[bad_label]).sum(axis=1)
-        tab['Total'] = tab['Good'] + tab['Bad']
-        tab['Bad Rate'] = (tab['Bad'] / tab['Total']) * 100
-        tab = tab.sort_values('Bad Rate')
+    # --------------------------------------------------------------
+    # 1. Contingency table (known target only)
+    # --------------------------------------------------------------
+    df_f = df[df[target].notna()]
+    if df_f.empty:
+        raise ValueError(f"No non-null target rows for '{target}'")
 
-        # Bin mapping based on bad rate difference
-        bin_mapping = {}
-        current_bin = 1
-        prev_bad_rate = tab['Bad Rate'].iloc[0] if not tab.empty else 0
+    tab = pd.crosstab(df_f[var], df_f[target])
+    if tab.empty:
+        raise ValueError("No data after filtering")
 
-        for idx, row in tab.iterrows():
-            if abs(row['Bad Rate'] - prev_bad_rate) > bad_rate_diff:    
-                current_bin += 1
-            bin_mapping[idx] = current_bin
-            prev_bad_rate = row['Bad Rate']
+    if bad_label not in tab.columns:
+        bad_label = tab.columns[1] if tab.shape[1] >= 2 else tab.columns[0]
 
-        # Apply binning (safe conversion): map values, coerce non-mapped to -1, avoid integer cast errors
-        mapped_series = df[var].map(bin_mapping)
-        # Ensure any non-finite / NaN mappings do not cause astype(int) to fail
+    tab["Bad"] = tab[bad_label]
+    tab["Good"] = tab.drop(columns=[bad_label], errors="ignore").sum(axis=1)
+    tab["Total"] = tab["Good"] + tab["Bad"]
+    tab["Bad Rate"] = (tab["Bad"] / tab["Total"].replace(0, np.nan)) * 100
+
+    # --------------------------------------------------------------
+    # 2. SORT CATEGORIES BY NUMERIC PART OF LABEL
+    # --------------------------------------------------------------
+    def _numeric_key(val):
+        if pd.isna(val):
+            return np.inf
+        s = str(val).strip()
+
+        # direct number
         try:
-            mapped_series = pd.to_numeric(mapped_series, errors='coerce').fillna(-1)
-            df[f'{var}_binned'] = mapped_series.astype(int)
-        except Exception:
-            # Fallback: convert via string then numeric
-            mapped_series = mapped_series.astype(str).replace('nan', '-1')
-            df[f'{var}_binned'] = pd.to_numeric(mapped_series, errors='coerce').fillna(-1).astype(int)
+            return float(s)
+        except ValueError:
+            pass
 
-        # Final crosstab
-        final_tab = pd.crosstab(df[f'{var}_binned'], df[target])
-        final_tab['Bad'] = final_tab[bad_label]
-        final_tab['Good'] = final_tab.drop(columns=[bad_label]).sum(axis=1)
-        final_tab['Total'] = final_tab['Good'] + final_tab['Bad']
-        final_tab['Freq%'] = (final_tab['Total'] / final_tab['Total'].sum()) * 100
-        final_tab['Bad Rate'] = (final_tab['Bad'] / final_tab['Total']) * 100
-        final_tab = final_tab.reset_index()
+        # range start: "1-5", "10-20", "1 – 5"
+        m = re.search(r"[-–—]", s)
+        if m:
+            try:
+                return float(s[: m.start()].strip())
+            except ValueError:
+                pass
 
-        # Compact human-readable ranges
-        def compact_ranges(values):
-            values = sorted(values)
-            ranges, start, prev = [], values[0], values[0]
-            for v in values[1:]:
-                if v == prev + 1:  # consecutive
+        # any number inside
+        nums = re.findall(r"-?\d+\.?\d*", s)
+        return float(nums[0]) if nums else np.inf
+
+    sort_keys = pd.Series([_numeric_key(v) for v in tab.index], index=tab.index)
+    tab = tab.loc[sort_keys.sort_values().index]
+
+    # --------------------------------------------------------------
+    # 3. CREATE BINS (bad-rate similarity) – keep creation order
+    # --------------------------------------------------------------
+    bin_mapping = {}
+    bin_order = []          # first appearance of each bin
+    cur_bin = 1
+
+    if not tab.empty:
+        prev_rate = tab["Bad Rate"].iloc[0]
+        for idx, row in tab.iterrows():
+            rate = row["Bad Rate"]
+            if abs(rate - prev_rate) > bad_rate_diff:
+                cur_bin += 1
+            if cur_bin not in bin_order:
+                bin_order.append(cur_bin)
+            bin_mapping[idx] = cur_bin
+            prev_rate = rate
+
+    # --------------------------------------------------------------
+    # 4. APPLY MAPPING (unknown → -1)
+    # --------------------------------------------------------------
+    mapped = df[var].map(bin_mapping)
+    df[f"{var}_binned"] = pd.to_numeric(mapped, errors="coerce").fillna(-1).astype(int)
+
+    # --------------------------------------------------------------
+    # 5. FINAL STATISTICS (incl. Missing = -1)
+    # --------------------------------------------------------------
+    bad_df = (
+        df[df[target] == bad_label]
+        .groupby(f"{var}_binned")[target]
+        .count()
+        .reset_index(name="Bad")
+    )
+    good_df = (
+        df[(df[target] != bad_label) & df[target].notna()]
+        .groupby(f"{var}_binned")[target]
+        .count()
+        .reset_index(name="Good")
+    )
+    final_tab = pd.merge(good_df, bad_df, on=f"{var}_binned", how="outer").fillna(0)
+    final_tab["Good"] = final_tab["Good"].astype(int)
+    final_tab["Bad"] = final_tab["Bad"].astype(int)
+    final_tab["Total"] = final_tab["Good"] + final_tab["Bad"]
+    total_sum = final_tab["Total"].sum()
+    final_tab["Freq%"] = final_tab["Total"] / total_sum * 100 if total_sum > 0 else 0
+    final_tab["Bad Rate"] = (
+        final_tab["Bad"] / final_tab["Total"].replace(0, np.nan) * 100
+    )
+
+    # --------------------------------------------------------------
+    # 6. HUMAN-READABLE RANGES
+    # --------------------------------------------------------------
+    def _compact(vals):
+        clean = [v for v in vals if pd.notna(v) and str(v).strip() != ""]
+        if not clean:
+            return ""
+        try:                     # numeric compact intervals
+            nums = sorted(float(v) for v in clean)
+            out, start, prev = [], nums[0], nums[0]
+            for v in nums[1:]:
+                if v == prev + 1:
                     prev = v
                 else:
-                    ranges.append(f"{start}–{prev}" if start != prev else str(start))
+                    out.append(f"{int(start)}–{int(prev)}" if start != prev else str(int(start)))
                     start = prev = v
-            ranges.append(f"{start}–{prev}" if start != prev else str(start))
-            return ", ".join(ranges)
+            out.append(f"{int(start)}–{int(prev)}" if start != prev else str(int(start)))
+            return ", ".join(out)
+        except Exception:
+            # alphanumeric sort fallback
+            try:
+                return ", ".join(
+                    sorted(
+                        clean,
+                        key=lambda x: [
+                            int(t) if t.isdigit() else t.lower()
+                            for t in re.split(r"(\d+)", str(x))
+                        ],
+                    )
+                )
+            except Exception:
+                return ", ".join(sorted(map(str, clean)))
 
-        # Map original values to bins
-        bin_ranges = {}
-        for b in final_tab[f'{var}_binned']:
-            original_vals = sorted([v for v, bin_id in bin_mapping.items() if bin_id == b])
-            bin_ranges[b] = compact_ranges(original_vals)
+    bin_ranges = {
+        b: _compact([v for v, bid in bin_mapping.items() if bid == b])
+        for b in final_tab[f"{var}_binned"]
+    }
+    if -1 in final_tab[f"{var}_binned"].values:
+        bin_ranges[-1] = "Missing / Other"
 
-        final_tab['Range'] = final_tab[f'{var}_binned'].map(bin_ranges)
+    final_tab["Range"] = final_tab[f"{var}_binned"].map(bin_ranges)
 
-        # Rename column for consistency: use 'Bin' instead of variable-prefixed name
-        final_tab = final_tab.rename(columns={f'{var}_binned': 'Bin'})
+    # --------------------------------------------------------------
+    # 7. TIDY-UP & **SORT BY BIN NUMBER**
+    # --------------------------------------------------------------
+    final_tab = final_tab.rename(columns={f"{var}_binned": "Bin"})
+    final_tab = final_tab[
+        ["Bin", "Range", "Good", "Bad", "Total", "Freq%", "Bad Rate"]
+    ]
 
-        # Reorder - store only essential data (no derived metrics)
-        columns_order = ['Bin', 'Range', 'Good', 'Bad', 'Total']
-        final_tab = final_tab[columns_order]
+    # Clean integer bins
+    final_tab["Bin"] = final_tab["Bin"].apply(
+        lambda x: int(x) if isinstance(x, (int, float)) and x == int(x) else str(x)
+    )
 
-        return final_tab, df[f'{var}_binned'], bin_mapping
+    # Order: 1, 2, 3, …, -1 (Missing) last
+    ordered_bins = [b for b in bin_order if b != -1]
+    if -1 in final_tab["Bin"].values:
+        ordered_bins.append(-1)
 
-    except Exception as e:
-        raise ValueError(f"Coarse binning (discrete) failed for '{var}': {str(e)}")
+    final_tab["Bin"] = pd.Categorical(
+        final_tab["Bin"], categories=ordered_bins, ordered=True
+    )
+    final_tab = final_tab.sort_values("Bin").reset_index(drop=True)
+
+    # Friendly labels
+    label_map = {b: f"Bin {i + 1}" for i, b in enumerate(ordered_bins) if b != -1}
+    if -1 in label_map:
+        label_map[-1] = "Missing / Other"
+    final_tab["Bin"] = final_tab["Bin"].astype(str).map(label_map)
+
+    return final_tab, df[f"{var}_binned"], bin_mapping
 
 # ----------- Fine Binning: Continuous -----------
 def split_into_adjacent_groups(old_bins):
@@ -1809,6 +1910,56 @@ def ai_classify_columns():
     Classify columns as 'discrete' or 'continuous' using GitHub Models inference endpoint.
     Expects JSON: { columns: [...], sampleData: { col: [samples...] }, model: <optional model name> }
     """
+    
+    # --- Local Helper Heuristic Function ---
+    # This logic is used for large datasets and as a fallback.
+    def _classify_with_heuristics(col, samples):
+        col_name_lower = col.lower()
+        
+        # --- Heuristic Keywords ---
+        # Priority 1: Continuous Keywords (Monetary, Measurements, Proportions)
+        continuous_keywords = ['sales', 'turnover', 'margin', 'perc', 'rate', 'ratio', 'amount', 'price', 'cost', 'salary', 'income', 'revenue', 'balance', 'weight', 'height', 'length', 'width', 'depth', 'distance', 'time', 'duration', 'age', 'years']
+        # Priority 2: Discrete Keywords (IDs, Codes, Counts, Categories)
+        discrete_keywords = ['id', 'no', 'keyt','_CD', 'cd', 'form', 'relation', 'auth', 'group', 'family', 'branch', 'visit', 'invcount', 'customer', 'status', 'level', 'flag', 'type', 'code']
+
+        # 1. Check Continuous by Name (Highest Priority)
+        if any(keyword in col_name_lower for keyword in continuous_keywords):
+            return 'continuous'
+
+        # 2. Check Discrete by Name
+        if any(keyword in col_name_lower for keyword in discrete_keywords) or col_name_lower in ['bad customer']:
+            return 'discrete'
+
+        # 3. Analyze Sample Values
+        if not samples:
+            return 'discrete' # Default to discrete when no data
+
+        try:
+            is_numeric = all(isinstance(x, (int, float)) for x in samples)
+            
+            if not is_numeric:
+                return 'discrete' # Text/Categorical data
+
+            # Check for presence of non-integer/float values
+            has_float = any(isinstance(x, float) and not x.is_integer() for x in samples)
+            if has_float:
+                return 'continuous' # Presence of decimals strongly suggests measurement/continuous
+
+            # Check cardinality for numeric data (e.g., binary or few levels)
+            unique_values = len(set(samples))
+            # Use a conservative low-cardinality threshold for discrete classification
+            if unique_values <= 15: 
+                return 'discrete'
+            
+            # If numeric, all integers, high cardinality, and not caught by name:
+            # It's either a large count (discrete) or a large monetary value/ID (context-dependent).
+            # We default to continuous as LLM classification should be used for this ambiguity, 
+            # but if heuristics must decide, numeric high cardinality is often treated as continuous for modeling.
+            return 'continuous'
+        except Exception:
+            return 'discrete' # Safe default on sample analysis failure
+    # --- End Helper Function ---
+
     try:
         payload = request.get_json() or {}
         columns = payload.get('columns', [])
@@ -1823,33 +1974,41 @@ def ai_classify_columns():
         print(f"DEBUG: Using GitHub token (first 10 chars): {token[:10]}...")
         print(f"DEBUG: Processing {len(columns)} columns")
 
-        # For large datasets, use enhanced heuristics as primary method
+        # FIX 1: Replace unrunnable 'classify_with_heuristics' call with the defined local helper
         if len(columns) > 50:
             print(f"DEBUG: Large dataset detected ({len(columns)} columns), using enhanced heuristics")
             results = {}
             for col in columns:
-                results[col] = classify_with_heuristics(col, sample_data.get(col, []))
+                # Use the locally defined heuristic function
+                results[col] = _classify_with_heuristics(col, sample_data.get(col, []))
             return jsonify(results)
 
-        # Build an enhanced prompt with detailed classification criteria
-        # Use a plain-text representation for prompt (avoid embedding JSON strings)
+        # FIX 2: Build the enhanced prompt with detailed classification criteria
         prompt = (
-            "You are a data science expert that classifies dataset columns as 'discrete' or 'continuous'.\n\n"
-            "DISCRETE variables are:\n"
-            "- Categorical (text labels, categories, yes/no, male/female)\n"
-            "- Integer codes or IDs (customer_id, product_code, zip_code)\n"
-            "- Binary/boolean values (0/1, true/false)\n"
-            "- Ordinal scales with few distinct values (rating 1-5, grade A-F)\n"
-            "- Countable items with limited distinct values (number_of_children, education_level)\n\n"
-            "CONTINUOUS variables are:\n"
-            "- Measurements (age, height, weight, temperature, price)\n"
-            "- Financial amounts (salary, revenue, balance)\n"
-            "- Percentages and ratios (interest_rate, conversion_rate)\n"
-            "- Time durations (days, hours, response_time)\n"
-            "- Scientific measurements (pressure, voltage, distance)\n\n"
-            "Analyze the column names and sample values. Return ONLY a valid JSON object.\n"
-            f"Columns to classify: {str(columns)}\n"
-            f"Sample data: {str(sample_data)}\n\n"
+            "You are an *expert Data Scientist* and your only task is to strictly classify the provided dataset columns "
+            "as either 'discrete' or 'continuous' based on their name and sample values.\n\n"
+            
+            "--- DEFINITIONS AND CRITERIA ---\n"
+            
+            "*DISCRETE* variables are counts, codes, identifiers, or categories. They take on a finite or countably infinite number of values.\n"
+            "1. *Identifiers/Codes:* Columns containing ID, _NO, _KEYT, _CD, _FORM, _RELATION, _GROUP, _FAMILY, _BRANCH, and binary flags (Bad Customer).\n"
+            "2. *Counts:* Whole numbers representing countable items or events (e.g., VISIT, INVCOUNT).\n"
+            "3. *Categories:* Text, Boolean, or integer values representing a limited number of categories.\n\n"
+            
+            "*CONTINUOUS* variables are measurements, amounts, or proportions. They can theoretically take any value within a range.\n"
+            "1. *Monetary/Financial:* Amounts, revenue, sales, profit, or loss (e.g., SALES, MARGIN, TURNOVER).\n"
+            "2. *Proportions:* Percentages and ratios (e.g., PERCENTAGE, PERC).\n"
+            "3. *Measurements:* Age, height, temperature, or any value where decimal precision is meaningful.\n\n"
+            
+            "--- CLASSIFICATION RULE FOR INTEGERS ---\n"
+            "If a column is an integer:\n"
+            "- Classify as *CONTINUOUS* if it represents a *monetary amount, sales, or turnover*, even if stored as a whole number.\n"
+            "- Classify as *DISCRETE* if it represents an *ID, code, or count of events.*\n\n"
+            
+            "Analyze the column names and sample values. Return ONLY a single, valid JSON object, without any surrounding text, markdown formatting (like ```json), or explanation.\n"
+            f"Columns to classify: {json.dumps(columns)}\n"
+            f"Sample data: {json.dumps(sample_data)}\n\n"
+            
             "Response format: {\"column_name\": \"discrete\" or \"continuous\"}\n"
         )
 
@@ -1863,7 +2022,7 @@ def ai_classify_columns():
 
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-        url = "https://models.github.ai/inference/chat/completions"
+        url = "[https://models.github.ai/inference/chat/completions](https://models.github.ai/inference/chat/completions)"
         resp = requests.post(url, headers=headers, json=body, timeout=30)
         
         print(f"DEBUG: GitHub API response status: {resp.status_code}")
@@ -1895,27 +2054,27 @@ def ai_classify_columns():
         # Try to extract JSON from the model's text
         mapping = None
         try:
+            # Use strict load first
             mapping = json.loads(text.strip())
         except Exception:
-            # attempt to parse using ast.literal_eval or find JSON substring
-            try:
-                mapping = ast.literal_eval(text.strip())
-            except Exception:
-                import re
-                m = re.search(r"\{[\s\S]*\}", text)
-                if m:
-                    try:
-                        mapping = json.loads(m.group(0))
-                    except Exception:
-                        try:
-                            mapping = ast.literal_eval(m.group(0))
-                        except Exception:
-                            mapping = None
+            # attempt to find JSON substring
+            m = re.search(r"\{[\s\S]*\}", text)
+            if m:
+                try:
+                    mapping = json.loads(m.group(0))
+                except Exception:
+                    mapping = None
 
         if not mapping or not isinstance(mapping, dict):
-            return jsonify({"error": "Failed to parse JSON from model response", "raw_text": text}), 502
+            # Fallback when LLM fails to return valid/parsable JSON
+            print(f"WARN: LLM failed to return valid JSON, falling back to heuristics.")
+            normalized = {}
+            for col in columns:
+                normalized[col] = _classify_with_heuristics(col, sample_data.get(col, []))
+            return jsonify(normalized)
 
-        # Normalize values to 'discrete' or 'continuous' with enhanced heuristics
+
+        # Normalize values to 'discrete' or 'continuous'
         normalized = {}
         for k, v in mapping.items():
             s = str(v).strip().lower()
@@ -1924,54 +2083,11 @@ def ai_classify_columns():
             elif s.startswith('c'):
                 normalized[k] = 'continuous'
             else:
-                # Enhanced fallback heuristics based on column name and samples
-                samples = sample_data.get(k, [])
-                col_name_lower = k.lower()
-                
-                # Check for discrete indicators in column name
-                discrete_keywords = ['id', 'code', 'type', 'category', 'class', 'group', 'status', 
-                                   'flag', 'level', 'grade', 'rating', 'rank', 'gender', 'sex',
-                                   'marital', 'education', 'occupation', 'department', 'region',
-                                   'state', 'country', 'city', 'zip', 'postal']
-                
-                continuous_keywords = ['age', 'amount', 'price', 'cost', 'salary', 'income', 'revenue',
-                                     'balance', 'rate', 'ratio', 'percent', 'score', 'weight', 'height',
-                                     'length', 'width', 'depth', 'distance', 'time', 'duration', 'years']
-                
-                is_discrete_name = any(keyword in col_name_lower for keyword in discrete_keywords)
-                is_continuous_name = any(keyword in col_name_lower for keyword in continuous_keywords)
-                
-                if is_discrete_name:
-                    normalized[k] = 'discrete'
-                elif is_continuous_name:
-                    normalized[k] = 'continuous'
-                else:
-                    # Analyze sample values
-                    try:
-                        if not samples:
-                            normalized[k] = 'discrete'  # Default when no data
-                        else:
-                            # Check for non-numeric values
-                            non_numeric_count = sum(1 for x in samples if not isinstance(x, (int, float)))
-                            if non_numeric_count > 0:
-                                normalized[k] = 'discrete'
-                            else:
-                                # For numeric data, check uniqueness and range
-                                unique_values = len(set(samples))
-                                if unique_values <= 10:  # Low cardinality suggests discrete
-                                    normalized[k] = 'discrete'
-                                elif unique_values == len(samples):  # All unique suggests continuous
-                                    normalized[k] = 'continuous'
-                                else:
-                                    # Check if values look like IDs (integers) or measurements (floats)
-                                    all_integers = all(isinstance(x, int) or (isinstance(x, float) and x.is_integer()) for x in samples)
-                                    if all_integers and max(samples) - min(samples) > unique_values * 2:
-                                        normalized[k] = 'discrete'  # Likely IDs or codes
-                                    else:
-                                        normalized[k] = 'continuous'  # Likely measurements
-                    except Exception:
-                        normalized[k] = 'discrete'  # Safe default
-
+                # FIX 3: Fallback if LLM output is not 'discrete' or 'continuous'
+                # Use the robust heuristic function for the one-off failure
+                print(f"WARN: LLM returned non-standard classification '{v}' for '{k}'. Using heuristics.")
+                normalized[k] = _classify_with_heuristics(k, sample_data.get(k, []))
+        
         return jsonify(normalized)
     except Exception as e:
         import traceback

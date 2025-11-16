@@ -170,94 +170,105 @@ def greedy_merge_bins_woe(
     labels = bin_labels.copy()
     merge_map = {label: [label] for label in labels}
     
-    # Auto-detect direction if not specified
+    # Auto-detect direction
     if increasing is None:
         initial_woe = compute_woe(good, bad)
-        # Use correlation with position to determine trend
         positions = np.arange(len(initial_woe))
         correlation = np.corrcoef(positions, initial_woe)[0, 1]
         increasing = correlation >= 0
     
-    max_iterations = len(good) * 2  # Prevent infinite loops
+    max_iterations = len(good) * 3
     iteration = 0
-    
     while iteration < max_iterations:
         woe = compute_woe(good, bad)
-        
         if is_monotonic(woe, increasing):
-            break  # Done - achieved monotonicity
-        
-        # Find first violation
-        violation_idx = None
+            break
+        # Find all violation indices
+        violations = []
         for i in range(len(woe) - 1):
             if (increasing and woe[i] > woe[i+1]) or (not increasing and woe[i] < woe[i+1]):
-                violation_idx = i
-                break
-        
-        if violation_idx is None:
-            break  # No violations found
-        
-        # For continuous: merge with adjacent bin
-        # For discrete: merge with the bin that creates smallest WOE change
-        if continuous:
-            # Merge bins i and i+1
-            merge_idx = violation_idx
-            merge_with = violation_idx + 1
-        else:
-            # For discrete, find best bin to merge with (considering all possibilities)
-            merge_idx = violation_idx
-            best_merge_with = violation_idx + 1
-            best_woe_variance = float('inf')
-            
-            for candidate in range(len(good)):
-                if candidate == merge_idx:
+                violations.append(i)
+
+        if not violations:
+            break
+
+        improved = False
+        best_good, best_bad, best_labels, best_merge_map = None, None, None, None
+        best_violations_after = len(violations)
+
+        for viol_idx in violations:
+            candidates = list(range(len(good)))
+            candidates.remove(viol_idx)
+
+            for cand_idx in candidates:
+                if cand_idx == viol_idx:
                     continue
-                    
                 # Simulate merge
                 test_good = good.copy()
                 test_bad = bad.copy()
-                test_good[merge_idx] += test_good[candidate]
-                test_bad[merge_idx] += test_bad[candidate]
-                test_good = np.delete(test_good, candidate)
-                test_bad = np.delete(test_bad, candidate)
-                
+                test_labels = labels.copy()
+                test_merge_map = copy.deepcopy(merge_map)
+
+                # Merge viol_idx into cand_idx (to preserve order better)
+                merge_from = viol_idx
+                merge_to = cand_idx
+
+                # Adjust indices if needed
+                if merge_from > merge_to:
+                    merge_from, merge_to = merge_to, merge_from
+
+                # Update merge map
+                new_label = f"{test_labels[merge_to]}_merged_{test_labels[merge_from]}"
+                test_merge_map[new_label] = test_merge_map.pop(test_labels[merge_to], [test_labels[merge_to]]) + \
+                                            test_merge_map.pop(test_labels[merge_from], [test_labels[merge_from]])
+
+                # Merge counts
+                test_good[merge_to] += test_good[merge_from]
+                test_bad[merge_to] += test_bad[merge_from]
+
+                # Remove the merged-from bin
+                test_good = np.delete(test_good, merge_from)
+                test_bad = np.delete(test_bad, merge_from)
+                test_labels[merge_to] = new_label
+                test_labels.pop(merge_from)
+
+                # Compute new WOE and violations
                 test_woe = compute_woe(test_good, test_bad)
-                woe_variance = np.var(test_woe)
-                
-                if woe_variance < best_woe_variance:
-                    best_woe_variance = woe_variance
-                    best_merge_with = candidate
-            
-            merge_with = best_merge_with
-        
-        # Perform the merge
-        if merge_with < len(good):
-            # Update merge map
-            new_label = f"{labels[merge_idx]}_merged_{labels[merge_with]}"
-            merge_map[new_label] = merge_map.get(labels[merge_idx], [labels[merge_idx]]) + \
-                                   merge_map.get(labels[merge_with], [labels[merge_with]])
-            
-            # Remove old labels from merge_map
-            if labels[merge_idx] in merge_map and labels[merge_idx] != new_label:
-                del merge_map[labels[merge_idx]]
-            if labels[merge_with] in merge_map and labels[merge_with] != new_label:
-                del merge_map[labels[merge_with]]
-            
-            # Merge counts
-            good[merge_idx] += good[merge_with]
-            bad[merge_idx] += bad[merge_with]
-            good = np.delete(good, merge_with)
-            bad = np.delete(bad, merge_with)
-            
-            # Update labels
-            labels[merge_idx] = new_label
-            labels = [label for i, label in enumerate(labels) if i != merge_with]
-        
+                test_violations = sum(1 for i in range(len(test_woe)-1)
+                                    if (increasing and test_woe[i] > test_woe[i+1]) or
+                                       (not increasing and test_woe[i] < test_woe[i+1]))
+
+                # Prefer: fewer violations → higher IV → lower variance
+                if test_violations < best_violations_after:
+                    best_violations_after = test_violations
+                    best_good = test_good.copy()
+                    best_bad = test_bad.copy()
+                    best_labels = test_labels.copy()
+                    best_merge_map = copy.deepcopy(test_merge_map)
+                    improved = True
+
+        # Apply best merge found
+        if improved and best_good is not None:
+            good, bad, labels, merge_map = best_good, best_bad, best_labels, best_merge_map
+        else:
+            # No merge reduces violations → force merge first violation with next
+            viol_idx = violations[0]
+            merge_to = viol_idx + 1 if viol_idx + 1 < len(good) else viol_idx - 1
+            if merge_to < 0:
+                break
+
+            new_label = f"{labels[merge_to]}_merged_{labels[viol_idx]}"
+            merge_map[new_label] = merge_map.pop(labels[merge_to], [labels[merge_to]]) + \
+                                   merge_map.pop(labels[viol_idx], [labels[viol_idx]])
+            good[merge_to] += good[viol_idx]
+            bad[merge_to] += bad[viol_idx]
+            good = np.delete(good, viol_idx)
+            bad = np.delete(bad, viol_idx)
+            labels[merge_to] = new_label
+            labels.pop(viol_idx)
         iteration += 1
-    
     final_woe = compute_woe(good, bad)
     return good, bad, labels, final_woe, merge_map
-
 
 def exhaustive_merge_bins_woe(
     good: np.ndarray,
