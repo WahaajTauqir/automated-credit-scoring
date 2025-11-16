@@ -12,7 +12,8 @@ interface RandomForestResultsProps {
     onGenerateScoreCard?: (modelType: string) => void;
     generatingScoreCard?: boolean;
     onGotoScoreCard?: () => void;
-    onResultsUpdate?: (results: any) => void; // ADD THIS LINE
+    onResultsUpdate?: (results: any) => void;
+    recordId?: number;
 }
 
 interface FeatureImportance {
@@ -70,7 +71,8 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
     onGenerateScoreCard,
     generatingScoreCard,
     onGotoScoreCard,
-    onResultsUpdate // ADD THIS LINE
+    onResultsUpdate,
+    recordId
 }) => {
     const [results, setResults] = useState<RandomForestResults | null>(null);
     const [loading, setLoading] = useState(false);
@@ -92,7 +94,8 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
                 body: JSON.stringify({
                     selected_variables: selectedVariables,
                     target: targetVariable,
-                    woe_transformed_data: woeTransformedData
+                    woe_transformed_data: woeTransformedData,
+                    record_id: recordId
                 })
             });
 

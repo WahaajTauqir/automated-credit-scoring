@@ -1,8 +1,9 @@
 import './Results.css';
 import { DiscreteValuesDropdown } from './DiscreteValues';
+import { NormalizedBin } from '../types/analysis';
 
 interface UnivariateResultsProps {
-  univariateResults: Record<string, any>;
+  univariateResults: Record<string, { type?: 'discrete' | 'continuous'; stats: NormalizedBin[] }>;
   formatToFourDecimals: (value: any) => string;
   onDropColumn?: (col: string) => void;
 }
@@ -12,11 +13,10 @@ const UnivariateResults = ({
   formatToFourDecimals,
   onDropColumn,
 }: UnivariateResultsProps) => {
-
   if (!univariateResults || Object.keys(univariateResults).length === 0) return null;
 
   const entries = Object.entries(univariateResults).filter(
-    ([, result]: any) => result && Array.isArray(result.stats) && result.stats.length > 0
+    ([, result]) => result && Array.isArray(result.stats) && result.stats.length > 0
   );
   if (entries.length === 0) return null;
 
@@ -24,9 +24,8 @@ const UnivariateResults = ({
     <div className="results-container coarse-binning-results" aria-label="Coarse binning results summary">
       <h2>Coarse Binning Results</h2>
 
-      {entries.map(([col, result]: any) => {
+      {entries.map(([col, result]) => {
         const isDiscrete = result.type === 'discrete';
-        const binHeaderLabel = isDiscrete ? 'Range' : 'Min / Max';
 
         return (
           <article key={col} className="results-card coarse-result-card" aria-label={`Coarse binning table for ${col}`}>
@@ -55,14 +54,7 @@ const UnivariateResults = ({
                 <thead>
                   <tr>
                     <th>Bin</th>
-                    {isDiscrete ? (
-                      <th>{binHeaderLabel}</th>
-                    ) : (
-                      <>
-                        <th>Min</th>
-                        <th>Max</th>
-                      </>
-                    )}
+                    {isDiscrete ? <th>Range</th> : (<><th>Min</th><th>Max</th></>)}
                     <th>Bad</th>
                     <th>Good</th>
                     <th>Total</th>
@@ -71,13 +63,17 @@ const UnivariateResults = ({
                   </tr>
                 </thead>
                 <tbody>
-                  {result.stats.map((row: any, index: number) => {
-                    const binnedKey = Object.keys(row).find((key: string) => key.endsWith('_binned'));
-                    const binLabel = binnedKey ? row[binnedKey] : `Bin_${index + 1}`;
-                    const rangeValue = String(row.Range ?? '');
+                  {result.stats.map((row, index) => {
+                    const binLabel = row.Bin ?? `Bin_${index + 1}`;
+                    const rangeValue = typeof row.Range === 'string' ? row.Range : '';
                     const badRateValue =
-                      row['Bad Rate'] ?? row['Bad Rate (%)'] ?? row.bad_rate ?? row.BadRate ?? 0;
-                    const freqValue = row['Freq%'] ?? row.freq ?? row.Freq ?? 0;
+                      typeof row['Bad Rate'] === 'number'
+                        ? row['Bad Rate']
+                        : (typeof row.bad_rate === 'number' ? row.bad_rate : (row.Total && row.Total > 0 ? (row.Bad / row.Total) * 100 : 0));
+                    const freqValue =
+                      typeof row['Freq%'] === 'number'
+                        ? row['Freq%']
+                        : (typeof row.freq_percent === 'number' ? row.freq_percent : 0);
 
                     return (
                       <tr key={`${col}-${index}`}>
@@ -88,13 +84,13 @@ const UnivariateResults = ({
                           </td>
                         ) : (
                           <>
-                            <td>{String(row.Min ?? '')}</td>
-                            <td>{String(row.Max ?? '')}</td>
+                            <td>{row.Min ?? '—'}</td>
+                            <td>{row.Max ?? '—'}</td>
                           </>
                         )}
-                        <td>{row.Bad ?? 0}</td>
-                        <td>{row.Good ?? 0}</td>
-                        <td>{row.Total ?? 0}</td>
+                        <td>{row.Bad}</td>
+                        <td>{row.Good}</td>
+                        <td>{row.Total}</td>
                         <td>{formatToFourDecimals(badRateValue)}</td>
                         <td>{formatToFourDecimals(freqValue)}</td>
                       </tr>

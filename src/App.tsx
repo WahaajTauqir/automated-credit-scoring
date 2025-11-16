@@ -4,24 +4,10 @@ import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
 import AdminPanel from './components/Admin/AdminPanel';
 import SelectedColumnsPage from './components/SelectedColumnsPage';
-import ColumnSelectionPage from './components/ColumnSelectionPage';
 import './App.css';
 import './components/Admin/AdminPanel.css';
-
-// Type definition for the new database schema
-type AnalysisRecord = {
-  id: number;
-  dataset_path: string;
-  discrete_columns: string[];  // Changed from comma-separated string to array
-  continuous_columns: string[];  // Changed from comma-separated string to array
-  selected_columns: string[];  // Changed from comma-separated string to array
-  target_variable: string;
-  created_at: string;
-  total_features?: number;
-  discrete_features?: number;
-  continuous_features?: number;
-  binning_data?: Record<string, any>;  // New: structured binning data
-};
+import { AnalysisRecord } from './types/analysis';
+import { buildBinningState, buildTypeLookup } from './utils/binning';
 
 function App() {
   const location = useLocation();
@@ -46,13 +32,20 @@ function App() {
   // Records (moved from AdminPanel into main page)
   const [records, setRecords] = useState<AnalysisRecord[]>([]);
   const [recordsLoading, setRecordsLoading] = useState<boolean>(false);
+  const [activeRecordId, setActiveRecordId] = useState<number | undefined>(undefined);
 
   // Fetch existing analysis records on mount
   useEffect(() => {
     setRecordsLoading(true);
     fetch('http://localhost:5000/api/records')
       .then(res => res.json())
-      .then(data => setRecords(Array.isArray(data) ? data : []))
+      .then(data => {
+        const list: AnalysisRecord[] = Array.isArray(data) ? data : [];
+        setRecords(list);
+        if (list.length > 0) {
+          setActiveRecordId((prev) => prev ?? list[0].id);
+        }
+      })
       .catch(() => {})
       .finally(() => setRecordsLoading(false));
   }, []);
@@ -100,24 +93,6 @@ function App() {
     }
 
     try {
-      // Preserve any existing dashboard_selected_columns from latest record to avoid clearing on older backend versions
-      let preservedDashboardSelected: string[] | undefined = undefined;
-      try {
-        if (records && records.length > 0) {
-          const latestId = records[0].id;
-          const recResp = await fetch(`http://localhost:5000/api/record/${latestId}`);
-          const recJson = await recResp.json();
-          const dsc = recJson?.dashboard_selected_columns;
-          if (typeof dsc === 'string' && dsc.trim().length > 0) {
-            preservedDashboardSelected = dsc.split(',').map((s: string) => s.trim()).filter((s: string) => s);
-          } else if (Array.isArray(dsc) && dsc.length > 0) {
-            preservedDashboardSelected = dsc.map((s: any) => String(s).trim()).filter((s: string) => s);
-          }
-        }
-      } catch {
-        // Non-blocking: proceed without preserved selection
-      }
-
       const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -126,8 +101,7 @@ function App() {
           discrete_columns: discreteColumns,
           continuous_columns: continuousColumns,
           selected_columns: selectedForUnivariate,
-          // Include preserved selection if any, to avoid clearing on older server logic
-          ...(preservedDashboardSelected ? { dashboard_selected_columns: preservedDashboardSelected } : {}),
+          record_id: activeRecordId,
           target_variable: targetVariable,
           univariate_results: '',
           finebin_results: '',
@@ -136,6 +110,9 @@ function App() {
       });
       const saved = await resp.json().catch(() => ({} as any));
       const newRecordId = saved?.id;
+      if (newRecordId) {
+        setActiveRecordId(newRecordId);
+      }
 
       navigate('/selected-columns', {
         state: {
@@ -166,10 +143,10 @@ function App() {
     }
   };
 
-  const handleCSVUploaded = (headers: string[], _rows?: any[], uploadedPath?: string) => {
+  const handleCSVUploaded = (headers: string[], _rows?: any[], uploadedPath?: string, datasetId?: number) => {
     setColumns(headers);
     if (uploadedPath) setDatasetPath(uploadedPath);
-  setExpectedColumnsForRecord(undefined);
+    setExpectedColumnsForRecord(undefined);
     setDiscreteColumns([]);
     setContinuousColumns([]);
     setTargetVariable('');
@@ -179,7 +156,16 @@ function App() {
     setSelectedBinGroups({});
     setCurrentPage(1);
     setTargetCounts({});
-    navigate('/column-selection');
+    if (datasetId) {
+      setActiveRecordId(datasetId);
+    }
+    navigate('/selected-columns', {
+      state: {
+        columns: headers,
+        datasetPath: uploadedPath,
+        recordId: datasetId,
+      }
+    });
   };
 
   const toggleSelectedForUnivariate = (col: string) => {
@@ -275,7 +261,8 @@ function App() {
             discrete_columns: computedDiscrete,
             continuous_columns: computedContinuous,
             selected_columns: selectedForUnivariate,
-            target_variable: targetVariable
+            target_variable: targetVariable,
+            record_id: activeRecordId
           })
         });
       } catch (err) {
@@ -291,7 +278,7 @@ function App() {
       const res = await fetch('http://localhost:5000/api/target-distribution', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ column: col }),
+        body: JSON.stringify({ column: col, record_id: activeRecordId }),
       });
       const data = await res.json();
       if (!data.error) setTargetCounts(data);
@@ -317,7 +304,8 @@ function App() {
             discrete_columns: discreteColumns,
             continuous_columns: continuousColumns,
             selected_columns: selectedForUnivariate,
-            target_variable: targetVariable
+            target_variable: targetVariable,
+            record_id: activeRecordId
           })
         });
       } catch (err) {
@@ -354,67 +342,37 @@ function App() {
       setRestoring(true);
       // Fetch complete record
       const recResp = await fetch(`http://localhost:5000/api/record/${id}`);
-      const data: AnalysisRecord & { univariate_results?: any; finebin_results?: any; crosstab_results?: any } = await recResp.json();
+      const data: AnalysisRecord = await recResp.json();
 
-      // Ask backend to load dataset & return columns
-      let loadedColumns: string[] = [];
-      try {
-        const loadRes = await fetch(`http://localhost:5000/api/record/${id}/load-dataset`);
-        const loadJson = await loadRes.json();
-        if (loadRes.ok) {
-          if (Array.isArray(loadJson.columns)) loadedColumns = loadJson.columns;
-          if (loadJson.dataset_path) setDatasetPath(loadJson.dataset_path);
-        }
-      } catch { /* ignore */ }
-
-      // Fallback: generic columns endpoint
-      if (loadedColumns.length === 0) {
-        try {
-          const colsRes = await fetch('http://localhost:5000/api/uploaded-csv-columns');
-          if (colsRes.ok) {
-            const colsJson = await colsRes.json();
-            if (Array.isArray(colsJson.columns)) loadedColumns = colsJson.columns;
+      // Infer columns from stored column arrays (much faster than loading entire CSV)
+      const inferred = new Set<string>();
+      const addField = (field: unknown) => {
+        if (!Array.isArray(field)) return;
+        field.forEach((c: any) => {
+          if (c !== undefined && c !== null && String(c).trim()) {
+            inferred.add(String(c).trim());
           }
-        } catch { /* ignore */ }
-      }
+        });
+      };
 
-      // Fallback: infer from stored column fields. Accept both array or comma-separated string formats.
-      if (loadedColumns.length === 0) {
-        const inferred = new Set<string>();
-        const addField = (field: any) => {
-          if (!field) return;
-          if (Array.isArray(field)) {
-            field.forEach((c: any) => { if (c) inferred.add(String(c).trim()); });
-          } else if (typeof field === 'string') {
-            field.split(',').map(s => s.trim()).filter(Boolean).forEach((c: string) => inferred.add(c));
-          }
-        };
-
-        addField((data as any).discrete_columns);
-        addField((data as any).continuous_columns);
-        addField((data as any).selected_columns);
-        loadedColumns = Array.from(inferred);
-      }
+      addField((data as any).discrete_columns ?? []);
+      addField((data as any).continuous_columns ?? []);
+      addField((data as any).selected_columns ?? []);
+      const loadedColumns = Array.from(inferred);
 
       // Update state
-  setColumns(loadedColumns);
+      setColumns(loadedColumns);
       const discreteArr: string[] = Array.isArray((data as any).discrete_columns)
         ? (data as any).discrete_columns
-        : (typeof (data as any).discrete_columns === 'string'
-          ? (data as any).discrete_columns.split(',').filter(Boolean)
-          : []);
+        : [];
 
       const continuousArr: string[] = Array.isArray((data as any).continuous_columns)
         ? (data as any).continuous_columns
-        : (typeof (data as any).continuous_columns === 'string'
-          ? (data as any).continuous_columns.split(',').filter(Boolean)
-          : []);
+        : [];
 
       const selectedArr: string[] = Array.isArray((data as any).selected_columns)
         ? (data as any).selected_columns
-        : (typeof (data as any).selected_columns === 'string'
-          ? (data as any).selected_columns.split(',').filter(Boolean)
-          : []);
+        : [];
 
       const expected = loadedColumns.length ? loadedColumns : Array.from(new Set([...discreteArr, ...continuousArr, ...selectedArr]));
   setExpectedColumnsForRecord(expected);
@@ -422,31 +380,38 @@ function App() {
       setContinuousColumns(continuousArr);
       setSelectedForUnivariate(selectedArr);
       setTargetVariable(data.target_variable || '');
-      let uni: Record<string, any> = {};
-      let fine: Record<string, any> = {};
-      let cross: Record<string, any> = {};
-      // Backend now returns structured objects/arrays for these fields.
-      uni = data.univariate_results && typeof data.univariate_results !== 'string' ? data.univariate_results : {};
-      fine = data.finebin_results && typeof data.finebin_results !== 'string' ? data.finebin_results : {};
-      cross = data.crosstab_results && typeof data.crosstab_results !== 'string' ? data.crosstab_results : {};
-      setUnivariateResults(uni);
-      setFineBinResults(fine);
-      setCrossTabResults(cross);
+
+      const typeLookup = buildTypeLookup(discreteArr, continuousArr);
+      const normalizedBinning = buildBinningState(data.binning_data, typeLookup);
+      setUnivariateResults(normalizedBinning.univariate);
+      setFineBinResults(normalizedBinning.fine);
+      setCrossTabResults(normalizedBinning.coarse);
       setCurrentPage(1);
 
       // Navigate passing full state to cover edge cases where local effect didn't fire yet
-  navigate('/column-selection', {
+      const modelReadyColumns = Array.isArray((data as any).dashboard_selected_columns)
+        ? (data as any).dashboard_selected_columns
+        : [];
+      const finalSelectedColumns = Array.isArray((data as any).final_selected_columns)
+        ? (data as any).final_selected_columns
+        : [];
+
+      navigate('/selected-columns', {
         state: {
           columns: loadedColumns,
+          selectedColumns: selectedArr,
           discreteColumns: discreteArr,
-            continuousColumns: continuousArr,
-            selectedForUnivariate: selectedArr,
-            targetVariable: data.target_variable || '',
-            datasetPath: data.dataset_path || '',
-            univariateResults: uni,
-            fineBinResults: fine,
-    crossTabResults: cross,
-    expectedColumns: expected
+          continuousColumns: continuousArr,
+          targetVariable: data.target_variable || '',
+          recordId: id,
+          datasetPath: data.dataset_path || '',
+          univariateResults: normalizedBinning.univariate,
+          fineBinResults: normalizedBinning.fine,
+          crossTabResults: normalizedBinning.coarse,
+          woeIvResults: normalizedBinning.woe,
+          binningState: normalizedBinning,
+          modelReadyColumns,
+          finalSelectedColumns
         }
       });
     } catch (e) {
@@ -504,7 +469,9 @@ function App() {
                           <tr key={rec.id}>
                             <td style={{ textAlign: 'center' }}>{rec.id}</td>
                             <td style={{ textAlign: 'center' }}>{rec.dataset_path}</td>
-                            <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>{rec.selected_columns}</td>
+                            <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>
+                              {rec.selected_columns.join(', ')}
+                            </td>
                             <td style={{ textAlign: 'center' }}>{rec.created_at}</td>
                             <td style={{ textAlign: 'center' }}>
                               <div style={{ display: 'inline-flex', gap: '8px' }}>
@@ -521,42 +488,6 @@ function App() {
               </div>
             </div>
           </div>
-        }
-      />
-      <Route
-        path="/column-selection"
-        element={
-          <ColumnSelectionPage
-            columns={columns}
-            paginatedColumns={paginatedColumns}
-            discreteColumns={discreteColumns}
-            continuousColumns={continuousColumns}
-            targetVariable={targetVariable}
-            targetCounts={targetCounts}
-            handleTypeChange={handleTypeChange}
-            setTargetVariable={setTargetVariable}
-            currentPage={currentPage}
-            totalPages={totalPages}
-            onNextPage={handleNextPage}
-            onPrevPage={handlePrevPage}
-            assignRemainingToContinuous={assignRemainingToContinuous}
-            selectedForUnivariate={selectedForUnivariate}
-            toggleSelectedForUnivariate={toggleSelectedForUnivariate}
-            handleFineBin={handleFineBin}
-            toggleSelectAllDiscrete={toggleSelectAllDiscrete}
-            toggleSelectAllContinuous={toggleSelectAllContinuous}
-            handleProceedToSelectedColumns={handleProceedToSelectedColumns}
-            univariateResults={univariateResults}
-            fineBinResults={fineBinResults}
-            crossTabResults={crossTabResults}
-            selectedBinGroups={selectedBinGroups}
-            toggleBinSelection={toggleBinSelection}
-            formatToFourDecimals={formatToFourDecimals}
-            restoring={restoring}
-            expectedColumns={expectedColumnsForRecord}
-            onUploadReplacement={(headers, rows, path) => handleCSVUploaded(headers, rows, path)}
-            datasetPath={datasetPath}
-          />
         }
       />
       <Route path="/admin" element={<AdminPanel />} />

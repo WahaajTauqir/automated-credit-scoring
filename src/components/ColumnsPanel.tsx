@@ -21,6 +21,7 @@ interface ColumnPanelsProps {
   toggleSelectAllContinuous?: (selectAll?: boolean) => void;
   handleFineBin: (column: string) => Promise<void>;
   datasetPath: string;
+  recordId?: number;
 }
 
 const ColumnPanels = ({
@@ -42,6 +43,7 @@ const ColumnPanels = ({
   toggleSelectAllDiscrete,
   toggleSelectAllContinuous,
   datasetPath,
+  recordId,
 }: ColumnPanelsProps) => {
   return (
     <div className="columns-layout">
@@ -99,6 +101,7 @@ const ColumnPanels = ({
                   continuous_columns: remaining,
                   selected_columns: selectedForUnivariate,
                   target_variable: targetVariable,
+                  record_id: recordId,
                 })
               });
             } catch (e) {

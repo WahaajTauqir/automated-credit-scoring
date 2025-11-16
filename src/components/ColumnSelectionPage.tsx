@@ -31,6 +31,7 @@ interface ColumnSelectionPageProps {
   expectedColumns?: string[];
   onUploadReplacement?: (headers: string[], rows: any[], path?: string) => void;
   datasetPath: string;
+  recordId?: number;
 }
 
 const ColumnSelectionPage = ({
@@ -56,7 +57,8 @@ const ColumnSelectionPage = ({
   restoring,
   expectedColumns,
   onUploadReplacement,
-  datasetPath
+  datasetPath,
+  recordId
 }: ColumnSelectionPageProps) => {
   const needsUpload = restoring && columns.length === 0 && expectedColumns && expectedColumns.length > 0;
   const hasWrongCsv = !restoring && columns.length > 0 && expectedColumns && expectedColumns.length > 0 && expectedColumns.some(col => !columns.includes(col));
@@ -109,7 +111,7 @@ const ColumnSelectionPage = ({
                       const sampleResp = await fetch('http://localhost:5000/api/csv-samples', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ columns: colsToClassify, sample_size: 20 })
+                        body: JSON.stringify({ columns: colsToClassify, sample_size: 20, record_id: recordId })
                       });
                       if (sampleResp.ok) {
                         sampleData = await sampleResp.json();
@@ -130,7 +132,7 @@ const ColumnSelectionPage = ({
                     const resp = await fetch('http://localhost:5000/api/ai-classify-columns', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ columns: colsToClassify, sampleData })
+                      body: JSON.stringify({ columns: colsToClassify, sampleData, record_id: recordId })
                     });
                     const data = await resp.json();
                     if (data && !data.error) {
@@ -179,6 +181,7 @@ const ColumnSelectionPage = ({
               toggleSelectAllContinuous={toggleSelectAllContinuous}
               handleFineBin={handleFineBin}
               datasetPath={datasetPath}
+              recordId={recordId}
             />
 
             <div style={{ marginTop: '30px', textAlign: 'center' }}>

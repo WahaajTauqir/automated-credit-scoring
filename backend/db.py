@@ -5,6 +5,7 @@ Uses the restructured schema with datasets, features, binning_steps, bins, and m
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.pool import ThreadedConnectionPool
 import os
 import json
 from typing import Optional, Dict, List, Tuple, Any
@@ -17,6 +18,64 @@ PG_USER = os.getenv('PG_USER', 'myuser')
 PG_PASSWORD = os.getenv('PG_PASSWORD', 'mypassword')
 PG_HOST = os.getenv('PG_HOST', 'localhost')
 PG_PORT = os.getenv('PG_PORT', '5432')
+PG_POOL_MIN = int(os.getenv('PG_POOL_MIN', '1'))
+PG_POOL_MAX = int(os.getenv('PG_POOL_MAX', '10'))
+PG_POOL_MAX = PG_POOL_MAX if PG_POOL_MAX >= PG_POOL_MIN else PG_POOL_MIN
+POOL_DISABLED = os.getenv('PG_DISABLE_POOLING', '0') == '1'
+_connection_pool: Optional[ThreadedConnectionPool] = None
+
+
+class ManagedConnection:
+    """Wraps a psycopg2 connection so .close() returns it to the pool when pooling is enabled."""
+
+    def __init__(self, conn, pool=None):
+        self._conn = conn
+        self._pool = pool
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def close(self):
+        if not self._conn:
+            return
+        if self._pool:
+            self._pool.putconn(self._conn)
+        else:
+            self._conn.close()
+        self._conn = None
+
+
+def _connection_kwargs():
+    if DATABASE_URL:
+        return {'dsn': DATABASE_URL}
+    return {
+        'dbname': PG_DBNAME,
+        'user': PG_USER,
+        'password': PG_PASSWORD,
+        'host': PG_HOST,
+        'port': PG_PORT
+    }
+
+
+def _open_new_connection():
+    kwargs = _connection_kwargs()
+    if 'dsn' in kwargs:
+        return psycopg2.connect(kwargs['dsn'])
+    return psycopg2.connect(**kwargs)
+
+
+def _get_connection_pool() -> Optional[ThreadedConnectionPool]:
+    """Lazily create a shared connection pool unless pooling is disabled."""
+    global _connection_pool
+    if POOL_DISABLED:
+        return None
+    if _connection_pool is None:
+        kwargs = _connection_kwargs()
+        if 'dsn' in kwargs:
+            _connection_pool = ThreadedConnectionPool(PG_POOL_MIN, PG_POOL_MAX, kwargs['dsn'])
+        else:
+            _connection_pool = ThreadedConnectionPool(PG_POOL_MIN, PG_POOL_MAX, **kwargs)
+    return _connection_pool
 
 
 def get_db_connection():
@@ -24,23 +83,116 @@ def get_db_connection():
     Return a psycopg2 connection. If DATABASE_URL is set, use it directly.
     Otherwise use individual PG_* environment variables.
     """
-    if DATABASE_URL:
-        return psycopg2.connect(DATABASE_URL)
+    pool = _get_connection_pool()
+    if pool:
+        conn = pool.getconn()
+        return ManagedConnection(conn, pool)
     
-    conn = psycopg2.connect(
-        dbname=PG_DBNAME,
-        user=PG_USER,
-        password=PG_PASSWORD,
-        host=PG_HOST,
-        port=PG_PORT
-    )
-    return conn
+    return ManagedConnection(_open_new_connection())
 
 
 def init_db():
     """Initialize the database schema if needed."""
     # Note: Schema should be created using validate_and_migrate_schema.py
     pass
+
+def ensure_final_selected_column():
+    """Ensure the final_selected column exists in the features table."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Check if column exists
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='features' AND column_name='final_selected'
+        """)
+        if not cur.fetchone():
+            # Column doesn't exist, add it
+            cur.execute("ALTER TABLE features ADD COLUMN final_selected BOOLEAN DEFAULT FALSE")
+            conn.commit()
+            print("[DB] Added missing final_selected column to features table")
+        else:
+            print("[DB] final_selected column already exists")
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Error checking/adding final_selected column: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+def ensure_model_ready_column():
+    """Ensure the model_ready column exists in the features table."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Check if column exists
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='features' AND column_name='model_ready'
+        """)
+        if not cur.fetchone():
+            # Column doesn't exist, add it
+            cur.execute("ALTER TABLE features ADD COLUMN model_ready BOOLEAN DEFAULT FALSE")
+            conn.commit()
+            print("[DB] Added missing model_ready column to features table")
+        else:
+            print("[DB] model_ready column already exists")
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Error checking/adding model_ready column: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+def sync_model_ready_to_final_selected(dataset_id: int) -> bool:
+    """
+    Copy model_ready values to final_selected for all features in a dataset.
+    Called when user navigates from Column Selection & Binning to Model Training.
+    """
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if columns exist
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='features' AND column_name IN ('model_ready', 'final_selected')
+        """)
+        existing_columns = {row[0] for row in cur.fetchall()}
+        
+        if 'model_ready' not in existing_columns:
+            cur.execute("ALTER TABLE features ADD COLUMN model_ready BOOLEAN DEFAULT FALSE")
+            conn.commit()
+        
+        if 'final_selected' not in existing_columns:
+            cur.execute("ALTER TABLE features ADD COLUMN final_selected BOOLEAN DEFAULT FALSE")
+            conn.commit()
+        
+        # Copy model_ready to final_selected
+        cur.execute("""
+            UPDATE features 
+            SET final_selected = model_ready 
+            WHERE dataset_id = %s
+        """, (dataset_id,))
+        
+        conn.commit()
+        print(f"[DB] Synced model_ready to final_selected for dataset {dataset_id}")
+        return True
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[DB] Error syncing model_ready to final_selected: {e}")
+        return False
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 # =====================================================
@@ -100,6 +252,40 @@ def get_all_datasets() -> List[Dict]:
     conn.close()
     
     return [dict(d) for d in datasets]
+
+
+def get_all_datasets_with_features() -> List[Dict]:
+    """
+    Return all datasets with their feature lists attached using a small,
+    fixed number of queries (no per-dataset round trips).
+    """
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+    datasets = [dict(row) for row in cur.fetchall()]
+    dataset_ids = [d['id'] for d in datasets]
+    features_by_dataset: Dict[int, List[Dict]] = {d['id']: [] for d in datasets}
+    
+    if dataset_ids:
+        cur.execute(
+            """
+            SELECT * FROM features
+            WHERE dataset_id = ANY(%s)
+            ORDER BY dataset_id, name
+            """,
+            (dataset_ids,),
+        )
+        for row in cur.fetchall():
+            features_by_dataset.setdefault(row['dataset_id'], []).append(dict(row))
+    
+    cur.close()
+    conn.close()
+    
+    for dataset in datasets:
+        dataset['features'] = features_by_dataset.get(dataset['id'], [])
+    
+    return datasets
 
 
 def get_latest_dataset() -> Optional[Dict]:
@@ -209,22 +395,29 @@ def create_features_batch(dataset_id: int, features: List[Dict]) -> List[int]:
     Returns:
         List[int]: List of created feature IDs
     """
+    if not features:
+        return []
+    
     conn = get_db_connection()
     cur = conn.cursor()
     
-    feature_ids = []
-    for feature in features:
-        name = feature['name']
-        feature_type = feature['type']
-        selected = feature.get('selected', False)
-        
-        cur.execute("""
-            INSERT INTO features (dataset_id, name, type, selected)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id;
-        """, (dataset_id, name, feature_type, selected))
-        
-        feature_ids.append(cur.fetchone()[0])
+    rows = [
+        (
+            dataset_id,
+            feature['name'],
+            feature['type'],
+            feature.get('selected', False)
+        )
+        for feature in features
+    ]
+    
+    query = """
+        INSERT INTO features (dataset_id, name, type, selected)
+        VALUES %s
+        RETURNING id;
+    """
+    result = execute_values(cur, query, rows, fetch=True)
+    feature_ids = [row[0] for row in result] if result else []
     
     conn.commit()
     cur.close()
@@ -280,23 +473,52 @@ def update_feature(feature_id: int, **kwargs) -> bool:
     if not kwargs:
         return False
     
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    set_clause = ", ".join([f"{key} = %s" for key in kwargs.keys()])
-    values = list(kwargs.values()) + [feature_id]
-    
-    cur.execute(f"""
-        UPDATE features 
-        SET {set_clause}
-        WHERE id = %s
-    """, values)
-    
-    conn.commit()
-    cur.close()
-    conn.close()
-    
-    return True
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if final_selected or model_ready columns exist if we're trying to update them
+        columns_to_check = []
+        if 'final_selected' in kwargs:
+            columns_to_check.append('final_selected')
+        if 'model_ready' in kwargs:
+            columns_to_check.append('model_ready')
+        
+        for col_name in columns_to_check:
+            cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='features' AND column_name=%s
+            """, (col_name,))
+            if not cur.fetchone():
+                # Column doesn't exist, add it
+                cur.execute(f"ALTER TABLE features ADD COLUMN {col_name} BOOLEAN DEFAULT FALSE")
+                conn.commit()
+                print(f"[DB] Added missing {col_name} column to features table")
+        
+        set_clause = ", ".join([f"{key} = %s" for key in kwargs.keys()])
+        values = list(kwargs.values()) + [feature_id]
+        
+        cur.execute(f"""
+            UPDATE features 
+            SET {set_clause}
+            WHERE id = %s
+        """, values)
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[DB] Error in update_feature: {e}")
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 def update_features_selection(dataset_id: int, selected_feature_names: List[str]) -> bool:
@@ -329,6 +551,117 @@ def update_features_selection(dataset_id: int, selected_feature_names: List[str]
     conn.close()
     
     return True
+
+
+def update_features_model_ready(dataset_id: int, model_ready_feature_names: List[str]) -> bool:
+    """
+    Update which features are marked as model_ready (set in Column Selection & Binning).
+    
+    Args:
+        dataset_id: ID of the dataset
+        model_ready_feature_names: List of feature names that should be model_ready
+    
+    Returns:
+        bool: True if successful
+    """
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if column exists first
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='features' AND column_name='model_ready'
+        """)
+        if not cur.fetchone():
+            # Column doesn't exist, add it
+            cur.execute("ALTER TABLE features ADD COLUMN model_ready BOOLEAN DEFAULT FALSE")
+            conn.commit()
+            print("[DB] Added missing model_ready column to features table")
+        
+        # First, deselect all features for this dataset
+        cur.execute("UPDATE features SET model_ready = FALSE WHERE dataset_id = %s", (dataset_id,))
+        
+        # Then, select the specified features
+        if model_ready_feature_names:
+            # Use tuple with IN clause for better compatibility
+            placeholders = ','.join(['%s'] * len(model_ready_feature_names))
+            cur.execute(f"""
+                UPDATE features 
+                SET model_ready = TRUE 
+                WHERE dataset_id = %s AND name IN ({placeholders})
+            """, (dataset_id, *model_ready_feature_names))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[DB] Error in update_features_model_ready: {e}")
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+def update_features_final_selection(dataset_id: int, final_selected_feature_names: List[str]) -> bool:
+    """
+    Update which features are selected for final model training (final_selected column).
+    
+    Args:
+        dataset_id: ID of the dataset
+        final_selected_feature_names: List of feature names that should be final_selected
+    
+    Returns:
+        bool: True if successful
+    """
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if column exists first
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='features' AND column_name='final_selected'
+        """)
+        if not cur.fetchone():
+            # Column doesn't exist, add it
+            cur.execute("ALTER TABLE features ADD COLUMN final_selected BOOLEAN DEFAULT FALSE")
+            conn.commit()
+            print("[DB] Added missing final_selected column to features table")
+        
+        # First, deselect all features for this dataset
+        cur.execute("UPDATE features SET final_selected = FALSE WHERE dataset_id = %s", (dataset_id,))
+        
+        # Then, select the specified features
+        if final_selected_feature_names:
+            # Use tuple with IN clause for better compatibility
+            placeholders = ','.join(['%s'] * len(final_selected_feature_names))
+            cur.execute(f"""
+                UPDATE features 
+                SET final_selected = TRUE 
+                WHERE dataset_id = %s AND name IN ({placeholders})
+            """, (dataset_id, *final_selected_feature_names))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[DB] Error in update_features_final_selection: {e}")
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 # =====================================================
@@ -430,6 +763,30 @@ def delete_binning_step(step_id: int) -> bool:
     cur = conn.cursor()
     
     cur.execute("DELETE FROM binning_steps WHERE id = %s", (step_id,))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return True
+
+
+def update_binning_step(step_id: int, **kwargs) -> bool:
+    """Update binning step fields (is_monotonic, monotonic_direction, etc.)."""
+    if not kwargs:
+        return False
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    set_clause = ", ".join([f"{key} = %s" for key in kwargs.keys()])
+    values = list(kwargs.values()) + [step_id]
+    
+    cur.execute(f"""
+        UPDATE binning_steps 
+        SET {set_clause}
+        WHERE id = %s
+    """, values)
     
     conn.commit()
     cur.close()
@@ -777,47 +1134,104 @@ def get_complete_binning_results(feature_id: int, step_type: str = 'fine') -> Op
 
 def get_dataset_with_all_results(dataset_id: int) -> Optional[Dict]:
     """
-    Get complete dataset information including all features and their binning results.
-    
-    Returns:
-        Dict with dataset info, features, and all binning results including totals
+    Get full dataset information (features + binning metadata) using batched queries
+    so we only touch the database a handful of times regardless of feature count.
     """
     dataset = get_dataset(dataset_id)
     if not dataset:
         return None
     
-    features = get_features_by_dataset(dataset_id)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    # For each feature, get its binning results
+    cur.execute(
+        """
+        SELECT * FROM features
+        WHERE dataset_id = %s
+        ORDER BY name
+        """,
+        (dataset_id,),
+    )
+    features = [dict(row) for row in cur.fetchall()]
+    feature_lookup = {f['id']: f for f in features}
+    
+    feature_ids = list(feature_lookup.keys())
+    if not feature_ids:
+        cur.close()
+        conn.close()
+        return {'dataset': dataset, 'features': features}
+    
+    # Pre-seed binning containers
     for feature in features:
-        feature['binning'] = {
-            'coarse': None,
-            'fine': None
+        feature['binning'] = {'coarse': None, 'fine': None}
+    
+    cur.execute(
+        """
+        SELECT * FROM binning_steps
+        WHERE feature_id = ANY(%s)
+        ORDER BY feature_id, step_type
+        """,
+        (feature_ids,),
+    )
+    steps = [dict(row) for row in cur.fetchall()]
+    step_ids = [s['id'] for s in steps]
+    
+    bins_by_step: Dict[int, List[Dict]] = {}
+    totals_by_step: Dict[int, Dict] = {}
+    merged_by_step: Dict[int, List[Dict]] = {}
+    
+    if step_ids:
+        cur.execute(
+            """
+            SELECT * FROM bins
+            WHERE binning_step_id = ANY(%s)
+            ORDER BY binning_step_id, bin_number
+            """,
+            (step_ids,),
+        )
+        for row in cur.fetchall():
+            bins_by_step.setdefault(row['binning_step_id'], []).append(dict(row))
+        
+        cur.execute(
+            """
+            SELECT * FROM binning_totals
+            WHERE binning_step_id = ANY(%s)
+            """,
+            (step_ids,),
+        )
+        for row in cur.fetchall():
+            totals_by_step[row['binning_step_id']] = dict(row)
+    
+    fine_step_ids = [s['id'] for s in steps if s.get('step_type') == 'fine']
+    if fine_step_ids:
+        cur.execute(
+            """
+            SELECT * FROM merged_bins
+            WHERE fine_step_id = ANY(%s)
+            ORDER BY fine_step_id, merged_bin_number
+            """,
+            (fine_step_ids,),
+        )
+        for row in cur.fetchall():
+            merged_by_step.setdefault(row['fine_step_id'], []).append(dict(row))
+    
+    cur.close()
+    conn.close()
+    
+    for step in steps:
+        feature = feature_lookup.get(step['feature_id'])
+        if not feature:
+            continue
+        binning_payload = {
+            'step': step,
+            'bins': bins_by_step.get(step['id'], []),
+            'totals': totals_by_step.get(step['id'])
         }
-        
-        # Get coarse binning
-        coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
-        if coarse_step:
-            coarse_bins = get_bins_by_step(coarse_step['id'])
-            coarse_totals = get_binning_totals(coarse_step['id'])
-            feature['binning']['coarse'] = {
-                'step': coarse_step,
-                'bins': coarse_bins,
-                'totals': coarse_totals
-            }
-        
-        # Get fine binning
-        fine_step = get_binning_step_by_type(feature['id'], 'fine')
-        if fine_step:
-            fine_bins = get_bins_by_step(fine_step['id'])
-            fine_totals = get_binning_totals(fine_step['id'])
-            merged_bins = get_merged_bins_by_step(fine_step['id'])
-            feature['binning']['fine'] = {
-                'step': fine_step,
-                'bins': fine_bins,
-                'totals': fine_totals,
-                'merged_bins': merged_bins
-            }
+        if step['step_type'] == 'fine':
+            binning_payload['merged_bins'] = merged_by_step.get(step['id'], [])
+            binning_payload['iv'] = float(step['iv_value']) if step.get('iv_value') is not None else None
+        binning_payload['type'] = feature.get('type')
+        feature['binning'][step['step_type']] = binning_payload
     
     return {
         'dataset': dataset,

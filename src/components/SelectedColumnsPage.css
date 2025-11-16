@@ -402,6 +402,23 @@ h4 { font-size: 0.95rem; }
 
 .content-section {
   transition: width 0.3s;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.column-selection-step {
+  width: 100%;
+  max-width: 100%;
+  padding: 0;
+  box-sizing: border-box;
+  overflow-x: visible;
+}
+
+.content-section:has(.column-selection-step) {
+  max-height: none;
+  overflow-y: visible;
+  overflow-x: visible;
 }
 
 /* Column Selection Section (Sidebar) */
@@ -642,6 +659,9 @@ h4 { font-size: 0.95rem; }
   overflow-y: auto;
   max-height: 80vh;
   box-shadow: var(--shadow-modern);
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 /* Binning Section */

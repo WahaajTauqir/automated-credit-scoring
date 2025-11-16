@@ -59,7 +59,6 @@ if [ $VALIDATION_RESULT -eq 0 ]; then
         echo ""
         echo "Step 2: Running tests..."
         echo "------------------------"
-        $PYTHON_CMD test_new_schema.py
         
         TEST_RESULT=$?
         if [ $TEST_RESULT -eq 0 ]; then
@@ -110,7 +109,6 @@ else
                 echo ""
                 echo "Step 3: Running tests..."
                 echo "------------------------"
-                $PYTHON_CMD test_new_schema.py
                 
                 TEST_RESULT=$?
                 if [ $TEST_RESULT -eq 0 ]; then

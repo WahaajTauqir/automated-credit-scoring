@@ -13,6 +13,7 @@ interface LogisticRegressionResultsProps {
   generatingScoreCard?: boolean;
   onGotoScoreCard?: () => void;
   onResultsUpdate?: (results: any) => void; // ADD THIS LINE
+  recordId?: number;
 }
 
 interface ModelStats {
@@ -83,7 +84,8 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   onGenerateScoreCard,
   generatingScoreCard,
   onGotoScoreCard,
-  onResultsUpdate // ADD THIS LINE
+  onResultsUpdate,
+  recordId
 }) => {
   const [results, setResults] = useState<LogisticResults | null>(null);
   const [loading, setLoading] = useState(false);
@@ -105,7 +107,8 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
         body: JSON.stringify({
           selected_variables: selectedVariables,
           target: targetVariable,
-          woe_transformed_data: woeTransformedData
+          woe_transformed_data: woeTransformedData,
+          record_id: recordId
         })
       });
 

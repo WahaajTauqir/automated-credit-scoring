@@ -44,6 +44,8 @@ CREATE TABLE features (
     name TEXT NOT NULL,
     type VARCHAR(20) NOT NULL CHECK (type IN ('discrete', 'continuous')),
     selected BOOLEAN DEFAULT FALSE,
+    model_ready BOOLEAN DEFAULT FALSE,
+    final_selected BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(dataset_id, name)
 );
@@ -53,6 +55,8 @@ COMMENT ON COLUMN features.dataset_id IS 'Foreign key to datasets table';
 COMMENT ON COLUMN features.name IS 'Name of the feature/column';
 COMMENT ON COLUMN features.type IS 'Type of feature: discrete or continuous';
 COMMENT ON COLUMN features.selected IS 'Whether this feature is selected for analysis';
+COMMENT ON COLUMN features.model_ready IS 'Whether this feature is ready for model training (set in Column Selection & Binning)';
+COMMENT ON COLUMN features.final_selected IS 'Whether this feature is selected for final model training (set in Model Training module)';
 
 -- Index for faster feature lookups
 CREATE INDEX idx_features_dataset_id ON features(dataset_id);

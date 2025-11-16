@@ -2,7 +2,7 @@ import { useState } from 'react';
 import './CSVReader.css';
 
 interface CSVReaderProps {
-  onCSVUploaded: (headers: string[], rows: any[], datasetPath: string) => void;
+  onCSVUploaded: (headers: string[], rows: any[], datasetPath: string, datasetId?: number) => void;
 }
 
 const CSVReader = ({ onCSVUploaded }: CSVReaderProps) => {
@@ -28,7 +28,12 @@ const CSVReader = ({ onCSVUploaded }: CSVReaderProps) => {
       }
 
       setFileName(file.name);
-      onCSVUploaded(data.columns, data.rows || [], data.dataset_path || '');
+      onCSVUploaded(
+        data.columns,
+        data.rows || [],
+        data.dataset_path || '',
+        data.dataset_id
+      );
     } catch (err: any) {
       setError(err.message);
     } finally {

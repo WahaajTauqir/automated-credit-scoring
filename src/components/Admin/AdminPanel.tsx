@@ -1,20 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import './AdminPanel.css';
-
-type AnalysisRecord = {
-  id: number;
-  dataset_path: string;
-  discrete_columns: string[];  // Changed to array
-  continuous_columns: string[];  // Changed to array
-  selected_columns: string[];  // Changed to array
-  target_variable: string;
-  created_at: string;
-  total_features?: number;
-  discrete_features?: number;
-  continuous_features?: number;
-  binning_data?: Record<string, any>;
-};
+import { AnalysisRecord } from '../../types/analysis';
+import { buildBinningState, buildTypeLookup } from '../../utils/binning';
 
 const AdminPanel: React.FC = () => {
   const navigate = useNavigate();
@@ -41,74 +29,25 @@ const AdminPanel: React.FC = () => {
       
       console.log('📊 Loaded record:', data);
       
-      // Load columns from the dataset file for this specific record
-      let columns: string[] = [];
-      try {
-        const loadDatasetRes = await fetch(`http://localhost:5000/api/record/${id}/load-dataset`);
-        if (loadDatasetRes.ok) {
-          const loadDatasetData = await loadDatasetRes.json();
-          columns = loadDatasetData.columns || [];
-          console.log('✅ Loaded columns from dataset:', columns.length, 'columns');
-        }
-      } catch (e) {
-        console.error('❌ Failed to load dataset columns:', e);
+      // Infer columns from record data (much faster than loading entire CSV file)
+      const allCols = new Set<string>();
+      if (Array.isArray(data.discrete_columns)) {
+        data.discrete_columns.forEach((col: string) => allCols.add(col));
       }
-      
-      // Fallback: infer columns from record data
-      if (columns.length === 0) {
-        const allCols = new Set<string>();
-        if (Array.isArray(data.discrete_columns)) {
-          data.discrete_columns.forEach((col: string) => allCols.add(col));
-        }
-        if (Array.isArray(data.continuous_columns)) {
-          data.continuous_columns.forEach((col: string) => allCols.add(col));
-        }
-        if (Array.isArray(data.selected_columns)) {
-          data.selected_columns.forEach((col: string) => allCols.add(col));
-        }
-        columns = Array.from(allCols);
-        console.log('⚠️ Using inferred columns:', columns.length, 'columns');
+      if (Array.isArray(data.continuous_columns)) {
+        data.continuous_columns.forEach((col: string) => allCols.add(col));
       }
-      
-      // Extract binning results from new format
-      const univariateResults: Record<string, any> = {};
-      const fineBinResults: Record<string, any> = {};
-      const woeIvResults: Record<string, any> = {};
-      
-      console.log('🔍 Checking binning_data:', {
-        hasBinningData: !!data.binning_data,
-        binningDataKeys: data.binning_data ? Object.keys(data.binning_data).length : 0,
-        sampleColumn: data.binning_data ? Object.keys(data.binning_data)[0] : 'none'
-      });
-      
-      if (data.binning_data) {
-        Object.entries(data.binning_data).forEach(([column, binning]: [string, any]) => {
-          console.log(`   Column ${column}:`, {
-            hasCoarse: !!binning.coarse,
-            hasFine: !!binning.fine,
-            hasWoe: !!binning.woe_iv,
-            coarseBins: binning.coarse?.bins?.length || 0,
-            fineBins: binning.fine?.bins?.length || 0,
-            woeBins: binning.woe_iv?.bins?.length || 0
-          });
-          
-          if (binning.coarse && binning.coarse.bins && binning.coarse.bins.length > 0) {
-            univariateResults[column] = binning.coarse;
-          }
-          if (binning.fine && binning.fine.bins && binning.fine.bins.length > 0) {
-            fineBinResults[column] = binning.fine.bins;
-          }
-          if (binning.woe_iv && binning.woe_iv.bins && binning.woe_iv.bins.length > 0) {
-            woeIvResults[column] = binning.woe_iv;
-          }
-        });
+      if (Array.isArray(data.selected_columns)) {
+        data.selected_columns.forEach((col: string) => allCols.add(col));
       }
+      const columns = Array.from(allCols);
+      console.log('✅ Using columns from record:', columns.length, 'columns');
       
-      console.log('📈 Extracted results:', {
-        univariate: Object.keys(univariateResults).length,
-        fineBin: Object.keys(fineBinResults).length,
-        woeIv: Object.keys(woeIvResults).length
-      });
+      const typeLookup = buildTypeLookup(
+        data.discrete_columns || [],
+        data.continuous_columns || []
+      );
+      const binningState = buildBinningState(data.binning_data, typeLookup);
       
       // Build state and navigate to SelectedColumnsPage directly
       const state = {
@@ -118,9 +57,13 @@ const AdminPanel: React.FC = () => {
         targetVariable: data.target_variable || '',
         recordId: id,
         datasetPath: data.dataset_path || '',
-        univariateResults,
-        fineBinResults,
-        woeIvResults,
+        columns: columns, // Include inferred columns for faster loading
+        univariateResults: binningState.univariate,
+        fineBinResults: binningState.fine,
+        woeIvResults: binningState.woe,
+        binningState,
+        modelReadyColumns: Array.isArray(data.dashboard_selected_columns) ? data.dashboard_selected_columns : [],
+        finalSelectedColumns: Array.isArray(data.final_selected_columns) ? data.final_selected_columns : [],
       };
       
       console.log('🚀 Navigating to /selected-columns with state');
@@ -167,7 +110,7 @@ const AdminPanel: React.FC = () => {
                 <td style={{ textAlign: 'center' }}>{rec.id}</td>
                 <td style={{ textAlign: 'center' }}>{rec.dataset_path}</td>
                 <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>
-                  {Array.isArray(rec.selected_columns) ? rec.selected_columns.join(', ') : rec.selected_columns}
+                  {rec.selected_columns.join(', ')}
                 </td>
                 <td style={{ textAlign: 'center' }}>{rec.created_at}</td>
                 <td style={{ textAlign: 'center' }}>

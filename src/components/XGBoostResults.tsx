@@ -15,6 +15,7 @@ interface XGBoostResultsProps {
     onGotoScoreCard?: () => void;
     // ✅ New prop to notify parent with model results
     onResultsUpdate?: (results: any) => void;
+    recordId?: number;
 }
 
 interface FeatureImportance {
@@ -72,7 +73,8 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
     onGenerateScoreCard,
     generatingScoreCard,
     onGotoScoreCard,
-    onResultsUpdate // ✅ new callback prop
+    onResultsUpdate,
+    recordId
 }) => {
     const [results, setResults] = useState<XGBoostResults | null>(null);
     const [loading, setLoading] = useState(false);
@@ -95,7 +97,8 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
                 body: JSON.stringify({
                     selected_variables: selectedVariables,
                     target: targetVariable,
-                    woe_transformed_data: woeTransformedData
+                    woe_transformed_data: woeTransformedData,
+                    record_id: recordId
                 })
             });
 

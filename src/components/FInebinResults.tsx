@@ -1,30 +1,31 @@
 import './Results.css';
 import { DiscreteValuesDropdown } from './DiscreteValues';
-
-export interface BinStats {
-  Bin: string;
-  Count: number;
-  Bad: number;
-  Good: number;
-  BadRate: number;
-  Range?: string; // Optional Range field for discrete variables
-}
+import { NormalizedBin } from '../types/analysis';
 
 interface FineBinResultsProps {
-  fineBinResults: Record<string, BinStats[]>;
+  fineBinResults: Record<string, NormalizedBin[]>;
   formatToFourDecimals: (value: any) => string;
-  discreteColumns?: string[]; // Prop to identify discrete variables
+  discreteColumns?: string[];
 }
 
 const FineBinResults = ({ fineBinResults, formatToFourDecimals, discreteColumns = [] }: FineBinResultsProps) => {
-
   if (!fineBinResults || Object.keys(fineBinResults).length === 0) return null;
 
   return (
     <div className="results-container" aria-label="Fine binning results summary">
       <h2>Fine Binning Results</h2>
       {Object.entries(fineBinResults).map(([col, bins]) => {
+        if (!Array.isArray(bins) || bins.length === 0) return null;
         const isDiscrete = discreteColumns.includes(col);
+
+        const sortedBins = [...bins].sort((a, b) => {
+          const minA = typeof a.Min === 'number' ? a.Min : null;
+          const minB = typeof b.Min === 'number' ? b.Min : null;
+          if (minA !== null && minB !== null) return minA - minB;
+          const labelA = a.Bin ?? '';
+          const labelB = b.Bin ?? '';
+          return labelA.localeCompare(labelB);
+        });
 
         return (
           <article key={col} className="results-card" aria-label={`Fine binning table for ${col}`}>
@@ -42,46 +43,46 @@ const FineBinResults = ({ fineBinResults, formatToFourDecimals, discreteColumns 
                     <tr>
                       <th>Bin</th>
                       {isDiscrete && <th>Range</th>}
-                      <th>Count</th>
+                      {!isDiscrete && (
+                        <>
+                          <th>Min</th>
+                          <th>Max</th>
+                        </>
+                      )}
                       <th>Bad</th>
                       <th>Good</th>
-                      <th>Bad Rate</th>
+                      <th>Total</th>
+                      <th>Bad Rate (%)</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {([...bins])
-                      .slice()
-                      .sort((a: any, b: any) => {
-                        const getMin = (r: any) => {
-                          const m = r.Min ?? r.min ?? r.MinValue ?? r.minValue ?? null;
-                          const v = m === null || m === undefined ? NaN : Number(m);
-                          return Number.isFinite(v) ? v : NaN;
-                        };
-                        const minA = getMin(a);
-                        const minB = getMin(b);
-                        if (!Number.isNaN(minA) && !Number.isNaN(minB)) return minA - minB;
-                        const la = (a.Bin || a.bin || '').toString();
-                        const lb = (b.Bin || b.bin || '').toString();
-                        const na = parseInt((la.match(/\d+/) || [])[0] || '', 10);
-                        const nb = parseInt((lb.match(/\d+/) || [])[0] || '', 10);
-                        if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
-                        return la.localeCompare(lb);
-                      })
-                      .map((bin, idx) => {
-                      const rangeValue = String(bin.Range ?? '');
+                    {sortedBins.map((bin, idx) => {
+                      const label = bin.Bin ?? `Bin_${idx + 1}`;
+                      const rangeValue = typeof bin.Range === 'string' ? bin.Range : '';
+                      const badRate =
+                        typeof bin['Bad Rate'] === 'number'
+                          ? bin['Bad Rate']
+                          : (typeof bin.bad_rate === 'number'
+                              ? bin.bad_rate
+                              : (bin.Total > 0 ? (bin.Bad / bin.Total) * 100 : 0));
 
                       return (
-                        <tr key={idx}>
-                          <td>{bin.Bin}</td>
-                          {isDiscrete && (
+                        <tr key={`${col}-${label}`}>
+                          <td>{label}</td>
+                          {isDiscrete ? (
                             <td>
                               <DiscreteValuesDropdown rangeValue={rangeValue} />
                             </td>
+                          ) : (
+                            <>
+                              <td>{bin.Min ?? '—'}</td>
+                              <td>{bin.Max ?? '—'}</td>
+                            </>
                           )}
-                          <td>{bin.Count}</td>
                           <td>{bin.Bad}</td>
                           <td>{bin.Good}</td>
-                          <td>{formatToFourDecimals(bin.BadRate)}</td>
+                          <td>{bin.Total}</td>
+                          <td>{formatToFourDecimals(badRate)}</td>
                         </tr>
                       );
                     })}
