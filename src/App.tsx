@@ -4,6 +4,7 @@ import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
 import AdminPanel from './components/Admin/AdminPanel';
 import SelectedColumnsPage from './components/SelectedColumnsPage';
+import CreditScorePage from './components/CreditScorePage';
 import './App.css';
 import './components/Admin/AdminPanel.css';
 import { AnalysisRecord } from './types/analysis';
@@ -693,8 +694,11 @@ function App() {
                             <button
                               className="record-action-btn record-action-check"
                               onClick={() => {
-                                // Dummy handler - will be implemented later
-                                alert(`Checking credit score for ${getRecordName(rec.id)}`);
+                                navigate('/credit-score', {
+                                  state: {
+                                    recordId: rec.id
+                                  }
+                                });
                               }}
                               disabled={!hasScoreCard(rec.id)}
                               title={hasScoreCard(rec.id) ? 'Check credit score' : 'Score card not generated yet'}
@@ -720,6 +724,7 @@ function App() {
       />
       <Route path="/admin" element={<AdminPanel />} />
       <Route path="/selected-columns" element={<SelectedColumnsPage />} />
+      <Route path="/credit-score" element={<CreditScorePage />} />
     </Routes>
   );
 }
