@@ -105,6 +105,41 @@ const SelectedColumnsPage = () => {
   const [autoBinningModeLoading, setAutoBinningModeLoading] = useState(false);
   const [autoBinningModeProgress, setAutoBinningModeProgress] = useState<string>('');
   const [autoBinningModePercentage, setAutoBinningModePercentage] = useState<number>(0);
+  const [fullAutoMonotonicLoading, setFullAutoMonotonicLoading] = useState(false);
+  const [fullAutoMonotonicProgress, setFullAutoMonotonicProgress] = useState('');
+  const [fullAutoMonotonicPercentage, setFullAutoMonotonicPercentage] = useState(0);
+  const [fullAutoMonotonicCurrent, setFullAutoMonotonicCurrent] = useState('');
+  const FULL_AUTO_CONCURRENCY = 4;
+
+  const updateLocalWoeState = useCallback(
+    (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
+      if (!payload) {
+        return false;
+      }
+      const normalized = normalizeBinArray(payload.stats || payload.bins || []);
+      if (normalized.length === 0 && typeof payload.iv !== 'number') {
+        return false;
+      }
+      setWoeIvResults((prev) => {
+        const next = {
+          ...prev,
+          [col]: {
+            iv: typeof payload.iv === 'number' ? payload.iv : prev[col]?.iv,
+            stats: normalized.length > 0 ? normalized : prev[col]?.stats || [],
+          },
+        };
+        woeIvResultsRef.current = next;
+        return next;
+      });
+      setWoeReadyColumns((prev) => {
+        const next = new Set(prev);
+        next.add(col);
+        return next;
+      });
+      return true;
+    },
+    [setWoeIvResults, setWoeReadyColumns]
+  );
 
 
   // Add to your existing state declarations
@@ -735,22 +770,122 @@ const SelectedColumnsPage = () => {
       generateScoreCard();
     }, 50);
   };
-  // API calls
-  const loadSavedFineBins = async (col: string, varType: string): Promise<{ merges: Record<string, any[]> | undefined }> => {
-    const cachedMerges = binMergeHistory[col];
-    if (cachedMerges && Object.keys(cachedMerges).length > 0) {
-      return { merges: cachedMerges };
+  const runFineBinPassThrough = async (
+    col: string,
+    varType: string,
+    mergesOverride?: Record<string, any[]>
+  ): Promise<{ merges: Record<string, any[]> } | null> => {
+    if (!recordId || !targetVariable) {
+      return null;
     }
-    if (!recordId || !targetVariable) return { merges: undefined };
+    try {
+      const res = await fetch('http://localhost:5000/api/fine-bin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          variable: col,
+          target: targetVariable,
+          type: varType,
+          bin_merges: mergesOverride || {},
+          record_id: recordId,
+          dashboard_selected_columns: Array.from(selectedForModeling),
+        }),
+      });
+      if (!res.ok) {
+        console.warn(`Fine-bin fallback failed for ${col}:`, await res.text());
+        return null;
+      }
+      const data = await res.json();
+      if (!data.success || data.error) {
+        console.warn(`Fine-bin fallback response for ${col} indicated failure`, data);
+        return null;
+      }
+      const normalizedStats = normalizeBinArray(data.stats || []);
+      const mergesToPersist = data.bin_merges || mergesOverride || {};
+      setFineBinResults((prev) => ({ ...prev, [col]: normalizedStats }));
+      setBinMergeHistory((prev) => ({ ...prev, [col]: mergesToPersist }));
+      setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
+      try {
+        await calculateAllBinMetrics(col, normalizedStats);
+      } catch (e) {
+
+      }
+      const appliedWoe = updateLocalWoeState(col, data.woe_iv);
+      if (!appliedWoe) {
+        await fetchWoeIv(col, mergesToPersist, false);
+      }
+      return { merges: mergesToPersist };
+    } catch (error) {
+      console.error(`Fine-bin fallback crashed for ${col}:`, error);
+      return null;
+    }
+  };
+
+  // API calls
+  const loadSavedFineBins = async (
+    col: string,
+    varType: string
+  ): Promise<{ merges: Record<string, any[]> | undefined; hydrated: boolean }> => {
+    const cachedMerges = binMergeHistory[col];
+    const cachedBins = fineBinResults[col];
+    if (
+      cachedMerges &&
+      Object.keys(cachedMerges).length > 0 &&
+      Array.isArray(cachedBins) &&
+      cachedBins.length > 0
+    ) {
+      return { merges: cachedMerges, hydrated: true };
+    }
+
+    if (!recordId || !targetVariable) return { merges: undefined, hydrated: false };
+
+    // First attempt: hydrate directly from persisted fine-bin cache (no recomputation)
+    try {
+      const cacheResp = await fetch(`http://localhost:5000/api/finebin-cache/${recordId}/${encodeURIComponent(col)}`);
+      if (cacheResp.ok) {
+        const cacheData = await cacheResp.json();
+        if (cacheData?.success && Array.isArray(cacheData.stats) && cacheData.stats.length > 0) {
+          const normalizedStats = normalizeBinArray(cacheData.stats);
+          setFineBinResults((prev) => ({ ...prev, [col]: normalizedStats }));
+          const mergesFromCache: Record<string, any[]> = cacheData.bin_merges || {};
+          if (Object.keys(mergesFromCache).length > 0) {
+            setBinMergeHistory((prev) => ({ ...prev, [col]: mergesFromCache }));
+          }
+          setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
+          try {
+            await calculateAllBinMetrics(col, normalizedStats);
+          } catch (e) {
+
+          }
+          const cacheWoePayload =
+            cacheData?.woe_iv ||
+            (typeof cacheData?.iv === 'number'
+              ? { iv: cacheData.iv, stats: cacheData.stats }
+              : undefined);
+          const woeApplied = updateLocalWoeState(col, cacheWoePayload);
+          if (!woeApplied) {
+            await fetchWoeIv(col, mergesFromCache, false);
+          }
+          return {
+            merges: Object.keys(mergesFromCache).length > 0 ? mergesFromCache : cachedMerges,
+            hydrated: true,
+          };
+        }
+      }
+    } catch (cacheError) {
+      console.warn(`Fine-bin cache hydrate failed for ${col}:`, cacheError);
+    }
+
+    // Fallback: pull merge blueprint then recompute via fine-bin endpoint
     try {
       const resp = await fetch(`http://localhost:5000/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
       if (!resp.ok) {
         console.error(`Failed to load finebin details for ${col}:`, resp.status);
-        return { merges: undefined };
+        return { merges: undefined, hydrated: false };
       }
       const details = await resp.json();
       if (!Array.isArray(details) || details.length === 0) {
-        return { merges: undefined };
+        return { merges: undefined, hydrated: false };
       }
       const savedMerges: Record<string, any[]> = {};
       details.forEach((row: any) => {
@@ -759,45 +894,16 @@ const SelectedColumnsPage = () => {
         }
       });
       if (Object.keys(savedMerges).length === 0) {
-        return { merges: undefined };
+        return { merges: undefined, hydrated: false };
       }
-      const res = await fetch('http://localhost:5000/api/fine-bin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          variable: col,
-          target: targetVariable,
-          type: varType,
-          bin_merges: savedMerges,
-          record_id: recordId,
-          // Pass current dashboard selections so backend doesn't wipe them
-          dashboard_selected_columns: Array.from(selectedForModeling),
-        }),
-      });
-      if (!res.ok) {
-        console.warn(`Skipping fine-bin rehydrate for ${col}:`, await res.text());
-        return { merges: undefined };
-      }
-      const data = await res.json();
-      if (data.success && !data.error) {
-        const normalizedStats = normalizeBinArray(data.stats || []);
-        setFineBinResults((prev) => ({ ...prev, [col]: normalizedStats }));
-        // Recompute scoring metrics for the restored bins
-        try {
-          await calculateAllBinMetrics(col, normalizedStats);
-        } catch (e) {
-
-        }
-        setBinMergeHistory((prev) => ({ ...prev, [col]: data.bin_merges || savedMerges }));
-        setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
-        return { merges: data.bin_merges || savedMerges };
-      } else {
-        console.warn(`Fine-bin rehydrate response for ${col} indicated failure`, data);
+      const fallbackResult = await runFineBinPassThrough(col, varType, savedMerges);
+      if (fallbackResult) {
+        return { merges: fallbackResult.merges, hydrated: true };
       }
     } catch (e) {
       console.warn(`Fine-bin rehydrate failed for ${col}:`, e);
     }
-    return { merges: undefined };
+    return { merges: undefined, hydrated: false };
   };
   const loadSavedData = async () => {
     if (!recordId) return;
@@ -880,9 +986,12 @@ const SelectedColumnsPage = () => {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
 
       // First, try to load saved fine bins from database
-      const { merges } = await loadSavedFineBins(col, varType);
+      const { merges, hydrated } = await loadSavedFineBins(col, varType);
 
-      // If we have saved merges, we have data in database - use it
+      if (hydrated) {
+        return;
+      }
+
       if (merges && Object.keys(merges).length > 0) {
         // Data exists in database, bins were loaded by loadSavedFineBins
         const mergePayload = merges;
@@ -1207,11 +1316,18 @@ const SelectedColumnsPage = () => {
     showNotification(`Binning reset for ${col}`);
   };
 
-  const runAutoMonotonicBinning = async (col: string) => {
+  const runAutoMonotonicBinning = async (
+    col: string,
+    options: { silent?: boolean; onError?: (message: string) => void } = {}
+  ): Promise<boolean> => {
+    const { silent = false, onError } = options;
+    if (!col) return false;
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
 
     try {
-      showNotification(`Running auto-monotonic binning for ${col}...`);
+      if (!silent) {
+        showNotification(`Running auto-monotonic binning for ${col}...`);
+      }
 
       // Call the auto-monotonic-binning API
       const response = await fetch('http://localhost:5000/api/auto-monotonic-binning', {
@@ -1249,9 +1365,10 @@ const SelectedColumnsPage = () => {
         console.error('Error calculating bin metrics:', e);
       }
 
-      const latestWoe = await fetchWoeIv(col, data.bin_merges || {}, false);
-      if (latestWoe) {
-        setWoeReadyColumns(prev => new Set(prev).add(col));
+      const woeApplied = updateLocalWoeState(col, data.woe_iv);
+      let latestWoe: Record<string, any> | null = null;
+      if (!woeApplied) {
+        latestWoe = await fetchWoeIv(col, data.bin_merges || {}, false);
       }
 
       await persistFineBinColumn(col, data.bin_merges || {}, {
@@ -1266,13 +1383,138 @@ const SelectedColumnsPage = () => {
         `${data.num_bins_original} → ${data.num_bins_final} bins, ` +
         `WOE trend: ${data.direction}, monotonic: ${data.is_monotonic ? 'Yes' : 'No'}`;
 
-      showNotification(message);
+      if (!silent) {
+        showNotification(message);
+      }
+      return true;
 
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       console.error('Auto-binning error:', err);
-      showNotification(`Error in auto-binning: ${err instanceof Error ? err.message : String(err)}`);
-      alert('Error running auto-monotonic binning');
+      onError?.(message);
+      if (!silent) {
+        showNotification(`Error in auto-binning: ${message}`);
+        alert('Error running auto-monotonic binning');
+      }
+      return false;
     }
+  };
+
+  const runFullAutoMonotonicBinning = async () => {
+    if (fullAutoMonotonicLoading || autoBinningModeLoading) return;
+    if (!targetVariable) {
+      showNotification('Select a target variable before running Full Auto Monotonic Binning.');
+      return;
+    }
+    const eligibleColumns = Array.from(
+      new Set(
+        (selectedColumns || []).filter((col) =>
+          (discreteColumns || []).includes(col) || (continuousColumns || []).includes(col)
+        )
+      )
+    ).filter((col) => col && col !== targetVariable);
+
+    if (eligibleColumns.length === 0) {
+      showNotification('No discrete or continuous features are available for Full Auto Monotonic Binning.');
+      return;
+    }
+
+    setFullAutoMonotonicLoading(true);
+    setFullAutoMonotonicProgress('Initializing full auto monotonic binning...');
+    setFullAutoMonotonicPercentage(0);
+    setFullAutoMonotonicCurrent('');
+
+    const failedColumns: { column: string; reason: string }[] = [];
+    const cachedColumns: string[] = [];
+    let processed = 0;
+
+    const processColumn = async (col: string) => {
+      const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+      setFullAutoMonotonicCurrent(col);
+      setFullAutoMonotonicProgress(`Processing ${col}...`);
+
+      const hasFine = Array.isArray(fineBinResults[col]) && fineBinResults[col].length > 0;
+      const hasWoe = Array.isArray(woeIvResults[col]?.stats) && woeIvResults[col]?.stats.length > 0;
+      if (hasFine && hasWoe) {
+        cachedColumns.push(col);
+        return;
+      }
+      if (hasFine && !hasWoe) {
+        const mergesForCol = binMergeHistory[col] && Object.keys(binMergeHistory[col] || {}).length > 0
+          ? binMergeHistory[col]
+          : undefined;
+        await fetchWoeIv(col, mergesForCol, false);
+        cachedColumns.push(col);
+        return;
+      }
+
+      try {
+        const { hydrated } = await loadSavedFineBins(col, varType);
+        if (hydrated) {
+          cachedColumns.push(col);
+          return;
+        }
+
+        const errors: string[] = [];
+        const success = await runAutoMonotonicBinning(col, {
+          silent: true,
+          onError: (message) => errors.push(message),
+        });
+
+        if (!success) {
+          const fallback = await runFineBinPassThrough(col, varType);
+          if (fallback) {
+            cachedColumns.push(col);
+          } else {
+            failedColumns.push({ column: col, reason: errors[0] || 'Auto-binning failed' });
+          }
+        }
+      } catch (err) {
+        console.error(`Full auto monotonic error for ${col}:`, err);
+        failedColumns.push({ column: col, reason: err instanceof Error ? err.message : String(err) });
+      }
+    };
+
+    const queue = [...eligibleColumns];
+    const workerCount = Math.min(FULL_AUTO_CONCURRENCY, Math.max(1, queue.length));
+    const workers = Array.from({ length: workerCount }).map(async () => {
+      while (queue.length > 0) {
+        const next = queue.shift();
+        if (!next) break;
+        await processColumn(next);
+        processed += 1;
+        setFullAutoMonotonicPercentage(Math.round((processed / eligibleColumns.length) * 100));
+      }
+    });
+
+    await Promise.all(workers);
+
+    setFullAutoMonotonicProgress(
+      failedColumns.length === 0
+        ? 'Full Auto Monotonic Binning complete!'
+        : `Completed with warnings for ${failedColumns.length} feature(s).`
+    );
+    setFullAutoMonotonicPercentage(100);
+
+    if (failedColumns.length === 0) {
+      const cachedNote = cachedColumns.length > 0
+        ? ` Reused cached bins for ${cachedColumns.length} ${cachedColumns.length === 1 ? 'feature' : 'features'}.`
+        : '';
+      showNotification(`Full Auto Monotonic Binning finished for all requested features.${cachedNote}`);
+    } else {
+      const failurePreview = failedColumns.slice(0, 3).map(({ column }) => column).join(', ');
+      showNotification(
+        `Full Auto Monotonic finished with ${failedColumns.length} failure(s). ${failurePreview}${failedColumns.length > 3 ? ', ...' : ''
+        }. Check console for details.`
+      );
+    }
+
+    setTimeout(() => {
+      setFullAutoMonotonicLoading(false);
+      setFullAutoMonotonicProgress('');
+      setFullAutoMonotonicPercentage(0);
+      setFullAutoMonotonicCurrent('');
+    }, 750);
   };
 
   const hydrateFromCache = async (col: string) => {
@@ -1424,7 +1666,10 @@ const SelectedColumnsPage = () => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
     try {
       // Check if there are saved fine bins for this column
-      const { merges } = await loadSavedFineBins(col, varType);
+      const { merges, hydrated } = await loadSavedFineBins(col, varType);
+      if (hydrated) {
+        return;
+      }
       const mergePayload = merges && Object.keys(merges).length > 0 ? merges : undefined;
 
 
@@ -2097,20 +2342,32 @@ const SelectedColumnsPage = () => {
             )}
             {currentStep === 1 && (
               <div className="binning-mode-toggle">
-                <button
-                  className={`mode-toggle-btn ${binningMode === 'auto' ? 'active' : ''}`}
-                  onClick={handleSwitchToAutoBinning}
-                  disabled={autoBinningModeLoading}
-                >
-                  Auto Binning
-                </button>
-                <button
-                  className={`mode-toggle-btn ${binningMode === 'manual' ? 'active' : ''}`}
-                  onClick={() => setBinningMode('manual')}
-                  disabled={autoBinningModeLoading}
-                >
-                  Manual Binning
-                </button>
+                <div className="mode-toggle-group">
+                  <button
+                    className={`mode-toggle-btn ${binningMode === 'auto' ? 'active' : ''}`}
+                    onClick={handleSwitchToAutoBinning}
+                    disabled={autoBinningModeLoading || fullAutoMonotonicLoading}
+                  >
+                    Auto Binning
+                  </button>
+                  <button
+                    className={`mode-toggle-btn ${binningMode === 'manual' ? 'active' : ''}`}
+                    onClick={() => setBinningMode('manual')}
+                    disabled={autoBinningModeLoading || fullAutoMonotonicLoading}
+                  >
+                    Manual Binning
+                  </button>
+                  {binningMode === 'auto' && (
+                    <button
+                      className={`mode-toggle-btn full-auto-action ${fullAutoMonotonicLoading ? 'loading' : ''}`}
+                      onClick={runFullAutoMonotonicBinning}
+                      disabled={fullAutoMonotonicLoading}
+                    >
+                      <span className="btn-icon">⚡</span>
+                      Full Auto Monotonic
+                    </button>
+                  )}
+                </div>
               </div>
             )}
             {currentStep === 1 && binningMode === 'auto' && (
@@ -3290,6 +3547,31 @@ const SelectedColumnsPage = () => {
                 {autoBinningModePercentage > 0 && autoBinningModePercentage < 100
                   ? 'Processing features...'
                   : 'Please wait while we load all features...'}
+              </p>
+            </div>
+          </div>
+        )}
+        {fullAutoMonotonicLoading && (
+          <div className="full-auto-overlay">
+            <div className="full-auto-modal">
+              <div className="full-auto-animation">
+                <span className="full-auto-icon">⚡</span>
+              </div>
+              <h3 className="loading-title">Full Auto Monotonic</h3>
+              <p className="loading-progress">
+                {fullAutoMonotonicProgress}
+                {fullAutoMonotonicCurrent ? ` • ${fullAutoMonotonicCurrent}` : ''}
+              </p>
+              <div className="progress-bar-container full-auto">
+                <div
+                  className="progress-bar-fill full-auto"
+                  style={{ width: `${fullAutoMonotonicPercentage}%` }}
+                ></div>
+              </div>
+              <p className="loading-subtitle">
+                {fullAutoMonotonicPercentage < 100
+                  ? 'Applying monotonic binning across all features...'
+                  : 'All features processed.'}
               </p>
             </div>
           </div>

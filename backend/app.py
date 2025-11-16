@@ -1423,10 +1423,18 @@ def auto_monotonic_binning_api():
         except Exception as bin_err:
             import traceback
             print(f"ERROR in auto-binning fine binning for {var}: {traceback.format_exc()}")
-            return jsonify({"error": f"Auto-binning fine binning failed for {var}: {str(bin_err)}"}), 400
+            return jsonify({
+                "success": False,
+                "reason": "fine_binning_failed",
+                "error": f"Auto-binning fine binning failed for {var}: {str(bin_err)}"
+            })
         
         if tab is None or (hasattr(tab, 'empty') and tab.empty) or len(tab) == 0:
-            return jsonify({"error": f"Auto-binning produced no results for {var}. Check if variable has valid data and sufficient bins."}), 400
+            return jsonify({
+                "success": False,
+                "reason": "no_bins",
+                "error": f"Auto-binning produced no results for {var}. Check if variable has valid data and sufficient bins."
+            })
         
         # Recalculate WOE/IV using the result from auto binning
         try:
@@ -4580,6 +4588,90 @@ def get_finebin_details(record_id, column_name):
         import traceback
         traceback.print_exc()
         return jsonify([])  # Return empty array on error
+
+
+@app.route('/api/finebin-cache/<int:record_id>/<string:column_name>', methods=['GET'])
+def get_finebin_cache(record_id: int, column_name: str):
+    """
+    Retrieve persisted fine binning stats + merges without recalculating algorithms.
+    Used to hydrate manual binning UI and the new Full Auto Monotonic mode.
+    """
+    print(f"\n[API] /api/finebin-cache/{record_id}/{column_name} (GET) called")
+    try:
+        dataset_id = record_id
+        feature = get_feature_by_name(dataset_id, column_name)
+        if not feature:
+            return jsonify({"success": False, "reason": "feature_not_found"})
+
+        fine_step = get_binning_step_by_type(feature['id'], 'fine')
+        if not fine_step:
+            return jsonify({"success": False, "reason": "fine_step_missing"})
+
+        fine_step_id = fine_step['id']
+        bins = get_bins_by_step(fine_step_id)
+        if not bins:
+            return jsonify({"success": False, "reason": "no_bins"})
+
+        merged_bins = get_merged_bins_by_step(fine_step_id) or []
+        totals = get_binning_totals(fine_step_id)
+
+        def _safe_float(value):
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return value
+
+        stats = []
+        for row in bins:
+            label = row.get('bin_label')
+            if not label:
+                bin_number = row.get('bin_number')
+                label = f"Bin_{bin_number}" if bin_number is not None else str(row.get('id', ''))
+            stats.append({
+                'Bin': label,
+                'Range': row.get('range_text'),
+                'Good': int(row.get('good_count') or 0),
+                'Bad': int(row.get('bad_count') or 0),
+                'Total': int(row.get('total_count') or 0),
+                'Bad Rate': _safe_float(row.get('bad_rate')),
+                'Freq%': _safe_float(row.get('freq_percent')),
+                'WOE': _safe_float(row.get('woe')),
+                'IV': _safe_float(row.get('iv')),
+                'Min': _safe_float(row.get('min_value')),
+                'Max': _safe_float(row.get('max_value')),
+            })
+
+        merges_map = {}
+        for merged in merged_bins:
+            key = str(merged.get('merged_bin_number'))
+            labels = merged.get('original_bin_labels')
+            if not labels:
+                ids = merged.get('original_bin_ids') or []
+                labels = [f"Bin_{bid}" for bid in ids]
+            merges_map[key] = labels
+
+        response_payload = {
+            "success": True,
+            "stats": stats,
+            "bin_merges": merges_map,
+            "iv": _safe_float(fine_step.get('iv_value')),
+            "metadata": {
+                "step_id": fine_step_id,
+                "method": fine_step.get('method'),
+                "num_bins": len(stats),
+                "is_monotonic": fine_step.get('is_monotonic'),
+                "monotonic_direction": fine_step.get('monotonic_direction'),
+                "totals": totals
+            }
+        }
+
+        return jsonify(response_payload)
+    except Exception as exc:
+        print(f"[get_finebin_cache] ERROR: {exc}")
+        traceback.print_exc()
+        return jsonify({"success": False, "reason": "exception", "error": str(exc)}), 500
 
 # ----------- Debug Binning -----------
 @app.route('/api/debug-binning/<string:variable>', methods=['GET'])
