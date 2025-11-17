@@ -6,6 +6,7 @@ import RandomForestResults from './RandomForestResults';
 import XGBoostResults from './XGBoostResults';
 import { DiscreteValuesDropdown } from './DiscreteValues';
 import ColumnPanels from './ColumnsPanel';
+import PreprocessingDetails from './PreprocessingDetails';
 // import WoeIvResults from './WoeIvResults';
 import './SelectedColumnsPage.css';
 import { buildBinningState, buildTypeLookup, normalizeBinArray, prepareBinMetricsPayload } from '../utils/binning';
@@ -110,7 +111,8 @@ const SelectedColumnsPage = () => {
   const [fullAutoMonotonicPercentage, setFullAutoMonotonicPercentage] = useState(0);
   const [fullAutoMonotonicCurrent, setFullAutoMonotonicCurrent] = useState('');
   const FULL_AUTO_CONCURRENCY = 4;
-
+  const [showPreprocessing, setShowPreprocessing] = useState(false);
+  const [preprocessedDatasetId, setPreprocessedDatasetId] = useState<number | undefined>();
   const updateLocalWoeState = useCallback(
     (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
       if (!payload) {
@@ -464,7 +466,7 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  const handleProceedToBinning = async () => {
+  const handleProceedToFeatureSelection = async () => {
     if (selectedForUnivariate.length === 0) {
       alert('Please select at least one column.');
       return;
@@ -487,7 +489,7 @@ const SelectedColumnsPage = () => {
       if (!data.error) {
         if (data.id) setRecordId(data.id);
         setSelectedColumns(selectedForUnivariate);
-        setCurrentStep(1); // Move to Binning step
+        setCurrentStep(2); // Move to Binning step (Step 2)
       } else {
         alert(`Error: ${data.error}`);
       }
@@ -540,7 +542,6 @@ const SelectedColumnsPage = () => {
 
   // Utility functions
 
-  // Calculate metrics for all bins of a column
   // Calculate metrics for all bins of a column
   const handleTestScoreCard = async (modelType: string = selectedModelForScorecard) => {
     setTestScoreLoading(true);
@@ -765,7 +766,7 @@ const SelectedColumnsPage = () => {
     }
   };
   const gotoScoreCardAndGenerate = () => {
-    setCurrentStep(3);
+    setCurrentStep(4);
     setTimeout(() => {
       generateScoreCard();
     }, 50);
@@ -2034,14 +2035,16 @@ const SelectedColumnsPage = () => {
   };
   const canGoNext = () => {
     switch (currentStep) {
-      case 0:
-        return selectedForUnivariate.length > 0 && targetVariable !== ''; // Need selected columns and target variable
-      case 1:
-        return woeReadyColumns.size > 0; // Need at least one WOE-ready column to proceed
-      case 2:
-        return woeReadyColumns.size > 0; // Can proceed to Score Card if WOE-ready columns exist
-      case 3:
-        return false; // Already at last step
+      case 0: // Data Preprocessing - can always proceed
+        return true;
+      case 1: // Feature Selection - need selected columns and target
+        return selectedForUnivariate.length > 0 && targetVariable !== '';
+      case 2: // Binning - need at least one WOE-ready column
+        return woeReadyColumns.size > 0;
+      case 3: // Models - need at least one WOE-ready column
+        return woeReadyColumns.size > 0;
+      case 4: // Score Card - last step, no next
+        return false;
       default:
         return false;
     }
@@ -2148,12 +2151,16 @@ const SelectedColumnsPage = () => {
       <div className="page-container">
         <div className="progress-header">
           <div className="progress-bar" role="navigation" aria-label="Analysis steps">
-            {['Feature Selection', 'Binning', 'Models', 'Score Card'].map((step, index) => (
+            {['Data Preprocessing', 'Feature Selection', 'Binning', 'Models', 'Score Card'].map((step, index) => (
               <button
                 key={step}
-                className={`progress-step ${currentStep === index ? 'active' : ''} ${currentStep > index ? 'completed' : ''
-                  }`}
-                disabled={true}
+                className={`progress-step ${currentStep === index ? 'active' : ''} ${currentStep > index ? 'completed' : ''}`}
+                onClick={() => {
+                  if (index <= currentStep) {
+                    setCurrentStep(index);
+                  }
+                }}
+                disabled={index > currentStep}
                 aria-current={currentStep === index ? 'step' : undefined}
                 aria-label={`${step} step`}
               >
@@ -2173,12 +2180,17 @@ const SelectedColumnsPage = () => {
             </button>
             <button
               className="progress-action-btn next-button"
-              disabled={currentStep === 3}
+              disabled={currentStep === 4 || !canGoNext()} // Updated to 4 since you have 5 steps (0-4)
               onClick={() => {
                 if (currentStep === 0) {
-                  handleProceedToBinning();
-                } else if (currentStep < 3) {
-                  setCurrentStep((prev) => Math.min(3, prev + 1));
+                  // From Data Preprocessing, go to Feature Selection
+                  setCurrentStep(1);
+                } else if (currentStep === 1) {
+                  // From Feature Selection, go to Binning
+                  handleProceedToFeatureSelection();
+                } else if (currentStep < 4) {
+                  // For other steps, just increment
+                  setCurrentStep((prev) => Math.min(4, prev + 1));
                 }
               }}
               aria-label="Go to next step"
@@ -2188,8 +2200,9 @@ const SelectedColumnsPage = () => {
           </div>
         </div>
         {notification && <div className="notification" role="alert">{notification}</div>}
-        <div className={`main-content-wrapper ${currentStep === 0 || currentStep === 2 || currentStep === 3 ? 'full-width' : ''}`}>
-          {(currentStep !== 0 && currentStep !== 2 && currentStep !== 3) && (
+        <div className={`main-content-wrapper ${currentStep === 0 || currentStep === 1 || currentStep === 3 || currentStep === 4 ? 'full-width' : ''}`}>
+          {/* Show sidebar only for Binning step (Step 2) */}
+          {(currentStep === 2) && (
             <aside className="column-selection-section" aria-label="Scrollable column selection panel">
               <h3>Columns Dashboard</h3>
               <div className="sidebar-controls">
@@ -2250,8 +2263,47 @@ const SelectedColumnsPage = () => {
               </div>
             </aside>
           )}
+
           <section className="content-section">
+            {/* Step 0: Data Preprocessing */}
             {currentStep === 0 && (
+              <div className="preprocessing-step" style={{ width: '100%' }}>
+                <PreprocessingDetails
+                  datasetId={recordId}
+                  onPreprocessingComplete={(newDatasetId) => {
+                    setPreprocessedDatasetId(newDatasetId);
+                    setRecordId(newDatasetId);
+                    setCurrentStep(1);
+                    showNotification('Data preprocessing completed successfully!');
+                    loadSavedData();
+                  }}
+                />
+
+                {/* Skip preprocessing option */}
+                <div className="preprocessing-skip" style={{ textAlign: 'center', marginTop: '20px' }}>
+                  <button
+                    className="skip-preprocessing-btn"
+                    onClick={() => setCurrentStep(1)}
+                    style={{
+                      background: 'transparent',
+                      border: '1px solid #ccc',
+                      color: '#666',
+                      padding: '8px 16px',
+                      borderRadius: '4px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Skip Preprocessing & Continue
+                  </button>
+                  <p style={{ fontSize: '12px', color: '#888', marginTop: '8px' }}>
+                    You can always come back to preprocessing later
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Step 1: Feature Selection */}
+            {currentStep === 1 && (
               <div className="column-selection-step" style={{ width: '100%' }}>
                 <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '16px' }}>
                   <button
@@ -2313,6 +2365,13 @@ const SelectedColumnsPage = () => {
                   >
                     AI Separation (All Columns)
                   </button>
+                  <button
+                    className="assign-button"
+                    onClick={() => setCurrentStep(0)}
+                    style={{ background: '#28a745' }}
+                  >
+                    Back to Preprocessing
+                  </button>
                 </div>
                 <div style={{ width: '100%' }}>
                   <ColumnPanels
@@ -2340,7 +2399,7 @@ const SelectedColumnsPage = () => {
                 </div>
               </div>
             )}
-            {currentStep === 1 && (
+            {currentStep === 2 && (
               <div className="binning-mode-toggle">
                 <div className="mode-toggle-group">
                   <button
@@ -2370,7 +2429,7 @@ const SelectedColumnsPage = () => {
                 </div>
               </div>
             )}
-            {currentStep === 1 && binningMode === 'auto' && (
+            {binningMode === 'auto' && (
               <div className="auto-binning-container">
                 <div className="auto-binning-grid">
                   {selectedColumns.map((col) => {
@@ -2474,7 +2533,7 @@ const SelectedColumnsPage = () => {
                 </div>
               </div>
             )}
-            {currentStep === 1 && binningMode === 'manual' && activeColumn && (() => {
+            {currentStep === 2 && binningMode === 'manual' && activeColumn && (() => {
               const isContinuousColumn = (continuousColumns || []).includes(activeColumn);
               const coarseRows: NormalizedBin[] = coarseBinResults[activeColumn] || [];
               const fineRowSource = fineBinResults[activeColumn];
@@ -3246,7 +3305,7 @@ const SelectedColumnsPage = () => {
                 </div>
               );
             })()}
-            {currentStep === 2 && (
+            {currentStep === 3 && (
               <div className="model-selection">
                 <h3>Model Selection</h3>
                 <div className="model-buttons">
@@ -3272,7 +3331,7 @@ const SelectedColumnsPage = () => {
 
                 {selectedModel === 'logistic' && (
                   <LogisticRegressionResults
-                    selectedVariables={currentStep === 2 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling}
+                    selectedVariables={currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling}
                     allSelectedVariables={selectedColumns}
                     targetVariable={targetVariable}
                     woeTransformedData={Object.fromEntries(
@@ -3294,7 +3353,7 @@ const SelectedColumnsPage = () => {
 
                 {selectedModel === 'random_forest' && (
                   <RandomForestResults
-                    selectedVariables={currentStep === 2 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling}
+                    selectedVariables={currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling}
                     allSelectedVariables={selectedColumns}
                     targetVariable={targetVariable}
                     woeTransformedData={Object.fromEntries(
@@ -3316,7 +3375,7 @@ const SelectedColumnsPage = () => {
 
                 {selectedModel === 'xgboost' && (
                   <XGBoostResults
-                    selectedVariables={currentStep === 2 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling}
+                    selectedVariables={currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling}
                     allSelectedVariables={selectedColumns}
                     targetVariable={targetVariable}
                     woeTransformedData={Object.fromEntries(
@@ -3337,7 +3396,7 @@ const SelectedColumnsPage = () => {
                 )}
               </div>
             )}
-            {currentStep === 3 && (
+            {currentStep === 4 && (
               <div className="scorecard-section">
                 <h3>Score Card</h3>
                 {/* Model Selection for Score Card */}

@@ -390,6 +390,1195 @@ def get_csv_path(dataset_id: Optional[int] = None):
     raise FileNotFoundError('No dataset CSV found. Upload a CSV via /api/upload-csv first.')
 
 
+def detect_column_types(df, sample_size=1000):
+    """
+    Enhanced column type detection using multiple heuristics.
+    Returns: {'discrete': [], 'continuous': []}
+    """
+    
+    # --- Local Helper Heuristic Function ---
+    def _classify_with_heuristics(col, samples):
+        col_name_lower = col.lower()
+        
+        # --- Heuristic Keywords ---
+        # Priority 1: Continuous Keywords (Monetary, Measurements, Proportions)
+        continuous_keywords = ['sales', 'turnover', 'margin', 'perc', 'rate', 'ratio', 'amount', 'price', 'cost', 'salary', 'income', 'revenue', 'balance', 'weight', 'height', 'length', 'width', 'depth', 'distance', 'time', 'duration', 'age', 'years']
+        # Priority 2: Discrete Keywords (IDs, Codes, Counts, Categories)
+        discrete_keywords = ['id', 'no', 'keyt','_CD', 'cd', 'form', 'relation', 'auth', 'group', 'family', 'branch', 'visit', 'invcount', 'customer', 'status', 'level', 'flag', 'type', 'code']
+
+        # 1. Check Continuous by Name (Highest Priority)
+        if any(keyword in col_name_lower for keyword in continuous_keywords):
+            return 'continuous'
+
+        # 2. Check Discrete by Name
+        if any(keyword in col_name_lower for keyword in discrete_keywords) or col_name_lower in ['bad customer']:
+            return 'discrete'
+
+        # 3. Analyze Sample Values
+        if not samples:
+            return 'discrete' # Default to discrete when no data
+
+        try:
+            # Handle pandas Series/DataFrame samples
+            if hasattr(samples, 'dtype'):
+                is_numeric = pd.api.types.is_numeric_dtype(samples)
+                samples_list = samples.dropna().tolist()
+            else:
+                is_numeric = all(isinstance(x, (int, float)) for x in samples)
+                samples_list = [x for x in samples if x is not None]
+            
+            if not is_numeric:
+                return 'discrete' # Text/Categorical data
+
+            # Check for presence of non-integer/float values
+            has_float = any(isinstance(x, float) and not x.is_integer() for x in samples_list)
+            if has_float:
+                return 'continuous' # Presence of decimals strongly suggests measurement/continuous
+
+            # Check cardinality for numeric data (e.g., binary or few levels)
+            unique_values = len(set(samples_list))
+            # Use a conservative low-cardinality threshold for discrete classification
+            if unique_values <= 15: 
+                return 'discrete'
+            
+            # If numeric, all integers, high cardinality, and not caught by name:
+            # It's either a large count (discrete) or a large monetary value/ID (context-dependent).
+            # We default to continuous as LLM classification should be used for this ambiguity, 
+            # but if heuristics must decide, numeric high cardinality is often treated as continuous for modeling.
+            return 'continuous'
+        except Exception:
+            return 'discrete' # Safe default on sample analysis failure
+    # --- End Helper Function ---
+
+    discrete_cols = []
+    continuous_cols = []
+    
+    for col in df.columns:
+        # Skip if all null
+        if df[col].isna().all():
+            discrete_cols.append(col)
+            continue
+            
+        # Sample data for analysis
+        sample_data = df[col].dropna().head(sample_size)
+        
+        if len(sample_data) == 0:
+            discrete_cols.append(col)
+            continue
+
+        # Use the enhanced heuristic classification
+        classification = _classify_with_heuristics(col, sample_data)
+        
+        if classification == 'discrete':
+            discrete_cols.append(col)
+        else:
+            continuous_cols.append(col)
+    
+    return {'discrete': discrete_cols, 'continuous': continuous_cols}
+
+def handle_missing_values(df, discrete_cols, continuous_cols, missing_threshold=0.5, treat_negative_one_as_missing=True):
+    """
+    Handle missing values based on column type.
+    Now treats -1 as missing value and drops columns with missing values above threshold.
+    
+    Args:
+        df: Input DataFrame
+        discrete_cols: List of discrete column names
+        continuous_cols: List of continuous column names
+        missing_threshold: Threshold (0-1) for dropping columns (e.g., 0.5 = 50% missing)
+        treat_negative_one_as_missing: Whether to treat -1 as missing value
+    
+    Returns:
+        Cleaned DataFrame and removal report
+    """
+    df_clean = df.copy()
+    removal_report = {
+        'columns_removed': [],
+        'columns_retained': [],
+        'missing_treated': {},
+        'negative_one_treated': {}
+    }
+    
+    # First, identify and mark -1 as missing if enabled
+    if treat_negative_one_as_missing:
+        for col in df_clean.columns:
+            if col in df_clean.columns and pd.api.types.is_numeric_dtype(df_clean[col]):
+                negative_one_count = (df_clean[col] == -1).sum()
+                if negative_one_count > 0:
+                    df_clean[col] = df_clean[col].replace(-1, np.nan)
+                    removal_report['negative_one_treated'][col] = {
+                        'negative_one_count': int(negative_one_count),
+                        'treated_as_missing': True
+                    }
+    
+    # Identify columns to remove based on missing threshold
+    columns_to_remove = []
+    for col in df_clean.columns:
+        missing_count = df_clean[col].isna().sum()
+        missing_ratio = missing_count / len(df_clean)
+        
+        if missing_ratio > missing_threshold:
+            columns_to_remove.append(col)
+            removal_report['columns_removed'].append({
+                'column': col,
+                'missing_count': int(missing_count),
+                'missing_ratio': round(missing_ratio, 4),
+                'reason': f'Missing values exceed threshold ({missing_ratio:.1%} > {missing_threshold:.1%})'
+            })
+        else:
+            removal_report['columns_retained'].append({
+                'column': col,
+                'missing_count': int(missing_count),
+                'missing_ratio': round(missing_ratio, 4)
+            })
+    
+    # Remove high-missing columns
+    df_clean = df_clean.drop(columns=columns_to_remove)
+    
+    # Update column lists after removal
+    discrete_cols = [col for col in discrete_cols if col in df_clean.columns]
+    continuous_cols = [col for col in continuous_cols if col in df_clean.columns]
+    
+    # For discrete columns: mode imputation
+    for col in discrete_cols:
+        if col in df_clean.columns and df_clean[col].isna().any():
+            missing_count = df_clean[col].isna().sum()
+            
+            if df_clean[col].dtype == 'object':
+                # For categorical, use 'Missing' category
+                df_clean[col] = df_clean[col].fillna('Missing')
+                method = 'Missing category'
+            else:
+                # For numeric discrete, use mode
+                mode_val = df_clean[col].mode()
+                if not mode_val.empty:
+                    df_clean[col] = df_clean[col].fillna(mode_val.iloc[0])
+                    method = f'Mode ({mode_val.iloc[0]})'
+                else:
+                    df_clean[col] = df_clean[col].fillna(0)
+                    method = 'Zero (no mode available)'
+            
+            removal_report['missing_treated'][col] = {
+                'type': 'discrete',
+                'missing_count': int(missing_count),
+                'method': method
+            }
+    
+    # For continuous columns: median imputation
+    for col in continuous_cols:
+        if col in df_clean.columns and df_clean[col].isna().any():
+            missing_count = df_clean[col].isna().sum()
+            
+            if pd.api.types.is_numeric_dtype(df_clean[col]):
+                median_val = df_clean[col].median()
+                df_clean[col] = df_clean[col].fillna(median_val)
+                method = f'Median ({median_val:.4f})'
+            else:
+                # If continuous column is not numeric, try to convert
+                try:
+                    df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+                    median_val = df_clean[col].median()
+                    df_clean[col] = df_clean[col].fillna(median_val)
+                    method = f'Median after conversion ({median_val:.4f})'
+                except:
+                    df_clean[col] = df_clean[col].fillna('Missing')
+                    method = 'Missing category (conversion failed)'
+            
+            removal_report['missing_treated'][col] = {
+                'type': 'continuous',
+                'missing_count': int(missing_count),
+                'method': method
+            }
+    
+    return df_clean, removal_report
+
+
+def remove_duplicates(df):
+    """
+    Remove duplicate rows from dataset.
+    """
+    initial_count = len(df)
+    df_deduped = df.drop_duplicates()
+    final_count = len(df_deduped)
+    duplicates_removed = initial_count - final_count
+    
+    return df_deduped, duplicates_removed
+
+def handle_outliers(df, continuous_cols, method='iqr', threshold=3.0):
+    """
+    Handle outliers in continuous columns.
+    Methods: 'iqr', 'zscore', 'winsorize'
+    """
+    df_clean = df.copy()
+    outlier_info = {}
+    
+    for col in continuous_cols:
+        if col not in df_clean.columns or not pd.api.types.is_numeric_dtype(df_clean[col]):
+            continue
+            
+        original_data = df_clean[col].copy()
+        
+        if method == 'iqr':
+            Q1 = df_clean[col].quantile(0.25)
+            Q3 = df_clean[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            
+            # Cap outliers
+            df_clean[col] = np.where(df_clean[col] < lower_bound, lower_bound, df_clean[col])
+            df_clean[col] = np.where(df_clean[col] > upper_bound, upper_bound, df_clean[col])
+            
+            outliers_count = ((original_data < lower_bound) | (original_data > upper_bound)).sum()
+            
+        elif method == 'zscore':
+            z_scores = np.abs(stats.zscore(df_clean[col].dropna()))
+            mask = z_scores < threshold
+            # For z-score, we might want to remove rather than cap
+            outlier_indices = np.where(z_scores >= threshold)[0]
+            outliers_count = len(outlier_indices)
+            
+        elif method == 'winsorize':
+            # Winsorize: cap at specified percentiles
+            lower_limit = df_clean[col].quantile(0.05)
+            upper_limit = df_clean[col].quantile(0.95)
+            df_clean[col] = np.where(df_clean[col] < lower_limit, lower_limit, df_clean[col])
+            df_clean[col] = np.where(df_clean[col] > upper_limit, upper_limit, df_clean[col])
+            
+            outliers_count = ((original_data < lower_limit) | (original_data > upper_limit)).sum()
+        
+        outlier_info[col] = {
+            'method': method,
+            'outliers_detected': int(outliers_count),
+            'outliers_percentage': round((outliers_count / len(original_data)) * 100, 2) if len(original_data) > 0 else 0
+        }
+    
+    return df_clean, outlier_info
+
+def encode_categorical_variables(df, discrete_cols, target_col=None):
+    """
+    Encode categorical variables using label encoding.
+    Skip target variable if provided.
+    """
+    df_encoded = df.copy()
+    encoding_info = {}
+    label_encoders = {}
+    
+    for col in discrete_cols:
+        if col == target_col:
+            continue
+            
+        if col in df_encoded.columns and df_encoded[col].dtype == 'object':
+            # Create label encoder
+            le = LabelEncoder()
+            
+            # Handle unseen categories by fitting on all possible categories
+            unique_vals = df_encoded[col].unique()
+            le.fit(unique_vals)
+            
+            # Transform the column
+            df_encoded[col] = le.transform(df_encoded[col])
+            
+            # Store encoding information
+            label_encoders[col] = le
+            encoding_info[col] = {
+                'original_categories': list(le.classes_),
+                'encoded_values': list(range(len(le.classes_))),
+                'mapping': dict(zip(le.classes_, range(len(le.classes_))))
+            }
+    
+    return df_encoded, encoding_info, label_encoders
+
+def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_threshold=0.5, treat_negative_one_as_missing=True):
+    """
+    Main preprocessing function that applies all preprocessing steps.
+    
+    Args:
+        df: Input DataFrame
+        target_col: Target column name (optional)
+        preprocessing_steps: Dictionary specifying which steps to apply
+        missing_threshold: Threshold for dropping columns with high missing values
+        treat_negative_one_as_missing: Whether to treat -1 as missing value
+    
+    Returns:
+        Preprocessed DataFrame and preprocessing report
+    """
+    if preprocessing_steps is None:
+        preprocessing_steps = {
+            'detect_types': True,
+            'handle_missing': True,
+            'remove_duplicates': True,
+            'handle_outliers': True,
+            'encode_categorical': True
+        }
+    
+    preprocessing_report = {
+        'original_shape': df.shape,
+        'steps_applied': [],
+        'details': {},
+        'parameters': {
+            'missing_threshold': missing_threshold,
+            'treat_negative_one_as_missing': treat_negative_one_as_missing
+        }
+    }
+    
+    df_processed = df.copy()
+    
+    # Step 1: Detect column types
+    if preprocessing_steps.get('detect_types', True):
+        column_types = detect_column_types(df_processed)
+        discrete_cols = column_types['discrete']
+        continuous_cols = column_types['continuous']
+        preprocessing_report['column_types'] = column_types
+        preprocessing_report['steps_applied'].append('type_detection')
+    else:
+        # Use all columns as continuous if not detected
+        discrete_cols = []
+        continuous_cols = df_processed.columns.tolist()
+    
+    # Step 2: Handle missing values
+    if preprocessing_steps.get('handle_missing', True):
+        missing_before = df_processed.isna().sum().sum()
+        negative_one_before = 0
+        if treat_negative_one_as_missing:
+            for col in df_processed.columns:
+                if pd.api.types.is_numeric_dtype(df_processed[col]):
+                    negative_one_before += (df_processed[col] == -1).sum()
+        
+        df_processed, missing_report = handle_missing_values(
+            df_processed, discrete_cols, continuous_cols, 
+            missing_threshold, treat_negative_one_as_missing
+        )
+        
+        missing_after = df_processed.isna().sum().sum()
+        preprocessing_report['details']['missing_values'] = {
+            'before': int(missing_before),
+            'after': int(missing_after),
+            'negative_one_treated': int(negative_one_before),
+            'removed': int(missing_before - missing_after),
+            'columns_removed': missing_report['columns_removed'],
+            'columns_retained': missing_report['columns_retained'],
+            'missing_treated': missing_report['missing_treated'],
+            'negative_one_treated_details': missing_report['negative_one_treated']
+        }
+        preprocessing_report['steps_applied'].append('missing_values_handling')
+        
+        # Update column lists after missing value handling
+        discrete_cols = [col for col in discrete_cols if col in df_processed.columns]
+        continuous_cols = [col for col in continuous_cols if col in df_processed.columns]
+    
+    # Step 3: Remove duplicates
+    if preprocessing_steps.get('remove_duplicates', True):
+        df_processed, duplicates_removed = remove_duplicates(df_processed)
+        preprocessing_report['details']['duplicates'] = {
+            'removed': int(duplicates_removed)
+        }
+        preprocessing_report['steps_applied'].append('duplicate_removal')
+    
+    # Step 4: Handle outliers (only for continuous columns)
+    if preprocessing_steps.get('handle_outliers', True) and continuous_cols:
+        df_processed, outlier_info = handle_outliers(df_processed, continuous_cols, method='iqr')
+        preprocessing_report['details']['outliers'] = outlier_info
+        preprocessing_report['steps_applied'].append('outlier_handling')
+    
+    # Step 5: Encode categorical variables
+    if preprocessing_steps.get('encode_categorical', True) and discrete_cols:
+        df_processed, encoding_info, label_encoders = encode_categorical_variables(
+            df_processed, discrete_cols, target_col
+        )
+        preprocessing_report['details']['encoding'] = encoding_info
+        preprocessing_report['label_encoders'] = label_encoders
+        preprocessing_report['steps_applied'].append('categorical_encoding')
+    
+    preprocessing_report['final_shape'] = df_processed.shape
+    preprocessing_report['processed_columns'] = {
+        'discrete': discrete_cols,
+        'continuous': continuous_cols
+    }
+    
+    return df_processed, preprocessing_report
+
+# =============================================================================
+# PREPROCESSING API ENDPOINTS
+# =============================================================================
+
+@app.route('/api/preprocessing-steps-detailed', methods=['POST'])
+def preprocessing_steps_detailed():
+    """
+    Returns detailed information about each preprocessing step for visualization.
+    Shows before/after states and highlights changes.
+    """
+    try:
+        data = request.get_json()
+        dataset_id = data.get('dataset_id')
+        preprocessing_steps = data.get('preprocessing_steps', {})
+        target_column = data.get('target_column')
+        missing_threshold = data.get('missing_threshold', 0.5)
+        treat_negative_one_as_missing = data.get('treat_negative_one_as_missing', True)
+        
+        if not dataset_id:
+            return jsonify({"error": "Missing dataset_id"}), 400
+        
+        # Load dataset
+        try:
+            csv_path = get_csv_path(dataset_id)
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
+        
+        # Initialize results container
+        step_results = {
+            'original_dataset': {
+                'shape': df.shape,
+                'columns': df.columns.tolist(),
+                'data_types': {col: str(dtype) for col, dtype in df.dtypes.items()},
+                'missing_values': df.isna().sum().to_dict(),
+                'negative_one_counts': {col: int((df[col] == -1).sum()) for col in df.columns if pd.api.types.is_numeric_dtype(df[col])},
+                'sample_data': df.head(10).to_dict('records')
+            },
+            'steps': [],
+            'parameters': {
+                'missing_threshold': missing_threshold,
+                'treat_negative_one_as_missing': treat_negative_one_as_missing
+            }
+        }
+        
+        current_df = df.copy()
+        
+        # Step 1: Detect Column Types
+        if preprocessing_steps.get('detect_types', True):
+            step_info = {
+                'step_name': 'Type Detection',
+                'description': 'Automatically classify columns as discrete or continuous based on data characteristics',
+                'status': 'pending'
+            }
+            
+            try:
+                column_types = detect_column_types(current_df)
+                step_info.update({
+                    'status': 'completed',
+                    'discrete_columns': column_types['discrete'],
+                    'continuous_columns': column_types['continuous'],
+                    'changes': {
+                        'discrete_count': len(column_types['discrete']),
+                        'continuous_count': len(column_types['continuous'])
+                    }
+                })
+                
+                # Store for next steps
+                discrete_cols = column_types['discrete']
+                continuous_cols = column_types['continuous']
+                
+            except Exception as e:
+                step_info.update({
+                    'status': 'error',
+                    'error': str(e)
+                })
+            
+            step_results['steps'].append(step_info)
+        
+        # Step 2: Handle Missing Values
+        if preprocessing_steps.get('handle_missing', True):
+            step_info = {
+                'step_name': 'Missing Values Treatment',
+                'description': f'Handle missing values and -1 values (threshold: {missing_threshold:.1%})',
+                'status': 'pending'
+            }
+            
+            try:
+                missing_before = current_df.isna().sum().sum()
+                missing_by_col_before = current_df.isna().sum().to_dict()
+                
+                # Count -1 values if treatment is enabled
+                negative_one_counts = {}
+                if treat_negative_one_as_missing:
+                    for col in current_df.columns:
+                        if pd.api.types.is_numeric_dtype(current_df[col]):
+                            negative_one_counts[col] = int((current_df[col] == -1).sum())
+                
+                current_df, missing_report = handle_missing_values(
+                    current_df, discrete_cols, continuous_cols, 
+                    missing_threshold, treat_negative_one_as_missing
+                )
+                
+                missing_after = current_df.isna().sum().sum()
+                missing_by_col_after = current_df.isna().sum().to_dict()
+                
+                step_info.update({
+                    'status': 'completed',
+                    'changes': {
+                        'total_missing_before': int(missing_before),
+                        'total_missing_after': int(missing_after),
+                        'negative_one_treated': sum(negative_one_counts.values()) if treat_negative_one_as_missing else 0,
+                        'columns_removed': missing_report['columns_removed'],
+                        'columns_retained': missing_report['columns_retained'],
+                        'missing_treated': missing_report['missing_treated'],
+                        'negative_one_treated_details': missing_report['negative_one_treated']
+                    },
+                    'sample_data': current_df.head(10).to_dict('records')
+                })
+                
+                # Update column lists after missing value handling
+                discrete_cols = [col for col in discrete_cols if col in current_df.columns]
+                continuous_cols = [col for col in continuous_cols if col in current_df.columns]
+                
+            except Exception as e:
+                step_info.update({
+                    'status': 'error',
+                    'error': str(e)
+                })
+            
+            step_results['steps'].append(step_info)
+        
+        # Step 3: Remove Duplicates
+        if preprocessing_steps.get('remove_duplicates', True):
+            step_info = {
+                'step_name': 'Duplicate Removal',
+                'description': 'Identify and remove duplicate rows from the dataset',
+                'status': 'pending'
+            }
+            
+            try:
+                rows_before = len(current_df)
+                current_df, duplicates_removed = remove_duplicates(current_df)
+                rows_after = len(current_df)
+                
+                step_info.update({
+                    'status': 'completed',
+                    'changes': {
+                        'rows_before': rows_before,
+                        'rows_after': rows_after,
+                        'duplicates_removed': duplicates_removed,
+                        'duplicate_percentage': round((duplicates_removed / rows_before) * 100, 2) if rows_before > 0 else 0
+                    },
+                    'sample_data': current_df.head(10).to_dict('records')
+                })
+                
+            except Exception as e:
+                step_info.update({
+                    'status': 'error',
+                    'error': str(e)
+                })
+            
+            step_results['steps'].append(step_info)
+        
+        # Step 4: Handle Outliers
+        if preprocessing_steps.get('handle_outliers', True) and continuous_cols:
+            step_info = {
+                'step_name': 'Outlier Treatment',
+                'description': 'Detect and handle outliers in continuous variables using IQR method',
+                'status': 'pending'
+            }
+            
+            try:
+                outlier_info_before = {}
+                for col in continuous_cols:
+                    if col in current_df.columns and pd.api.types.is_numeric_dtype(current_df[col]):
+                        Q1 = current_df[col].quantile(0.25)
+                        Q3 = current_df[col].quantile(0.75)
+                        IQR = Q3 - Q1
+                        lower_bound = Q1 - 1.5 * IQR
+                        upper_bound = Q3 + 1.5 * IQR
+                        
+                        outliers = ((current_df[col] < lower_bound) | (current_df[col] > upper_bound)).sum()
+                        outlier_info_before[col] = {
+                            'outliers_count': int(outliers),
+                            'lower_bound': float(lower_bound),
+                            'upper_bound': float(upper_bound)
+                        }
+                
+                current_df, outlier_info = handle_outliers(current_df, continuous_cols, method='iqr')
+                
+                step_info.update({
+                    'status': 'completed',
+                    'changes': {
+                        'outliers_before': outlier_info_before,
+                        'outliers_after': outlier_info,
+                        'method_used': 'IQR (Interquartile Range)'
+                    },
+                    'sample_data': current_df.head(10).to_dict('records')
+                })
+                
+            except Exception as e:
+                step_info.update({
+                    'status': 'error',
+                    'error': str(e)
+                })
+            
+            step_results['steps'].append(step_info)
+        
+        # Step 5: Encode Categorical Variables
+        if preprocessing_steps.get('encode_categorical', True) and discrete_cols:
+            step_info = {
+                'step_name': 'Categorical Encoding',
+                'description': 'Convert categorical variables to numerical using label encoding',
+                'status': 'pending'
+            }
+            
+            try:
+                encoding_info_before = {}
+                for col in discrete_cols:
+                    if col in current_df.columns and col != target_column:
+                        encoding_info_before[col] = {
+                            'dtype_before': str(current_df[col].dtype),
+                            'unique_values': current_df[col].nunique(),
+                            'sample_values': current_df[col].dropna().unique()[:5].tolist()
+                        }
+                
+                current_df, encoding_info, label_encoders = encode_categorical_variables(
+                    current_df, discrete_cols, target_column
+                )
+                
+                encoding_info_after = {}
+                for col in discrete_cols:
+                    if col in current_df.columns and col != target_column:
+                        encoding_info_after[col] = {
+                            'dtype_after': str(current_df[col].dtype),
+                            'mapping': encoding_info.get(col, {}).get('mapping', {})
+                        }
+                
+                step_info.update({
+                    'status': 'completed',
+                    'changes': {
+                        'encoding_before': encoding_info_before,
+                        'encoding_after': encoding_info_after,
+                        'encoding_mappings': encoding_info
+                    },
+                    'sample_data': current_df.head(10).to_dict('records')
+                })
+                
+            except Exception as e:
+                step_info.update({
+                    'status': 'error',
+                    'error': str(e)
+                })
+            
+            step_results['steps'].append(step_info)
+        
+        # Final dataset state
+        step_results['final_dataset'] = {
+            'shape': current_df.shape,
+            'columns': current_df.columns.tolist(),
+            'data_types': {col: str(dtype) for col, dtype in current_df.dtypes.items()},
+            'missing_values': current_df.isna().sum().to_dict(),
+            'sample_data': current_df.head(10).to_dict('records')
+        }
+        
+        return jsonify({
+            "success": True,
+            "preprocessing_details": step_results
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Preprocessing visualization failed: {str(e)}"}), 500
+
+@app.route('/api/preprocessing-column-changes', methods=['POST'])
+def preprocessing_column_changes():
+    """
+    Returns detailed column-level changes for the preprocessing preview.
+    """
+    try:
+        data = request.get_json()
+        dataset_id = data.get('dataset_id')
+        preprocessing_steps = data.get('preprocessing_steps', {})
+        missing_threshold = data.get('missing_threshold', 0.5)
+        treat_negative_one_as_missing = data.get('treat_negative_one_as_missing', True)
+        
+        if not dataset_id:
+            return jsonify({"error": "Missing dataset_id"}), 400
+        
+        # Load dataset
+        try:
+            csv_path = get_csv_path(dataset_id)
+            df_original = pd.read_csv(csv_path)
+        except Exception as e:
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
+        
+        # Apply preprocessing with new parameters
+        df_processed, preprocessing_report = preprocess_dataset(
+            df_original, 
+            preprocessing_steps=preprocessing_steps,
+            missing_threshold=missing_threshold,
+            treat_negative_one_as_missing=treat_negative_one_as_missing
+        )
+        
+        # Generate column-level change analysis
+        column_changes = []
+        
+        for col in df_original.columns:
+            if col in df_processed.columns:
+                # Column was retained
+                original_series = df_original[col]
+                processed_series = df_processed[col]
+                
+                changes = []
+                
+                # Data type changes
+                original_dtype = str(original_series.dtype)
+                processed_dtype = str(processed_series.dtype)
+                if original_dtype != processed_dtype:
+                    changes.append(f"Data type changed from {original_dtype} to {processed_dtype}")
+                
+                # Missing values changes
+                original_missing = original_series.isna().sum()
+                processed_missing = processed_series.isna().sum()
+                if original_missing > 0 and processed_missing == 0:
+                    changes.append(f"Missing values handled ({original_missing} values imputed)")
+                elif original_missing > processed_missing:
+                    changes.append(f"Missing values reduced from {original_missing} to {processed_missing}")
+                
+                # -1 values treatment
+                if treat_negative_one_as_missing and pd.api.types.is_numeric_dtype(original_series):
+                    negative_one_count = (original_series == -1).sum()
+                    if negative_one_count > 0:
+                        changes.append(f"{-1} values treated as missing ({negative_one_count} values)")
+                
+                # Unique values changes (for categorical encoding)
+                original_unique = original_series.nunique()
+                processed_unique = processed_series.nunique()
+                if original_unique != processed_unique and 'object' in original_dtype:
+                    changes.append(f"Encoded from {original_unique} categories to numerical")
+                
+                # Statistical changes for numerical columns
+                if pd.api.types.is_numeric_dtype(processed_series):
+                    original_stats = {
+                        'min': float(original_series.min()) if not original_series.empty else None,
+                        'max': float(original_series.max()) if not original_series.empty else None,
+                        'mean': float(original_series.mean()) if not original_series.empty else None,
+                        'std': float(original_series.std()) if not original_series.empty else None
+                    }
+                    
+                    processed_stats = {
+                        'min': float(processed_series.min()) if not processed_series.empty else None,
+                        'max': float(processed_series.max()) if not processed_series.empty else None,
+                        'mean': float(processed_series.mean()) if not processed_series.empty else None,
+                        'std': float(processed_series.std()) if not processed_series.empty else None
+                    }
+                    
+                    # Check for significant statistical changes (e.g., due to outlier treatment)
+                    stat_changes = []
+                    for stat in ['min', 'max', 'mean', 'std']:
+                        orig_val = original_stats[stat]
+                        proc_val = processed_stats[stat]
+                        if orig_val is not None and proc_val is not None and orig_val != 0:
+                            change_pct = abs(proc_val - orig_val) / abs(orig_val) * 100
+                            if change_pct > 5:  # More than 5% change
+                                stat_changes.append(f"{stat.upper()} changed by {change_pct:.1f}%")
+                    
+                    if stat_changes:
+                        changes.extend(stat_changes)
+                
+                column_changes.append({
+                    'column': col,
+                    'changes': changes,
+                    'original_dtype': original_dtype,
+                    'processed_dtype': processed_dtype,
+                    'original_missing': int(original_missing),
+                    'processed_missing': int(processed_missing),
+                    'negative_one_count': int((original_series == -1).sum()) if treat_negative_one_as_missing and pd.api.types.is_numeric_dtype(original_series) else 0,
+                    'has_changes': len(changes) > 0
+                })
+            else:
+                # Column was removed
+                original_series = df_original[col]
+                missing_count = original_series.isna().sum()
+                missing_ratio = missing_count / len(original_series)
+                negative_one_count = (original_series == -1).sum() if pd.api.types.is_numeric_dtype(original_series) else 0
+                
+                column_changes.append({
+                    'column': col,
+                    'changes': [f"Column removed: {missing_ratio:.1%} missing values"],
+                    'original_dtype': str(original_series.dtype),
+                    'processed_dtype': 'REMOVED',
+                    'original_missing': int(missing_count),
+                    'processed_missing': 0,
+                    'negative_one_count': int(negative_one_count),
+                    'has_changes': True,
+                    'removed': True
+                })
+        
+        # Sample data for preview
+        original_sample = df_original.head(10).to_dict('records')
+        processed_sample = df_processed.head(10).to_dict('records')
+        
+        return jsonify({
+            "success": True,
+            "column_changes": column_changes,
+            "preview": {
+                "original_sample": original_sample,
+                "processed_sample": processed_sample
+            },
+            "summary": {
+                "original_shape": df_original.shape,
+                "processed_shape": df_processed.shape,
+                "columns_with_changes": len([c for c in column_changes if c['has_changes']]),
+                "columns_removed": len([c for c in column_changes if c.get('removed', False)]),
+                "total_columns": len(column_changes)
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Column changes analysis failed: {str(e)}"}), 500
+
+@app.route('/api/preprocessing-step-preview', methods=['POST'])
+def preprocessing_step_preview():
+    """
+    Preview individual preprocessing steps with before/after comparison.
+    """
+    try:
+        data = request.get_json()
+        dataset_id = data.get('dataset_id')
+        step_name = data.get('step_name')
+        preprocessing_steps = data.get('preprocessing_steps', {})
+        
+        if not dataset_id or not step_name:
+            return jsonify({"error": "Missing dataset_id or step_name"}), 400
+        
+        # Load dataset
+        try:
+            csv_path = get_csv_path(dataset_id)
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
+        
+        # Apply preprocessing up to the specified step
+        current_steps = {}
+        step_order = ['detect_types', 'handle_missing', 'remove_duplicates', 'handle_outliers', 'encode_categorical']
+        
+        target_step_index = step_order.index(step_name) if step_name in step_order else -1
+        
+        if target_step_index == -1:
+            return jsonify({"error": f"Invalid step name: {step_name}"}), 400
+        
+        # Enable only steps up to the target step
+        for i, step in enumerate(step_order):
+            current_steps[step] = (i <= target_step_index)
+        
+        df_processed, preprocessing_report = preprocess_dataset(
+            df, preprocessing_steps=current_steps
+        )
+        
+        # Get step-specific details
+        step_details = {}
+        if step_name == 'detect_types':
+            column_types = detect_column_types(df)
+            step_details = {
+                'discrete_columns': column_types['discrete'],
+                'continuous_columns': column_types['continuous'],
+                'detection_method': 'Combined heuristic analysis (name patterns, data characteristics, unique values)'
+            }
+        
+        elif step_name == 'handle_missing':
+            missing_before = df.isna().sum().sum()
+            column_types = detect_column_types(df)
+            df_temp = handle_missing_values(df, column_types['discrete'], column_types['continuous'])
+            missing_after = df_temp.isna().sum().sum()
+            
+            step_details = {
+                'missing_before': int(missing_before),
+                'missing_after': int(missing_after),
+                'methods_used': {
+                    'discrete': 'Mode imputation or "Missing" category',
+                    'continuous': 'Median imputation'
+                }
+            }
+        
+        elif step_name == 'remove_duplicates':
+            rows_before = len(df)
+            df_temp, duplicates_removed = remove_duplicates(df)
+            rows_after = len(df_temp)
+            
+            step_details = {
+                'rows_before': rows_before,
+                'rows_after': rows_after,
+                'duplicates_removed': duplicates_removed
+            }
+        
+        elif step_name == 'handle_outliers':
+            column_types = detect_column_types(df)
+            df_temp, outlier_info = handle_outliers(df, column_types['continuous'], method='iqr')
+            
+            step_details = {
+                'method_used': 'IQR (Interquartile Range) with capping',
+                'outlier_details': outlier_info
+            }
+        
+        elif step_name == 'encode_categorical':
+            column_types = detect_column_types(df)
+            df_temp, encoding_info, _ = encode_categorical_variables(df, column_types['discrete'])
+            
+            step_details = {
+                'method_used': 'Label Encoding',
+                'encoded_columns': list(encoding_info.keys()),
+                'encoding_mappings': encoding_info
+            }
+        
+        return jsonify({
+            "success": True,
+            "step_name": step_name,
+            "step_details": step_details,
+            "before_sample": df.head(5).to_dict('records'),
+            "after_sample": df_processed.head(5).to_dict('records'),
+            "dataset_shapes": {
+                "before": df.shape,
+                "after": df_processed.shape
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Step preview failed: {str(e)}"}), 500
+
+# =============================================================================
+# ENHANCED QUALITY REPORT WITH VISUALIZATION DATA
+# =============================================================================
+
+@app.route('/api/dataset-quality-metrics', methods=['POST'])
+def dataset_quality_metrics():
+    """
+    Returns comprehensive quality metrics for visualization in grids.
+    """
+    try:
+        data = request.get_json()
+        dataset_id = data.get('dataset_id')
+        
+        if not dataset_id:
+            return jsonify({"error": "Missing dataset_id"}), 400
+        
+        # Load dataset
+        try:
+            csv_path = get_csv_path(dataset_id)
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
+        
+        # Basic information
+        basic_info = {
+            'num_rows': len(df),
+            'num_columns': len(df.columns),
+            'memory_usage_mb': round(df.memory_usage(deep=True).sum() / 1024**2, 2),
+            'total_cells': len(df) * len(df.columns)
+        }
+        
+        # Missing values analysis
+        missing_values = df.isna().sum()
+        total_missing = missing_values.sum()
+        missing_percentage = (total_missing / basic_info['total_cells']) * 100
+        
+        missing_analysis = {
+            'total_missing': int(total_missing),
+            'missing_percentage': round(missing_percentage, 2),
+            'columns_with_missing': [col for col in df.columns if df[col].isna().any()],
+            'missing_by_column': missing_values.to_dict(),
+            'complete_columns': [col for col in df.columns if not df[col].isna().any()],
+            'severity': 'High' if missing_percentage > 20 else 'Medium' if missing_percentage > 5 else 'Low'
+        }
+        
+        # Duplicates analysis
+        duplicate_analysis = {
+            'exact_duplicates': int(df.duplicated().sum()),
+            'percentage_duplicates': round((df.duplicated().sum() / len(df)) * 100, 2),
+            'severity': 'High' if (df.duplicated().sum() / len(df)) * 100 > 10 else 'Medium' if (df.duplicated().sum() / len(df)) * 100 > 2 else 'Low'
+        }
+        
+        # Data types analysis
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
+        datetime_cols = df.select_dtypes(include=['datetime']).columns.tolist()
+        
+        dtype_analysis = {
+            'numeric_columns': numeric_cols,
+            'categorical_columns': categorical_cols,
+            'datetime_columns': datetime_cols,
+            'mixed_type_columns': [col for col in df.columns if len(set(map(type, df[col].dropna()))) > 1] if len(df) > 0 else []
+        }
+        
+        # Outlier analysis for numeric columns
+        outlier_analysis = {}
+        for col in numeric_cols:
+            Q1 = df[col].quantile(0.25)
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            
+            outliers = ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
+            outlier_percentage = (outliers / len(df)) * 100
+            
+            outlier_analysis[col] = {
+                'outliers_count': int(outliers),
+                'outliers_percentage': round(outlier_percentage, 2),
+                'lower_bound': float(lower_bound),
+                'upper_bound': float(upper_bound),
+                'severity': 'High' if outlier_percentage > 10 else 'Medium' if outlier_percentage > 2 else 'Low'
+            }
+        
+        # Cardinality analysis for categorical columns
+        cardinality_analysis = {}
+        for col in categorical_cols:
+            unique_count = df[col].nunique()
+            cardinality_percentage = (unique_count / len(df)) * 100
+            
+            cardinality_analysis[col] = {
+                'unique_values': int(unique_count),
+                'cardinality_percentage': round(cardinality_percentage, 2),
+                'most_frequent': df[col].mode().iloc[0] if not df[col].mode().empty else None,
+                'freq_count': int(df[col].value_counts().iloc[0]) if not df[col].value_counts().empty else 0,
+                'severity': 'High' if cardinality_percentage > 50 else 'Medium' if cardinality_percentage > 20 else 'Low'
+            }
+        
+        # Data quality score (0-100)
+        quality_score = 100
+        
+        # Penalize for missing values
+        quality_score -= min(missing_percentage * 2, 40)  # Up to 40 points for missing values
+        
+        # Penalize for duplicates
+        quality_score -= min(duplicate_analysis['percentage_duplicates'] * 2, 20)  # Up to 20 points for duplicates
+        
+        # Penalize for high cardinality
+        high_cardinality_penalty = sum(1 for col, analysis in cardinality_analysis.items() if analysis['severity'] == 'High')
+        quality_score -= min(high_cardinality_penalty * 5, 15)  # Up to 15 points for high cardinality
+        
+        # Penalize for many outliers
+        high_outlier_penalty = sum(1 for col, analysis in outlier_analysis.items() if analysis['severity'] == 'High')
+        quality_score -= min(high_outlier_penalty * 3, 15)  # Up to 15 points for outliers
+        
+        quality_score = max(0, round(quality_score, 2))
+        
+        # Quality rating
+        if quality_score >= 90:
+            quality_rating = 'Excellent'
+        elif quality_score >= 80:
+            quality_rating = 'Good'
+        elif quality_score >= 70:
+            quality_rating = 'Fair'
+        elif quality_score >= 60:
+            quality_rating = 'Poor'
+        else:
+            quality_rating = 'Very Poor'
+        
+        return jsonify({
+            "success": True,
+            "quality_metrics": {
+                "basic_info": basic_info,
+                "missing_analysis": missing_analysis,
+                "duplicate_analysis": duplicate_analysis,
+                "dtype_analysis": dtype_analysis,
+                "outlier_analysis": outlier_analysis,
+                "cardinality_analysis": cardinality_analysis,
+                "quality_score": quality_score,
+                "quality_rating": quality_rating
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Quality metrics calculation failed: {str(e)}"}), 500
+    
+@app.route('/api/preprocess-dataset', methods=['POST'])
+def preprocess_dataset_api():
+    """
+    Main preprocessing endpoint that applies preprocessing and creates a new dataset.
+    """
+    try:
+        data = request.get_json()
+        dataset_id = data.get('dataset_id')
+        preprocessing_steps = data.get('preprocessing_steps', {
+            'detect_types': True,
+            'handle_missing': True,
+            'remove_duplicates': True,
+            'handle_outliers': True,
+            'encode_categorical': True
+        })
+        target_column = data.get('target_column')
+        missing_threshold = data.get('missing_threshold', 0.5)
+        treat_negative_one_as_missing = data.get('treat_negative_one_as_missing', True)
+        
+        if not dataset_id:
+            return jsonify({"error": "Missing dataset_id"}), 400
+        
+        # Load dataset
+        try:
+            csv_path = get_csv_path(dataset_id)
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
+        
+        # Apply preprocessing
+        df_processed, preprocessing_report = preprocess_dataset(
+            df,
+            target_col=target_column,
+            preprocessing_steps=preprocessing_steps,
+            missing_threshold=missing_threshold,
+            treat_negative_one_as_missing=treat_negative_one_as_missing
+        )
+        
+        # Generate new dataset ID and save processed data
+        new_dataset_id = generate_dataset_id()
+        processed_filename = f"processed_dataset_{new_dataset_id}.csv"
+        processed_path = os.path.join('uploads', processed_filename)
+        
+        # Save processed dataset
+        df_processed.to_csv(processed_path, index=False)
+        
+        # Store dataset info in database
+        dataset_info = {
+            'id': new_dataset_id,
+            'filename': processed_filename,
+            'file_path': processed_path,
+            'original_filename': f"processed_from_{dataset_id}",
+            'upload_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'file_size': os.path.getsize(processed_path),
+            'num_rows': len(df_processed),
+            'num_columns': len(df_processed.columns),
+            'preprocessing_applied': True,
+            'original_dataset_id': dataset_id,
+            'preprocessing_report': preprocessing_report
+        }
+        
+        # Save to database (you'll need to implement this based on your storage)
+        save_dataset_info(dataset_info)
+        
+        return jsonify({
+            "success": True,
+            "message": "Dataset preprocessing completed successfully",
+            "new_dataset_id": new_dataset_id,
+            "preprocessing_report": preprocessing_report,
+            "dataset_info": {
+                "rows": len(df_processed),
+                "columns": len(df_processed.columns),
+                "original_rows": len(df),
+                "original_columns": len(df.columns)
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Preprocessing failed: {str(e)}"}), 500
+
+# Helper functions you'll need to implement:
+def generate_dataset_id():
+    """Generate a unique dataset ID"""
+    return int(datetime.now().timestamp())
+
+def save_dataset_info(dataset_info):
+    """
+    Save dataset information to your database.
+    You'll need to implement this based on your storage (SQLite, JSON file, etc.)
+    """
+    # Example implementation using a JSON file
+    try:
+        if os.path.exists('datasets.json'):
+            with open('datasets.json', 'r') as f:
+                datasets = json.load(f)
+        else:
+            datasets = []
+        
+        datasets.append(dataset_info)
+        
+        with open('datasets.json', 'w') as f:
+            json.dump(datasets, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save dataset info: {e}")
+
 # Helper function to safely save CSV with retry logic
 def safe_save_csv(df, dataset_id: Optional[int] = None, max_retries=3):
     """
