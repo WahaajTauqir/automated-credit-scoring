@@ -8,6 +8,9 @@ import datetime
 import json
 import requests
 import math
+import pickle
+import glob
+import copy
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_curve, auc, classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
@@ -23,11 +26,11 @@ import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
 from decimal import Decimal
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 # Import ONLY new database layer functions - NO MORE db_old imports!
 from db import (
-    get_db_connection, init_db, ensure_final_selected_column, ensure_model_ready_column, sync_model_ready_to_final_selected,
+    get_db_connection, init_db, ensure_final_selected_column, ensure_model_ready_column, ensure_dataset_identifier_column, sync_model_ready_to_final_selected,
     # Dataset operations
     create_dataset, get_dataset, get_all_datasets, get_all_datasets_with_features,
     get_latest_dataset, update_dataset, delete_dataset,
@@ -64,13 +67,75 @@ logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173", "http://localhost:5174"])
+ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), 'artifacts')
+os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
 # Ensure database schema is up to date on startup
 try:
     ensure_final_selected_column()
     ensure_model_ready_column()
+    ensure_dataset_identifier_column()
 except Exception as e:
     print(f"[APP] Warning: Could not ensure required columns: {e}")
+
+def _sanitize_model_label(label: Optional[str]) -> str:
+    candidate = (label or 'model').strip()
+    filtered = ''.join(ch if ch.isalnum() or ch in ('_', '-') else '_' for ch in candidate)
+    filtered = filtered.strip('_')
+    return filtered or 'model'
+
+def _artifact_pattern(dataset_id: int) -> str:
+    return os.path.join(ARTIFACTS_DIR, f"{dataset_id}_*.pkl")
+
+def _build_artifact_metadata(payload: Dict[str, Any], artifact_path: str) -> Dict[str, Any]:
+    selected_vars = payload.get('model_variables') or payload.get('selected_variables', [])
+    metrics = payload.get('training_metrics') or {}
+    return {
+        'dataset_id': payload.get('dataset_id'),
+        'model_label': payload.get('model_label'),
+        'model_type': payload.get('model_type'),
+        'target': payload.get('target'),
+        'selected_variables': selected_vars,
+        'saved_at': payload.get('saved_at'),
+        'artifact_file': os.path.basename(artifact_path),
+        'training_metrics': metrics
+    }
+
+def save_model_artifact(dataset_id: int, model_label: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+        for existing in glob.glob(_artifact_pattern(dataset_id)):
+            try:
+                os.remove(existing)
+            except OSError:
+                pass
+        try:
+            payload_copy = copy.deepcopy(payload)
+        except Exception:
+            payload_copy = dict(payload)
+        payload_copy.setdefault('dataset_id', dataset_id)
+        payload_copy.setdefault('model_label', model_label)
+        payload_copy.setdefault('saved_at', datetime.datetime.utcnow().isoformat())
+        filename = f"{dataset_id}_{_sanitize_model_label(model_label)}.pkl"
+        artifact_path = os.path.join(ARTIFACTS_DIR, filename)
+        with open(artifact_path, 'wb') as handle:
+            pickle.dump(payload_copy, handle)
+        return _build_artifact_metadata(payload_copy, artifact_path)
+    except Exception as err:
+        print(f"[MODEL ARTIFACT] Failed to save artifact for dataset {dataset_id}: {err}")
+        return None
+
+def load_model_artifact(dataset_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    pattern = _artifact_pattern(dataset_id)
+    matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    for path in matches:
+        try:
+            with open(path, 'rb') as handle:
+                payload = pickle.load(handle)
+                return payload, path
+        except Exception as err:
+            print(f"[MODEL ARTIFACT] Failed to load artifact {path}: {err}")
+    return None, None
 def save_coarse_binning_to_db(feature_id, bins_df, var_type):
     """
     Save coarse binning results to the new normalized schema.
@@ -347,13 +412,34 @@ def _row_to_native_types(row: Dict[str, Any]) -> Dict[str, Any]:
     """Convert Decimal/NumPy types in DB rows to JSON-serializable primitives."""
     normalized = {}
     for key, value in row.items():
-        if isinstance(value, Decimal):
-            normalized[key] = float(value)
+        # Handle None/NULL
+        if value is None:
+            normalized[key] = None
+        # Handle Decimal
+        elif isinstance(value, Decimal):
+            val = float(value)
+            # Check for NaN or inf after conversion
+            if np.isnan(val) or np.isinf(val):
+                normalized[key] = None
+            else:
+                normalized[key] = val
+        # Handle NumPy types
         elif hasattr(value, 'item'):
             try:
-                normalized[key] = value.item()
+                val = value.item()
+                # Check for NaN or inf in NumPy values
+                if isinstance(val, (float, np.floating)) and (np.isnan(val) or np.isinf(val)):
+                    normalized[key] = None
+                else:
+                    normalized[key] = val
             except Exception:
                 normalized[key] = value
+        # Handle float NaN/inf
+        elif isinstance(value, (float, np.floating)):
+            if np.isnan(value) or np.isinf(value):
+                normalized[key] = None
+            else:
+                normalized[key] = float(value)
         else:
             normalized[key] = value
     return normalized
@@ -2300,9 +2386,10 @@ def fine_bin_discrete(df, var, target, bin_merges=None, bin_mapping=None):
 # ----------- Fine Binning API -----------
 @app.route('/api/fine-bin', methods=['POST'])
 def fine_bin_api():
+    print("\n[API] /api/fine-bin (POST) called")
     try:
         req = request.get_json()
-        print("Received request:", req)
+        print(f"[fine_bin_api] DEBUG: Received request for variable={req.get('variable')}, type={req.get('type')}")
         var = req.get('variable')
         target = req.get('target')
         var_type = req.get('type')
@@ -2377,29 +2464,40 @@ def fine_bin_api():
 
         # Persist coarse + fine binning into the new normalized schema (datasets/features/binning tables)
         # dataset_id was already validated and converted to int above
+        print(f"[fine_bin_api] DEBUG: Persisting results for dataset_id={dataset_id}, variable={var}")
 
         # Ensure feature exists in new schema
         feature = get_feature_by_name(dataset_id, var)
         if not feature:
             fid = create_feature(dataset_id, var, var_type, selected=True)
             feature = get_feature(fid)
+            print(f"[fine_bin_api] DEBUG: Created feature, feature_id={fid}")
+        else:
+            print(f"[fine_bin_api] DEBUG: Feature exists, feature_id={feature['id']}")
 
         # Ensure coarse binning exists (recompute and save if missing)
         try:
             coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
             if not coarse_step:
+                print(f"[fine_bin_api] DEBUG: No coarse step, creating one")
                 # recompute coarse stats and persist
                 if var_type == 'continuous':
                     coarse_stats, _ = coarse_bin_continuous(df, var, target)
                 else:
                     coarse_stats, _, _ = coarse_bin_discrete(df, var, target)
-                save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
-        except Exception:
+                coarse_step_id = save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
+                print(f"[fine_bin_api] DEBUG: Created coarse_step_id={coarse_step_id}")
+            else:
+                print(f"[fine_bin_api] DEBUG: Coarse step exists, step_id={coarse_step['id']}")
+        except Exception as e:
+            print(f"[fine_bin_api] DEBUG: Error ensuring coarse step: {e}")
             pass
 
         # Create / update fine binning step
         num_bins = len(tab) if hasattr(tab, 'shape') else (len(tab) if isinstance(tab, list) else 0)
+        print(f"[fine_bin_api] DEBUG: Creating fine step, num_bins={num_bins}, iv={iv}")
         fine_step_id = create_binning_step(feature_id=feature['id'], step_type='fine', method='merged' if adjusted_merges else 'manual', num_bins=num_bins, iv_value=iv)
+        print(f"[fine_bin_api] DEBUG: Created fine_step_id={fine_step_id}")
 
         # Build bins payload and persist
         bins_data = []
@@ -2463,16 +2561,23 @@ def fine_bin_api():
 
         # Persist bins and totals
         if bins_data:
+            print(f"[fine_bin_api] DEBUG: Saving {len(bins_data)} bins to database")
             create_bins_batch(fine_step_id, bins_data)
             create_binning_totals(binning_step_id=fine_step_id, total_good=int(total_good), total_bad=int(total_bad), total_count=int(total_good + total_bad))
+            print(f"[fine_bin_api] DEBUG: Bins and totals saved successfully")
+        else:
+            print(f"[fine_bin_api] WARNING: No bins_data to save!")
 
         # Persist merged groups (if any)
+        print(f"[fine_bin_api] DEBUG: Saving merged bins: {adjusted_merges}")
         try:
             save_finebin_details_db(int(dataset_id), var, adjusted_merges)
-        except Exception:
+            print(f"[fine_bin_api] DEBUG: Merged bins saved successfully")
+        except Exception as e:
+            print(f"[fine_bin_api] DEBUG: Error saving merged bins: {e}")
             pass
 
-        print("Fine binning persisted for", var)
+        print(f"[fine_bin_api] ✓ Fine binning persisted for {var}, dataset_id={dataset_id}, feature_id={feature['id']}, fine_step_id={fine_step_id}")
         return jsonify({
             "success": True,
             "stats": tab.to_dict(orient='records'),
@@ -2648,35 +2753,49 @@ def auto_monotonic_binning_api():
         if record_id:
             try:
                 dataset_id = int(record_id)
+                print(f"[auto_monotonic_binning] DEBUG: Using dataset_id from record_id: {dataset_id}")
             except Exception:
                 dataset_id = latest_ds['id'] if latest_ds else None
+                print(f"[auto_monotonic_binning] DEBUG: Failed to parse record_id, using latest: {dataset_id}")
         else:
             dataset_id = latest_ds['id'] if latest_ds else None
+            print(f"[auto_monotonic_binning] DEBUG: No record_id, using latest: {dataset_id}")
 
         if dataset_id is None:
             dataset_id = create_dataset(name='Auto Binning', file_path='', total_features=0, discrete_features=0, continuous_features=0, target_variable=target)
+            print(f"[auto_monotonic_binning] DEBUG: Created new dataset: {dataset_id}")
 
         # Ensure feature exists
         feature = get_feature_by_name(dataset_id, var)
         if not feature:
             fid = create_feature(dataset_id, var, var_type, selected=True)
             feature = get_feature(fid)
+            print(f"[auto_monotonic_binning] DEBUG: Created new feature: {var}, feature_id={fid}")
+        else:
+            print(f"[auto_monotonic_binning] DEBUG: Feature exists: {var}, feature_id={feature['id']}")
 
         # Ensure coarse saved
         try:
             coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
             if not coarse_step:
+                print(f"[auto_monotonic_binning] DEBUG: No coarse step found, creating for {var}")
                 if var_type == 'continuous':
                     coarse_stats, _ = coarse_bin_continuous(df, var, target)
                 else:
                     coarse_stats, _, _ = coarse_bin_discrete(df, var, target)
-                save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
-        except Exception:
+                coarse_step_id = save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
+                print(f"[auto_monotonic_binning] DEBUG: Created coarse step_id={coarse_step_id}")
+            else:
+                print(f"[auto_monotonic_binning] DEBUG: Coarse step exists, step_id={coarse_step['id']}")
+        except Exception as e:
+            print(f"[auto_monotonic_binning] DEBUG: Error ensuring coarse step: {e}")
             pass
 
         # Create/update fine step and persist bins/totals
         num_bins = len(tab) if hasattr(tab, 'shape') else (len(tab) if isinstance(tab, list) else 0)
+        print(f"[auto_monotonic_binning] DEBUG: Creating fine step for {var}, num_bins={num_bins}, iv={iv}")
         fine_step_id = create_binning_step(feature_id=feature['id'], step_type='fine', method='merged' if adjusted_merges else 'auto_monotonic', num_bins=num_bins, iv_value=iv)
+        print(f"[auto_monotonic_binning] DEBUG: Created fine_step_id={fine_step_id}")
 
         bins_data = []
         total_good = 0
@@ -2736,15 +2855,22 @@ def auto_monotonic_binning_api():
             bins_data.append(bin_item)
 
         if bins_data:
+            print(f"[auto_monotonic_binning] DEBUG: Saving {len(bins_data)} bins to database")
             create_bins_batch(fine_step_id, bins_data)
             create_binning_totals(binning_step_id=fine_step_id, total_good=int(total_good), total_bad=int(total_bad), total_count=int(total_good + total_bad))
+            print(f"[auto_monotonic_binning] DEBUG: Bins and totals saved successfully")
+        else:
+            print(f"[auto_monotonic_binning] WARNING: No bins_data to save!")
 
+        print(f"[auto_monotonic_binning] DEBUG: Saving merged bins: {adjusted_merges}")
         try:
             save_finebin_details_db(int(dataset_id), var, adjusted_merges)
-        except Exception:
+            print(f"[auto_monotonic_binning] DEBUG: Merged bins saved successfully")
+        except Exception as e:
+            print(f"[auto_monotonic_binning] DEBUG: Error saving merged bins: {e}")
             pass
 
-        print(f"Auto-binning persisted for {var}")
+        print(f"[auto_monotonic_binning] ✓ Auto-binning persisted for {var}, dataset_id={dataset_id}, feature_id={feature['id']}, fine_step_id={fine_step_id}")
 
         return jsonify({
             "success": True,
@@ -2887,21 +3013,45 @@ def univariate_analysis():
                             dataset_id = int(record_id)
                         except (ValueError, TypeError):
                             dataset_id = None
+                            print(f"[univariate_analysis] DEBUG: Invalid dataset_id for {col}")
                         if dataset_id:
                             feature = get_feature_by_name(dataset_id, col)
                             if feature:
+                                print(f"[univariate_analysis] DEBUG: Feature found for {col}, feature_id={feature['id']}")
                                 # Check if coarse binning already exists
                                 coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
                                 if coarse_step:
+                                    print(f"[univariate_analysis] DEBUG: Coarse step found for {col}, step_id={coarse_step['id']}")
                                     # Data exists in database - retrieve it
                                     bins = get_bins_by_step(coarse_step['id'])
                                     if bins:
-                                        stats_dict = [_row_to_native_types(dict(row)) for row in bins]
+                                        print(f"[univariate_analysis] DEBUG: Found {len(bins)} bins in DB for {col}")
+                                        # Transform DB format to frontend format
+                                        stats_dict = []
+                                        for bin_row in bins:
+                                            native_row = _row_to_native_types(dict(bin_row))
+                                            frontend_row = {
+                                                'Bin': native_row.get('bin_label', f"Bin_{native_row.get('bin_number', '')}"),
+                                                'Range': native_row.get('range_text'),
+                                                'Good': native_row.get('good_count', 0),
+                                                'Bad': native_row.get('bad_count', 0),
+                                                'Total': native_row.get('total_count', 0),
+                                                'Bad Rate': native_row.get('bad_rate'),
+                                                'Freq%': native_row.get('freq_percent'),
+                                                'WOE': native_row.get('woe'),
+                                                'IV': native_row.get('iv')
+                                            }
+                                            stats_dict.append(frontend_row)
                                         from_db = True
                                         print(f"[univariate_analysis] ✓ Retrieved discrete from DB: {col} ({len(bins)} bins)")
+                                else:
+                                    print(f"[univariate_analysis] DEBUG: No coarse step found for {col}")
+                            else:
+                                print(f"[univariate_analysis] DEBUG: No feature found for {col}")
                     
                     # If not in database, calculate fresh
                     if stats_dict is None:
+                        print(f"[univariate_analysis] DEBUG: Calculating fresh binning for discrete {col}")
                         stats, _, _ = coarse_bin_discrete(df, col, target)
                         print(f"[univariate_analysis] ⚙️  Calculated discrete: {col}")
                         
@@ -2915,9 +3065,7 @@ def univariate_analysis():
                                 feature = get_feature_by_name(dataset_id, col)
                                 if feature:
                                     step_id = save_coarse_binning_to_db(feature['id'], stats, 'discrete')
-                                    print(f"[univariate_analysis] 💾 Saved discrete to DB: {col}")
-                                    bins = get_bins_by_step(step_id)
-                                    stats_dict = [_row_to_native_types(dict(row)) for row in bins]
+                                    print(f"[univariate_analysis] 💾 Saved discrete to DB: {col}, step_id={step_id}")
                         if stats_dict is None:
                             stats_dict = stats.to_dict(orient='records')
                     
@@ -2928,6 +3076,8 @@ def univariate_analysis():
                     }
                 except Exception as e:
                     print(f"[univariate_analysis] Error processing discrete column {col}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     results[col] = {'type': 'discrete', 'error': str(e)}
         
         # Process continuous columns
@@ -2944,21 +3094,46 @@ def univariate_analysis():
                             dataset_id = int(record_id)
                         except (ValueError, TypeError):
                             dataset_id = None
+                            print(f"[univariate_analysis] DEBUG: Invalid dataset_id for {col}")
                         if dataset_id:
                             feature = get_feature_by_name(dataset_id, col)
                             if feature:
+                                print(f"[univariate_analysis] DEBUG: Feature found for {col}, feature_id={feature['id']}")
                                 # Check if coarse binning already exists
                                 coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
                                 if coarse_step:
+                                    print(f"[univariate_analysis] DEBUG: Coarse step found for {col}, step_id={coarse_step['id']}")
                                     # Data exists in database - retrieve it
                                     bins = get_bins_by_step(coarse_step['id'])
                                     if bins:
-                                        stats_dict = [_row_to_native_types(dict(row)) for row in bins]
+                                        print(f"[univariate_analysis] DEBUG: Found {len(bins)} bins in DB for {col}")
+                                        # Transform DB format to frontend format
+                                        stats_dict = []
+                                        for bin_row in bins:
+                                            native_row = _row_to_native_types(dict(bin_row))
+                                            frontend_row = {
+                                                'Bin': native_row.get('bin_label', f"Bin_{native_row.get('bin_number', '')}"),
+                                                'Min': native_row.get('min_value'),
+                                                'Max': native_row.get('max_value'),
+                                                'Good': native_row.get('good_count', 0),
+                                                'Bad': native_row.get('bad_count', 0),
+                                                'Total': native_row.get('total_count', 0),
+                                                'Bad Rate': native_row.get('bad_rate'),
+                                                'Freq%': native_row.get('freq_percent'),
+                                                'WOE': native_row.get('woe'),
+                                                'IV': native_row.get('iv')
+                                            }
+                                            stats_dict.append(frontend_row)
                                         from_db = True
                                         print(f"[univariate_analysis] ✓ Retrieved continuous from DB: {col} ({len(bins)} bins)")
+                                else:
+                                    print(f"[univariate_analysis] DEBUG: No coarse step found for {col}")
+                            else:
+                                print(f"[univariate_analysis] DEBUG: No feature found for {col}")
                     
                     # If not in database, calculate fresh
                     if stats_dict is None:
+                        print(f"[univariate_analysis] DEBUG: Calculating fresh binning for continuous {col}")
                         stats, _ = coarse_bin_continuous(df, col, target)
                         print(f"[univariate_analysis] ⚙️  Calculated continuous: {col}")
                         
@@ -2972,9 +3147,7 @@ def univariate_analysis():
                                 feature = get_feature_by_name(dataset_id, col)
                                 if feature:
                                     step_id = save_coarse_binning_to_db(feature['id'], stats, 'continuous')
-                                    print(f"[univariate_analysis] 💾 Saved continuous to DB: {col}")
-                                    bins = get_bins_by_step(step_id)
-                                    stats_dict = [_row_to_native_types(dict(row)) for row in bins]
+                                    print(f"[univariate_analysis] 💾 Saved continuous to DB: {col}, step_id={step_id}")
                         if stats_dict is None:
                             stats_dict = stats.to_dict(orient='records')
                     
@@ -2985,6 +3158,8 @@ def univariate_analysis():
                     }
                 except Exception as e:
                     print(f"[univariate_analysis] Error processing continuous column {col}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     results[col] = {'type': 'continuous', 'error': str(e)}
         
         return jsonify(results)
@@ -4601,6 +4776,27 @@ def load_record_dataset(record_id):
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/datasets/<int:dataset_id>/model', methods=['GET'])
+def get_dataset_model_artifact(dataset_id: int):
+    """
+    Return metadata about the persisted model artifact for a dataset.
+    """
+    try:
+        dataset = get_dataset(dataset_id)
+        if not dataset:
+            return jsonify({"error": "Dataset not found"}), 404
+        artifact_payload, artifact_path = load_model_artifact(dataset_id)
+        if not artifact_payload or not artifact_path:
+            return jsonify({"error": "Model artifact not found"}), 404
+        metadata = _build_artifact_metadata(artifact_payload, artifact_path)
+        return jsonify({
+            "dataset": _row_to_native_types(dataset),
+            "model": metadata
+        })
+    except Exception as e:
+        print(f"[get_dataset_model_artifact] ERROR: {e}")
+        return jsonify({"error": f"Failed to load model artifact: {str(e)}"}), 500
 # ----------- Logistic Regression Analysis -----------
 @app.route('/api/logistic-regression', methods=['POST'])
 def logistic_regression_analysis():
@@ -4623,18 +4819,12 @@ def logistic_regression_analysis():
             or data.get('recordId')
             or data.get('datasetId')
         )
-        dataset_id = (
-            data.get('record_id')
-            or data.get('dataset_id')
-            or data.get('recordId')
-            or data.get('datasetId')
-        )
-        dataset_id = (
-            data.get('record_id')
-            or data.get('dataset_id')
-            or data.get('recordId')
-            or data.get('datasetId')
-        )
+        if not dataset_id:
+            return jsonify({"error": "Missing dataset_id/record_id"}), 400
+        try:
+            dataset_id = int(dataset_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
 
         if not selected_variables or not target:
             return jsonify({"error": "Missing selected_variables or target"}), 400
@@ -5012,6 +5202,63 @@ def logistic_regression_analysis():
             'ks_curve': ks_curve,
             'dropped_variables': dropped_variables  # Updated: includes constants, high-VIF, rank-deficient
         }
+
+        try:
+            params_series = getattr(result, 'params', None)
+            intercept_value = 0.0
+            if params_series is not None:
+                try:
+                    intercept_value = float(params_series.get('const', params_series[0]))
+                except Exception:
+                    try:
+                        intercept_value = float(params_series[0])
+                    except Exception:
+                        intercept_value = 0.0
+            coefficients_dict: Dict[str, float] = {}
+            if params_series is not None:
+                for col in feature_cols:
+                    coef_val = None
+                    try:
+                        coef_val = params_series.get(col)
+                    except Exception:
+                        coef_val = None
+                    if coef_val is None:
+                        try:
+                            idx = feature_cols.index(col) + 1
+                            coef_val = params_series[idx]
+                        except Exception:
+                            coef_val = None
+                    if coef_val is not None and np.isfinite(coef_val):
+                        coefficients_dict[col.replace('_WOE', '')] = float(coef_val)
+            woe_snapshot = {}
+            for var in selected_variables:
+                if var in woe_transformed_data:
+                    woe_snapshot[var] = copy.deepcopy(woe_transformed_data[var])
+            training_metrics = {
+                'auc': resp.get('auc'),
+                'gini_coefficient': resp.get('gini_coefficient'),
+                'accuracy': resp.get('accuracy'),
+                'precision': resp.get('precision'),
+                'recall': resp.get('recall'),
+                'f1': resp.get('f1'),
+                'ks_stat': resp.get('ks_stat')
+            }
+            artifact_payload = {
+                'model_type': 'logistic_regression',
+                'target': target,
+                'selected_variables': selected_variables,
+                'model_variables': selected_variables,
+                'feature_columns': feature_cols,
+                'woe_transformed_data': woe_snapshot,
+                'coefficients': coefficients_dict,
+                'intercept': intercept_value,
+                'training_metrics': training_metrics
+            }
+            artifact_metadata = save_model_artifact(dataset_id, 'LR', artifact_payload)
+            if artifact_metadata:
+                resp['artifact'] = artifact_metadata
+        except Exception as artifact_err:
+            print(f"[MODEL ARTIFACT] Failed to persist logistic model for dataset {dataset_id}: {artifact_err}")
 
         if dropped_variables:
             print(f"LOGISTIC DEBUG: Dropped variables: {dropped_variables}")
@@ -5508,6 +5755,64 @@ def xgboost_analysis():
             'ks_curve': ks_curve
         }
 
+        # Save model artifact
+        try:
+            print(f"[MODEL ARTIFACT] Starting XGBoost artifact save for dataset {dataset_id}")
+            model_variables = [col.replace('_WOE', '') for col in woe_columns]
+            woe_snapshot = {}
+            for var in model_variables:
+                if var in woe_transformed_data:
+                    woe_snapshot[var] = copy.deepcopy(woe_transformed_data[var])
+            
+            training_metrics = {
+                'auc': resp.get('auc'),
+                'gini_coefficient': resp.get('gini_coefficient'),
+                'accuracy': resp.get('accuracy'),
+                'precision': resp.get('precision'),
+                'recall': resp.get('recall'),
+                'f1': resp.get('f1'),
+                'ks_stat': resp.get('ks_stat')
+            }
+            
+            # Serialize XGBoost booster
+            model_bytes = None
+            try:
+                booster = xgb_model.get_booster()
+                raw_bytes = booster.save_raw("json")
+                model_bytes = bytes(raw_bytes)
+                print(f"[MODEL ARTIFACT] Serialized XGBoost booster successfully (size: {len(model_bytes)} bytes)")
+            except Exception:
+                try:
+                    raw_bytes = xgb_model.get_booster().save_raw()
+                    model_bytes = bytes(raw_bytes)
+                    print(f"[MODEL ARTIFACT] Serialized XGBoost booster successfully with fallback (size: {len(model_bytes)} bytes)")
+                except Exception as raw_err:
+                    print(f"[MODEL ARTIFACT] Failed to serialize XGBoost model via save_raw: {raw_err}")
+                    model_bytes = None
+            
+            artifact_payload = {
+                'model_type': 'xgboost',
+                'target': target,
+                'selected_variables': model_variables,
+                'model_variables': model_variables,
+                'feature_columns': woe_columns,
+                'woe_transformed_data': woe_snapshot,
+                'model_bytes': model_bytes,
+                'xgb_params': xgb_model.get_xgb_params(),
+                'training_metrics': training_metrics
+            }
+            
+            artifact_metadata = save_model_artifact(dataset_id, 'XGBoost', artifact_payload)
+            if artifact_metadata:
+                resp['artifact'] = artifact_metadata
+                print(f"[MODEL ARTIFACT] Successfully saved XGBoost artifact: {artifact_metadata}")
+            else:
+                print(f"[MODEL ARTIFACT] save_model_artifact returned None for dataset {dataset_id}")
+        except Exception as artifact_err:
+            print(f"[MODEL ARTIFACT] Failed to persist XGBoost model for dataset {dataset_id}: {artifact_err}")
+            import traceback
+            traceback.print_exc()
+
         return jsonify(resp)
 
     except Exception as e:
@@ -5788,48 +6093,64 @@ def get_finebin_cache(record_id: int, column_name: str):
     print(f"\n[API] /api/finebin-cache/{record_id}/{column_name} (GET) called")
     try:
         dataset_id = record_id
+        print(f"[get_finebin_cache] DEBUG: dataset_id={dataset_id}, column_name={column_name}")
+        
         feature = get_feature_by_name(dataset_id, column_name)
         if not feature:
+            print(f"[get_finebin_cache] DEBUG: Feature not found for {column_name}")
             return jsonify({"success": False, "reason": "feature_not_found"})
-
+        
+        print(f"[get_finebin_cache] DEBUG: Feature found, feature_id={feature['id']}")
         fine_step = get_binning_step_by_type(feature['id'], 'fine')
         if not fine_step:
+            print(f"[get_finebin_cache] DEBUG: Fine step not found for feature_id={feature['id']}")
             return jsonify({"success": False, "reason": "fine_step_missing"})
 
         fine_step_id = fine_step['id']
+        print(f"[get_finebin_cache] DEBUG: Fine step found, fine_step_id={fine_step_id}")
         bins = get_bins_by_step(fine_step_id)
         if not bins:
+            print(f"[get_finebin_cache] DEBUG: No bins found for fine_step_id={fine_step_id}")
             return jsonify({"success": False, "reason": "no_bins"})
 
+        print(f"[get_finebin_cache] DEBUG: Found {len(bins)} bins")
         merged_bins = get_merged_bins_by_step(fine_step_id) or []
+        print(f"[get_finebin_cache] DEBUG: Found {len(merged_bins)} merged bins")
         totals = get_binning_totals(fine_step_id)
 
         def _safe_float(value):
+            """Safely convert to float, handling NaN/inf"""
             if value is None:
                 return None
             try:
-                return float(value)
+                val = float(value)
+                # Check for NaN or inf
+                if np.isnan(val) or np.isinf(val):
+                    return None
+                return val
             except (TypeError, ValueError):
-                return value
+                return None
 
         stats = []
         for row in bins:
-            label = row.get('bin_label')
+            # Use _row_to_native_types to handle Decimal/NumPy types and NaN/inf
+            native_row = _row_to_native_types(dict(row))
+            label = native_row.get('bin_label')
             if not label:
-                bin_number = row.get('bin_number')
-                label = f"Bin_{bin_number}" if bin_number is not None else str(row.get('id', ''))
+                bin_number = native_row.get('bin_number')
+                label = f"Bin_{bin_number}" if bin_number is not None else str(native_row.get('id', ''))
             stats.append({
                 'Bin': label,
-                'Range': row.get('range_text'),
-                'Good': int(row.get('good_count') or 0),
-                'Bad': int(row.get('bad_count') or 0),
-                'Total': int(row.get('total_count') or 0),
-                'Bad Rate': _safe_float(row.get('bad_rate')),
-                'Freq%': _safe_float(row.get('freq_percent')),
-                'WOE': _safe_float(row.get('woe')),
-                'IV': _safe_float(row.get('iv')),
-                'Min': _safe_float(row.get('min_value')),
-                'Max': _safe_float(row.get('max_value')),
+                'Range': native_row.get('range_text'),
+                'Good': int(native_row.get('good_count') or 0),
+                'Bad': int(native_row.get('bad_count') or 0),
+                'Total': int(native_row.get('total_count') or 0),
+                'Bad Rate': native_row.get('bad_rate'),  # Already sanitized by _row_to_native_types
+                'Freq%': native_row.get('freq_percent'),
+                'WOE': native_row.get('woe'),
+                'IV': native_row.get('iv'),
+                'Min': native_row.get('min_value'),
+                'Max': native_row.get('max_value'),
             })
 
         merges_map = {}
@@ -5856,6 +6177,7 @@ def get_finebin_cache(record_id: int, column_name: str):
             }
         }
 
+        print(f"[get_finebin_cache] ✓ Returning {len(stats)} stats, {len(merges_map)} merges for {column_name}")
         return jsonify(response_payload)
     except Exception as exc:
         print(f"[get_finebin_cache] ERROR: {exc}")

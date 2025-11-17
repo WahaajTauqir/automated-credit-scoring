@@ -15,6 +15,7 @@
 │    target_variable (TEXT)               │
 │    created_at (TIMESTAMP)               │
 │    updated_at (TIMESTAMP)               │
+│    identifier (TEXT)                    │
 └────────────┬────────────────────────────┘
              │
              │ 1:N (one dataset has many features)

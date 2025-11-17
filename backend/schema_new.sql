@@ -23,7 +23,8 @@ CREATE TABLE datasets (
     continuous_features INT,
     target_variable TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    updated_at TIMESTAMP DEFAULT NOW(),
+    identifier TEXT
 );
 
 COMMENT ON TABLE datasets IS 'Stores information about each credit scoring dataset/run';
@@ -33,6 +34,7 @@ COMMENT ON COLUMN datasets.total_features IS 'Total number of features in datase
 COMMENT ON COLUMN datasets.discrete_features IS 'Number of discrete/categorical features';
 COMMENT ON COLUMN datasets.continuous_features IS 'Number of continuous/numeric features';
 COMMENT ON COLUMN datasets.target_variable IS 'Name of the target/dependent variable';
+COMMENT ON COLUMN datasets.identifier IS 'Human readable identifier or artifact reference';
 
 -- =====================================================
 -- 2. FEATURES TABLE

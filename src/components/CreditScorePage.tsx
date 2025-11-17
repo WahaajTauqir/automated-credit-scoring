@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import Navbar from './Navbar';
 import './CreditScorePage.css';
@@ -9,6 +9,17 @@ interface PredictionRow {
   probability: number;
   status: string;
   [key: string]: any;
+}
+
+interface ModelInfo {
+  dataset_id: number;
+  model_label: string;
+  model_type: string;
+  target?: string;
+  selected_variables?: string[];
+  saved_at?: string;
+  artifact_file?: string;
+  training_metrics?: Record<string, number | null>;
 }
 
 const CreditScorePage = () => {
@@ -28,13 +39,77 @@ const CreditScorePage = () => {
   const [recordId, setRecordId] = useState<number | undefined>(
     location.state?.recordId
   );
+  const [pageError, setPageError] = useState<string | null>(
+    location.state?.recordId ? null : 'Select a dataset from the home page before checking credit scores.'
+  );
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
+  const [modelLoading, setModelLoading] = useState<boolean>(false);
+  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
 
-  // Available models
-  const availableModels = [
+  const baseModels = [
     { value: 'logistic', label: 'Logistic Regression' },
-    { value: 'random_forest', label: 'Random Forest' },
     { value: 'xgboost', label: 'XGBoost' },
   ];
+  const lockedModelValue = modelInfo
+    ? modelInfo.model_label === 'LR'
+      ? 'logistic'
+      : 'xgboost'
+    : null;
+  const availableModels = lockedModelValue
+    ? baseModels.filter(model => model.value === lockedModelValue)
+    : baseModels;
+  const isModelLocked = Boolean(lockedModelValue);
+
+  useEffect(() => {
+    if (recordId) {
+      setPageError(null);
+    }
+  }, [recordId]);
+
+  useEffect(() => {
+    if (!recordId) {
+      setModelInfo(null);
+      setModelFetchError(null);
+      setModelLoading(false);
+      return;
+    }
+    let isCancelled = false;
+    setModelLoading(true);
+    setModelFetchError(null);
+    fetch(`http://localhost:5000/api/datasets/${recordId}/model`)
+      .then(async response => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || 'Failed to load model metadata.');
+        }
+        return payload;
+      })
+      .then(payload => {
+        if (!isCancelled) {
+          setModelInfo(payload.model);
+        }
+      })
+      .catch(err => {
+        if (!isCancelled) {
+          setModelInfo(null);
+          setModelFetchError(err.message);
+        }
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setModelLoading(false);
+        }
+      });
+    return () => {
+      isCancelled = true;
+    };
+  }, [recordId]);
+
+  useEffect(() => {
+    if (modelInfo) {
+      setSelectedModel(modelInfo.model_label === 'LR' ? 'logistic' : 'xgboost');
+    }
+  }, [modelInfo]);
 
   // Handle file upload
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -126,6 +201,16 @@ const CreditScorePage = () => {
       return;
     }
 
+    if (!recordId) {
+      setError('No dataset selected for scoring. Please navigate from the home page and choose a scorecard.');
+      return;
+    }
+
+    if (!modelInfo) {
+      setError('No trained model is available for this dataset. Train Logistic Regression or XGBoost first.');
+      return;
+    }
+
     setIsProcessing(true);
     setError(null);
 
@@ -182,6 +267,42 @@ const CreditScorePage = () => {
             Upload a CSV file with data to predict credit scores
           </p>
         </div>
+
+        {pageError && (
+          <div className="credit-score-page-alert">
+            <span>{pageError}</span>
+            <button className="credit-score-alert-link" onClick={() => navigate('/')}>
+              Go to Home
+            </button>
+          </div>
+        )}
+
+        {recordId && (
+          <div className="credit-score-meta">
+            <div className="credit-score-meta-item">
+              <span>Dataset ID</span>
+              <strong>#{recordId}</strong>
+            </div>
+            <div className="credit-score-meta-item">
+              <span>Model</span>
+              <strong>
+                {modelInfo ? modelInfo.model_label : modelLoading ? 'Loading...' : 'Not available'}
+              </strong>
+            </div>
+            {modelInfo?.saved_at && (
+              <div className="credit-score-meta-item">
+                <span>Saved</span>
+                <strong>{new Date(modelInfo.saved_at).toLocaleString()}</strong>
+              </div>
+            )}
+            {modelLoading && (
+              <div className="credit-score-meta-status">Loading model metadata...</div>
+            )}
+            {modelFetchError && !modelLoading && (
+              <div className="credit-score-meta-status error">{modelFetchError}</div>
+            )}
+          </div>
+        )}
 
         <div className="credit-score-content">
           {/* Left Column: Upload and Configuration */}
@@ -250,6 +371,7 @@ const CreditScorePage = () => {
                     className="config-select"
                     value={selectedModel}
                     onChange={(e) => setSelectedModel(e.target.value)}
+                    disabled={isModelLocked}
                   >
                     {availableModels.map(model => (
                       <option key={model.value} value={model.value}>
@@ -257,6 +379,11 @@ const CreditScorePage = () => {
                       </option>
                     ))}
                   </select>
+                  <p className="config-help">
+                    {modelInfo
+                      ? `Model locked to ${modelInfo.model_label}. Retrain the model from the modeling workspace to replace it.`
+                      : 'Select which trained model to use for scoring.'}
+                  </p>
                 </div>
 
                 {/* Identifier Selection */}
@@ -283,10 +410,15 @@ const CreditScorePage = () => {
                 <button
                   className="predict-button"
                   onClick={handlePredict}
-                  disabled={isProcessing || !selectedIdentifier}
+                  disabled={isProcessing || !selectedIdentifier || !modelInfo}
                 >
                   {isProcessing ? 'Processing...' : 'Generate Predictions'}
                 </button>
+                {!modelInfo && (
+                  <p className="config-help">
+                    Train a Logistic Regression or XGBoost model for this dataset before generating scores.
+                  </p>
+                )}
               </div>
             )}
 

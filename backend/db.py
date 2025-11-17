@@ -146,6 +146,29 @@ def ensure_model_ready_column():
         cur.close()
         conn.close()
 
+def ensure_dataset_identifier_column():
+    """Ensure the identifier column exists in the datasets table."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name='datasets' AND column_name='identifier'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE datasets ADD COLUMN identifier TEXT")
+            conn.commit()
+            print("[DB] Added missing identifier column to datasets table")
+        else:
+            print("[DB] identifier column already exists")
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Error ensuring identifier column: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
 def sync_model_ready_to_final_selected(dataset_id: int) -> bool:
     """
     Copy model_ready values to final_selected for all features in a dataset.
@@ -201,7 +224,7 @@ def sync_model_ready_to_final_selected(dataset_id: int) -> bool:
 
 def create_dataset(name: str, file_path: str, total_features: int,
                   discrete_features: int, continuous_features: int,
-                  target_variable: str) -> int:
+                  target_variable: str, identifier: Optional[str] = None) -> int:
     """
     Create a new dataset record.
     
@@ -213,10 +236,10 @@ def create_dataset(name: str, file_path: str, total_features: int,
     
     cur.execute("""
         INSERT INTO datasets (name, file_path, total_features, discrete_features, 
-                            continuous_features, target_variable)
-        VALUES (%s, %s, %s, %s, %s, %s)
+                            continuous_features, target_variable, identifier)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
-    """, (name, file_path, total_features, discrete_features, continuous_features, target_variable))
+    """, (name, file_path, total_features, discrete_features, continuous_features, target_variable, identifier))
     
     dataset_id = cur.fetchone()[0]
     conn.commit()

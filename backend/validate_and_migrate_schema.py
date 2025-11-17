@@ -32,7 +32,8 @@ def get_required_columns():
     return {
         'datasets': [
             'id', 'name', 'file_path', 'total_features', 'discrete_features',
-            'continuous_features', 'target_variable', 'created_at', 'updated_at'
+            'continuous_features', 'target_variable', 'created_at', 'updated_at',
+            'identifier'
         ],
         'features': [
             'id', 'dataset_id', 'name', 'type', 'selected', 'model_ready',
@@ -138,6 +139,7 @@ def apply_migrations():
             'datasets.target_variable': 'TEXT',
             'datasets.created_at': 'TIMESTAMP DEFAULT NOW()',
             'datasets.updated_at': 'TIMESTAMP DEFAULT NOW()',
+            'datasets.identifier': 'TEXT',
             
             # features table
             'features.id': 'SERIAL PRIMARY KEY',  # This should already exist

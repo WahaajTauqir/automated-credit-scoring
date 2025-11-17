@@ -88,7 +88,8 @@ CREATE TABLE datasets (
     continuous_features INT,
     target_variable TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    updated_at TIMESTAMP DEFAULT NOW(),
+    identifier TEXT
 );
 ```
 
