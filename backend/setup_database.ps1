@@ -67,6 +67,9 @@ if (-not (Test-Path -Path ".env")) {
 
 Write-Host "`nStep 1: Validating current database schema..."
 Write-Host "-------------------------------------------"
+Write-Host "Note: This will automatically remove created_at columns from"
+Write-Host "      features, binning_steps, bins, merged_bins, and binning_totals tables."
+Write-Host ""
 & $pythonCmd .\validate_and_migrate_schema.py
 $VALIDATION_RESULT = $LASTEXITCODE
 

@@ -45,6 +45,9 @@ fi
 echo ""
 echo "Step 1: Validating current database schema..."
 echo "-------------------------------------------"
+echo "Note: This will automatically remove created_at columns from"
+echo "      features, binning_steps, bins, merged_bins, and binning_totals tables."
+echo ""
 $PYTHON_CMD validate_and_migrate_schema.py
 
 VALIDATION_RESULT=$?

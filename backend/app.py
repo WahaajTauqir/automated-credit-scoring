@@ -160,29 +160,61 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
         bad = int(row['Bad'])
         total = int(row['Total'])
 
+        # Create bin label with appropriate prefix (c for continuous, d for discrete)
+        # Always use the correct prefix based on var_type, regardless of what's in the Bin column
+        correct_prefix = 'c' if var_type == 'continuous' else 'd'
+        default_label = f'{correct_prefix}{idx+1}'
+        
+        # Get existing bin label, but validate and correct it if needed
+        existing_label = str(row.get('Bin', default_label))
+        
+        # If the existing label doesn't start with the correct prefix, use the default
+        if not existing_label.startswith(correct_prefix):
+            bin_label = default_label
+        else:
+            # Keep the existing label if it has the correct prefix
+            bin_label = existing_label
+        
         bin_data = {
             'bin_number': idx + 1,
-            'bin_label': str(row.get('Bin', f'Bin_{idx+1}')),
+            'bin_label': bin_label,
             'good_count': good,
             'bad_count': bad,
             'total_count': total
         }
 
-        # Add Min/Max for continuous
-        if 'Min' in row and row['Min'] is not None:
-            try:
-                bin_data['min_value'] = float(row['Min'])
-            except Exception:
+        # For continuous: only save min_value and max_value, set range_text to None
+        # For discrete: only save range_text, set min_value and max_value to None
+        if var_type == 'continuous':
+            # Continuous variables: use min/max only
+            if 'Min' in row and row['Min'] is not None:
+                try:
+                    bin_data['min_value'] = float(row['Min'])
+                except Exception:
+                    bin_data['min_value'] = None
+            else:
                 bin_data['min_value'] = None
-        if 'Max' in row and row['Max'] is not None:
-            try:
-                bin_data['max_value'] = float(row['Max'])
-            except Exception:
+                
+            if 'Max' in row and row['Max'] is not None:
+                try:
+                    bin_data['max_value'] = float(row['Max'])
+                except Exception:
+                    bin_data['max_value'] = None
+            else:
                 bin_data['max_value'] = None
-
-        # Add Range for discrete
-        if 'Range' in row and row['Range']:
-            bin_data['range_text'] = str(row['Range'])
+                
+            # Explicitly set range_text to None for continuous
+            bin_data['range_text'] = None
+        else:
+            # Discrete variables: use range_text only
+            if 'Range' in row and row['Range']:
+                bin_data['range_text'] = str(row['Range'])
+            else:
+                bin_data['range_text'] = None
+                
+            # Explicitly set min_value and max_value to None for discrete
+            bin_data['min_value'] = None
+            bin_data['max_value'] = None
 
         # Calculate distributions and rates
         dist_good = (good / total_good) * 100 if total_good > 0 else None
@@ -2012,7 +2044,7 @@ def coarse_bin_continuous(df, var, target, bins=10):
                     n_other_bins = len(bin_edges) - 1
                     
                     if n_other_bins > 0:
-                        other_bin_labels = [f'Bin_{i}' for i in range(2, n_other_bins + 2)]  # Start from Bin_2
+                        other_bin_labels = [f'c{i}' for i in range(2, n_other_bins + 2)]  # Start from c2
                         df.loc[other_mask, f'{var}_binned'] = pd.cut(
                             other_data, 
                             bins=bin_edges, 
@@ -2022,19 +2054,19 @@ def coarse_bin_continuous(df, var, target, bins=10):
                         )
                     else:
                         # If qcut fails, create a single bin for all other values
-                        df.loc[other_mask, f'{var}_binned'] = 'Bin_2'
+                        df.loc[other_mask, f'{var}_binned'] = 'c2'
                 except (ValueError, Exception):
                     # If qcut fails, create a single bin for all other values
-                    df.loc[other_mask, f'{var}_binned'] = 'Bin_2'
+                    df.loc[other_mask, f'{var}_binned'] = 'c2'
             else:
                 # All values are the dominant value
                 n_other_bins = 0
             
-            # Assign dominant value to Bin_1
-            df.loc[dominant_mask, f'{var}_binned'] = 'Bin_1'
+            # Assign dominant value to c1
+            df.loc[dominant_mask, f'{var}_binned'] = 'c1'
             
             # Handle any remaining NaN values
-            df.loc[df[f'{var}_binned'].isna(), f'{var}_binned'] = 'Bin_1'
+            df.loc[df[f'{var}_binned'].isna(), f'{var}_binned'] = 'c1'
             
         else:
             # Standard binning for non-sparse columns
@@ -2045,7 +2077,7 @@ def coarse_bin_continuous(df, var, target, bins=10):
             if n_bins <= 0:
                 raise ValueError(f"No valid bins could be created for '{var}'.")
             
-            bin_labels = [f'Bin_{i}' for i in range(1, n_bins + 1)]
+            bin_labels = [f'c{i}' for i in range(1, n_bins + 1)]
             df[f'{var}_binned'] = pd.cut(df[var], bins=bin_edges, labels=bin_labels, include_lowest=True, right=True)
         
         # Compute actual min and max for each bin based on data
@@ -2233,43 +2265,43 @@ def coarse_bin_discrete(
             except Exception:
                 return ", ".join(sorted(map(str, clean)))
 
-    bin_ranges = {
-        b: _compact([v for v, bid in bin_mapping.items() if bid == b])
-        for b in final_tab[f"{var}_binned"]
-    }
-    if -1 in final_tab[f"{var}_binned"].values:
-        bin_ranges[-1] = "Missing / Other"
-
-    final_tab["Range"] = final_tab[f"{var}_binned"].map(bin_ranges)
-
     # --------------------------------------------------------------
-    # 7. TIDY-UP & **SORT BY BIN NUMBER**
+    # 6.5. CONVERT BINNED COLUMN TO d1, d2, etc. BEFORE CREATING RANGES
     # --------------------------------------------------------------
-    final_tab = final_tab.rename(columns={f"{var}_binned": "Bin"})
+    # First, convert the binned column in the dataframe to use d1, d2, etc.
+    df[f"{var}_binned"] = df[f"{var}_binned"].apply(lambda x: f"d{int(x)}" if pd.notna(x) and x != -1 else "d0")
+    
+    # Now create bin_ranges using the converted d1, d2, etc. labels
+    bin_ranges = {}
+    for b in final_tab[f"{var}_binned"].unique():
+        if pd.notna(b) and b != -1:
+            bin_label = f"d{int(b)}"
+            bin_ranges[bin_label] = _compact([v for v, bid in bin_mapping.items() if bid == b])
+        elif b == -1:
+            bin_ranges["d0"] = "Missing / Other"
+    
+    # --------------------------------------------------------------
+    # 7. TIDY-UP & **SORT BY BIN NUMBER** & CONVERT TO d1, d2, etc.
+    # --------------------------------------------------------------
+    # Convert numeric bin numbers to d1, d2, d3, etc. in the final table
+    final_tab["Bin"] = final_tab[f"{var}_binned"].apply(lambda x: f"d{int(x)}" if pd.notna(x) and x != -1 else "d0")
+    
+    # Map ranges using the converted labels
+    final_tab["Range"] = final_tab["Bin"].map(bin_ranges)
+    
     final_tab = final_tab[
         ["Bin", "Range", "Good", "Bad", "Total", "Freq%", "Bad Rate"]
     ]
 
-    # Clean integer bins
-    final_tab["Bin"] = final_tab["Bin"].apply(
-        lambda x: int(x) if isinstance(x, (int, float)) and x == int(x) else str(x)
-    )
-
-    # Order: 1, 2, 3, …, -1 (Missing) last
-    ordered_bins = [b for b in bin_order if b != -1]
-    if -1 in final_tab["Bin"].values:
-        ordered_bins.append(-1)
+    # Order: d1, d2, d3, …, d0 (Missing) last
+    ordered_bins = [f"d{b}" for b in bin_order if b != -1]
+    if -1 in bin_order:
+        ordered_bins.append("d0")
 
     final_tab["Bin"] = pd.Categorical(
         final_tab["Bin"], categories=ordered_bins, ordered=True
     )
     final_tab = final_tab.sort_values("Bin").reset_index(drop=True)
-
-    # Friendly labels
-    label_map = {b: f"Bin {i + 1}" for i, b in enumerate(ordered_bins) if b != -1}
-    if -1 in label_map:
-        label_map[-1] = "Missing / Other"
-    final_tab["Bin"] = final_tab["Bin"].astype(str).map(label_map)
 
     return final_tab, df[f"{var}_binned"], bin_mapping
 
@@ -2624,7 +2656,20 @@ def fine_bin_api():
             total_good += good
             total_bad += bad
 
-            bin_label = str(row.get('Bin', f'Bin_{idx+1}'))
+            # Create bin label with appropriate prefix (c for continuous, d for discrete)
+            # Always use the correct prefix based on var_type, regardless of what's in the Bin column
+            correct_prefix = 'c' if var_type == 'continuous' else 'd'
+            default_label = f'{correct_prefix}{idx+1}'
+            
+            # Get existing bin label, but validate and correct it if needed
+            existing_label = str(row.get('Bin', default_label))
+            
+            # If the existing label doesn't start with the correct prefix, use the default
+            if not existing_label.startswith(correct_prefix):
+                bin_label = default_label
+            else:
+                # Keep the existing label if it has the correct prefix
+                bin_label = existing_label
             bin_item = {
                 'bin_number': idx + 1,
                 'bin_label': bin_label,
@@ -2633,26 +2678,39 @@ def fine_bin_api():
                 'total_count': total
             }
             
-            # For discrete variables, Range contains the actual values (comma-separated)
-            # For continuous variables, use Min/Max to construct range
-            if 'Range' in row and row.get('Range'):
-                range_val = str(row.get('Range'))
-                bin_item['range_text'] = range_val
-            elif var_type == 'discrete':
-                # For discrete, if no Range, use bin_label as range_text
-                bin_item['range_text'] = bin_label
-            
-            # include range/min/max if present (for continuous)
-            if 'Min' in row and row.get('Min') is not None:
-                try:
-                    bin_item['min_value'] = float(row.get('Min'))
-                except Exception:
-                    pass
-            if 'Max' in row and row.get('Max') is not None:
-                try:
-                    bin_item['max_value'] = float(row.get('Max'))
-                except Exception:
-                    pass
+            # For continuous: only save min_value and max_value, set range_text to None
+            # For discrete: only save range_text, set min_value and max_value to None
+            if var_type == 'continuous':
+                # Continuous variables: use min/max only
+                if 'Min' in row and row.get('Min') is not None:
+                    try:
+                        bin_item['min_value'] = float(row.get('Min'))
+                    except Exception:
+                        bin_item['min_value'] = None
+                else:
+                    bin_item['min_value'] = None
+                    
+                if 'Max' in row and row.get('Max') is not None:
+                    try:
+                        bin_item['max_value'] = float(row.get('Max'))
+                    except Exception:
+                        bin_item['max_value'] = None
+                else:
+                    bin_item['max_value'] = None
+                    
+                # Explicitly set range_text to None for continuous
+                bin_item['range_text'] = None
+            else:
+                # Discrete variables: use range_text only
+                if 'Range' in row and row.get('Range'):
+                    bin_item['range_text'] = str(row.get('Range'))
+                else:
+                    # For discrete, if no Range, use bin_label as range_text
+                    bin_item['range_text'] = bin_label
+                    
+                # Explicitly set min_value and max_value to None for discrete
+                bin_item['min_value'] = None
+                bin_item['max_value'] = None
 
             # attempt to include WOE/IV if present in row
             if 'WOE' in row:
@@ -2768,11 +2826,14 @@ def auto_monotonic_binning_api():
         bad_counts = []
         
         for _, row in coarse_stats.iterrows():
-            # Get bin label
-            if var_type == 'continuous':
-                bin_label = row.get(f'{var}_binned', f'Bin_{len(bin_labels)+1}')
-            else:
-                bin_label = str(row.get(f'{var}_binned', len(bin_labels)+1))
+            # Get bin label from the 'Bin' column (which should already have c1/c2 or d1/d2 format)
+            bin_label = row.get('Bin', '')
+            if not bin_label:
+                # Fallback: create label based on type and index
+                if var_type == 'continuous':
+                    bin_label = f'c{len(bin_labels)+1}'
+                else:
+                    bin_label = f'd{len(bin_labels)+1}'
             
             bin_labels.append(str(bin_label))
             good_counts.append(int(row.get('Good', 0)))
@@ -2921,7 +2982,21 @@ def auto_monotonic_binning_api():
             total_good += good
             total_bad += bad
 
-            bin_label = str(row.get('Bin', f'Bin_{idx+1}'))
+            # Create bin label with appropriate prefix (c for continuous, d for discrete)
+            # Always use the correct prefix based on var_type, regardless of what's in the Bin column
+            correct_prefix = 'c' if var_type == 'continuous' else 'd'
+            default_label = f'{correct_prefix}{idx+1}'
+            
+            # Get existing bin label, but validate and correct it if needed
+            existing_label = str(row.get('Bin', default_label))
+            
+            # If the existing label doesn't start with the correct prefix, use the default
+            if not existing_label.startswith(correct_prefix):
+                bin_label = default_label
+            else:
+                # Keep the existing label if it has the correct prefix
+                bin_label = existing_label
+            
             bin_item = {
                 'bin_number': idx + 1,
                 'bin_label': bin_label,
@@ -2930,26 +3005,39 @@ def auto_monotonic_binning_api():
                 'total_count': total
             }
             
-            # For discrete variables, Range contains the actual values (comma-separated)
-            # For continuous variables, use Min/Max to construct range
-            if 'Range' in row and row.get('Range'):
-                range_val = str(row.get('Range'))
-                bin_item['range_text'] = range_val
-            elif var_type == 'discrete':
-                # For discrete, if no Range, use bin_label as range_text
-                bin_item['range_text'] = bin_label
-            
-            # include range/min/max if present (for continuous)
-            if 'Min' in row and row.get('Min') is not None:
-                try:
-                    bin_item['min_value'] = float(row.get('Min'))
-                except Exception:
-                    pass
-            if 'Max' in row and row.get('Max') is not None:
-                try:
-                    bin_item['max_value'] = float(row.get('Max'))
-                except Exception:
-                    pass
+            # For continuous: only save min_value and max_value, set range_text to None
+            # For discrete: only save range_text, set min_value and max_value to None
+            if var_type == 'continuous':
+                # Continuous variables: use min/max only
+                if 'Min' in row and row.get('Min') is not None:
+                    try:
+                        bin_item['min_value'] = float(row.get('Min'))
+                    except Exception:
+                        bin_item['min_value'] = None
+                else:
+                    bin_item['min_value'] = None
+                    
+                if 'Max' in row and row.get('Max') is not None:
+                    try:
+                        bin_item['max_value'] = float(row.get('Max'))
+                    except Exception:
+                        bin_item['max_value'] = None
+                else:
+                    bin_item['max_value'] = None
+                    
+                # Explicitly set range_text to None for continuous
+                bin_item['range_text'] = None
+            else:
+                # Discrete variables: use range_text only
+                if 'Range' in row and row.get('Range'):
+                    bin_item['range_text'] = str(row.get('Range'))
+                else:
+                    # For discrete, if no Range, use bin_label as range_text
+                    bin_item['range_text'] = bin_label
+                    
+                # Explicitly set min_value and max_value to None for discrete
+                bin_item['min_value'] = None
+                bin_item['max_value'] = None
             if 'WOE' in row:
                 try:
                     bin_item['woe'] = float(row.get('WOE'))
@@ -3137,10 +3225,19 @@ def univariate_analysis():
                                         print(f"[univariate_analysis] DEBUG: Found {len(bins)} bins in DB for {col}")
                                         # Transform DB format to frontend format
                                         stats_dict = []
+                                        # Get feature type to determine correct prefix
+                                        feature_type = feature.get('type', 'discrete')  # Default to discrete for discrete columns
+                                        prefix = 'd' if feature_type == 'discrete' else 'c'
+                                        
                                         for bin_row in bins:
                                             native_row = _row_to_native_types(dict(bin_row))
+                                            # Use existing bin_label or create with correct prefix based on feature type
+                                            bin_label = native_row.get('bin_label')
+                                            if not bin_label:
+                                                bin_num = native_row.get('bin_number', '')
+                                                bin_label = f"{prefix}{bin_num}" if bin_num else f'{prefix}1'
                                             frontend_row = {
-                                                'Bin': native_row.get('bin_label', f"Bin_{native_row.get('bin_number', '')}"),
+                                                'Bin': bin_label,
                                                 'Range': native_row.get('range_text'),
                                                 'Good': native_row.get('good_count', 0),
                                                 'Bad': native_row.get('bad_count', 0),
@@ -3218,10 +3315,19 @@ def univariate_analysis():
                                         print(f"[univariate_analysis] DEBUG: Found {len(bins)} bins in DB for {col}")
                                         # Transform DB format to frontend format
                                         stats_dict = []
+                                        # Get feature type to determine correct prefix
+                                        feature_type = feature.get('type', 'continuous')  # Default to continuous for continuous columns
+                                        prefix = 'c' if feature_type == 'continuous' else 'd'
+                                        
                                         for bin_row in bins:
                                             native_row = _row_to_native_types(dict(bin_row))
+                                            # Use existing bin_label or create with correct prefix based on feature type
+                                            bin_label = native_row.get('bin_label')
+                                            if not bin_label:
+                                                bin_num = native_row.get('bin_number', '')
+                                                bin_label = f"{prefix}{bin_num}" if bin_num else f'{prefix}1'
                                             frontend_row = {
-                                                'Bin': native_row.get('bin_label', f"Bin_{native_row.get('bin_number', '')}"),
+                                                'Bin': bin_label,
                                                 'Min': native_row.get('min_value'),
                                                 'Max': native_row.get('max_value'),
                                                 'Good': native_row.get('good_count', 0),
@@ -3341,10 +3447,28 @@ def reset_bins_api():
         # Recreate coarse binning in the new schema
         save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
         
+        # Convert DataFrame to dict and replace NaN/Inf values with None for JSON serialization
+        stats_records = coarse_stats.to_dict(orient='records')
+        sanitized_stats = []
+        for record in stats_records:
+            sanitized_record = {}
+            for key, value in record.items():
+                # Handle NaN and Inf values
+                if isinstance(value, (float, np.floating)):
+                    if np.isnan(value) or np.isinf(value):
+                        sanitized_record[key] = None
+                    else:
+                        sanitized_record[key] = float(value)
+                elif pd.isna(value):
+                    sanitized_record[key] = None
+                else:
+                    sanitized_record[key] = value
+            sanitized_stats.append(sanitized_record)
+        
         # Return the coarse bins for frontend display
         return jsonify({
             "success": True,
-            "stats": coarse_stats.to_dict(orient='records')
+            "stats": sanitized_stats
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3967,20 +4091,41 @@ def calculate_woe_iv(df, variable, target, bin_merges=None, var_type=None):
 
         bin_label = str(row["final_bin"])
         range_info = bin_ranges.get(bin_label, (None, None) if var_type == "continuous" else [])
-        range_str = (f"{range_info[0]} - {range_info[1]}" if var_type == "continuous"
-                     else ', '.join(map(str, range_info)))
-
-        stats.append({
-            "Bin": bin_label,
-            "Good": int(g),
-            "Bad": int(b),
-            "Total": int(total_in_bin),
-            "Dist_Good_%": round(dist_good_pct, 4),
-            "Dist_Bad_%": round(dist_bad_pct, 4),
-            "WOE": float(woe_val),
-            "IV": round(float(iv_val), 4),
-            "Range": range_str,
-        })
+        
+        # For continuous: include Min and Max fields separately, plus Range string
+        # For discrete: include Range string only
+        if var_type == "continuous":
+            min_val = range_info[0] if isinstance(range_info, tuple) and len(range_info) >= 1 else None
+            max_val = range_info[1] if isinstance(range_info, tuple) and len(range_info) >= 2 else None
+            range_str = (f"{min_val} - {max_val}" if min_val is not None and max_val is not None
+                        else (f"{min_val} - " if min_val is not None else "") + 
+                             (f"{max_val}" if max_val is not None else ""))
+            stats.append({
+                "Bin": bin_label,
+                "Good": int(g),
+                "Bad": int(b),
+                "Total": int(total_in_bin),
+                "Dist_Good_%": round(dist_good_pct, 4),
+                "Dist_Bad_%": round(dist_bad_pct, 4),
+                "WOE": float(woe_val),
+                "IV": round(float(iv_val), 4),
+                "Range": range_str,
+                "Min": min_val,
+                "Max": max_val,
+            })
+        else:
+            range_str = ', '.join(map(str, range_info)) if range_info else ""
+            stats.append({
+                "Bin": bin_label,
+                "Good": int(g),
+                "Bad": int(b),
+                "Total": int(total_in_bin),
+                "Dist_Good_%": round(dist_good_pct, 4),
+                "Dist_Bad_%": round(dist_bad_pct, 4),
+                "WOE": float(woe_val),
+                "IV": round(float(iv_val), 4),
+                "Range": range_str,
+            })
 
     app.logger.debug(f"Total IV for {variable}: {round(float(iv_total), 4)}")
     return round(float(iv_total), 4), stats
@@ -4203,6 +4348,38 @@ def woe_iv_api():
                                 inferred_type = 'discrete'
                         fid = create_feature(dataset_id, var_name, inferred_type, False)
                         feature = get_feature(fid)
+                    
+                    # Get var_type for this variable to determine how to save range data
+                    var_type_for_save = feature.get('type', 'continuous')
+                    
+                    # For continuous variables, if Min/Max are missing, compute them from the actual data
+                    if var_type_for_save == 'continuous' and var_name in df.columns:
+                        # Try both binned and fine_binned columns
+                        binned_cols = [f'{var_name}_binned', f'{var_name}_fine_binned']
+                        bin_label_to_range = {}
+                        
+                        for binned_col in binned_cols:
+                            if binned_col in df.columns:
+                                # Build a lookup map from bin_label to (min, max) computed from actual data
+                                for bin_label in df[binned_col].dropna().unique():
+                                    if str(bin_label) not in bin_label_to_range:  # Don't overwrite if already found
+                                        mask = df[binned_col] == bin_label
+                                        if mask.any():
+                                            values = df.loc[mask, var_name].dropna()
+                                            if not values.empty:
+                                                min_val = float(values.min())
+                                                max_val = float(values.max())
+                                                bin_label_to_range[str(bin_label)] = (min_val, max_val)
+                        
+                        # Update stats with missing Min/Max values
+                        for stat in stats:
+                            if isinstance(stat, dict):
+                                bin_label = str(stat.get('Bin', ''))
+                                if bin_label in bin_label_to_range:
+                                    if stat.get('Min') is None or stat.get('Min') == '':
+                                        stat['Min'] = bin_label_to_range[bin_label][0]
+                                    if stat.get('Max') is None or stat.get('Max') == '':
+                                        stat['Max'] = bin_label_to_range[bin_label][1]
 
                     # Determine if we should use fine or coarse step
                     step_type = 'fine' if merges_per_var.get(var_name) else 'coarse'
@@ -4224,6 +4401,9 @@ def woe_iv_api():
                         iv_value=float(iv_value) if iv_value is not None else None
                     )
 
+                    # Get var_type for this variable to determine how to save range data
+                    var_type_for_save = feature.get('type', 'continuous')
+                    
                     # Prepare bins data for insertion
                     # Build bins_data and compute per-bin metrics
                     bins_data = []
@@ -4250,18 +4430,55 @@ def woe_iv_api():
                             dist_bad = float(s.get('Dist_Bad_%', s.get('dist_bad', 0))) if total_bad > 0 else ( (bad / total_bad) * 100 if total_bad > 0 else None )
                             woe = float(s.get('WOE', s.get('woe', 0)))
                             iv_bin = float(s.get('IV', s.get('iv', 0)))
-                            range_text = s.get('Range') if s.get('Range') is not None else s.get('range', None)
-                            min_value = None
-                            max_value = None
-                            # Attempt to parse continuous range like 'min - max'
-                            if isinstance(range_text, str) and '-' in range_text and any(ch.isdigit() for ch in range_text):
-                                parts = [p.strip() for p in range_text.split('-', 1)]
-                                try:
-                                    min_value = float(parts[0])
-                                    max_value = float(parts[1])
-                                except Exception:
-                                    min_value = None
-                                    max_value = None
+                            
+                            # For continuous: only save min_value and max_value, set range_text to None
+                            # For discrete: only save range_text, set min_value and max_value to None
+                            if var_type_for_save == 'continuous':
+                                # Continuous variables: extract min/max from Min/Max fields or parse from Range
+                                min_value = None
+                                max_value = None
+                                
+                                # Try to get from Min/Max fields first (preferred method)
+                                if 'Min' in s and s.get('Min') is not None:
+                                    try:
+                                        min_value = float(s.get('Min'))
+                                    except (ValueError, TypeError):
+                                        min_value = None
+                                if 'Max' in s and s.get('Max') is not None:
+                                    try:
+                                        max_value = float(s.get('Max'))
+                                    except (ValueError, TypeError):
+                                        max_value = None
+                                
+                                # If not found, try to parse from Range field (format: "min - max" or "min - " or "max")
+                                if (min_value is None or max_value is None) and 'Range' in s:
+                                    range_text_raw = s.get('Range')
+                                    if isinstance(range_text_raw, str) and range_text_raw.strip():
+                                        # Try to parse "min - max" format
+                                        if '-' in range_text_raw:
+                                            parts = [p.strip() for p in range_text_raw.split('-', 1)]
+                                            try:
+                                                if min_value is None and parts[0]:
+                                                    min_value = float(parts[0])
+                                            except (ValueError, TypeError):
+                                                pass
+                                            try:
+                                                if max_value is None and len(parts) > 1 and parts[1]:
+                                                    max_value = float(parts[1])
+                                            except (ValueError, TypeError):
+                                                pass
+                                
+                                # Explicitly set range_text to None for continuous
+                                range_text = None
+                            else:
+                                # Discrete variables: use range_text only
+                                range_text = s.get('Range') if s.get('Range') is not None else s.get('range', None)
+                                if not range_text:
+                                    range_text = bin_label  # Fallback to bin_label
+                                
+                                # Explicitly set min_value and max_value to None for discrete
+                                min_value = None
+                                max_value = None
 
                             freq_percent = (total / total_all) * 100 if total_all > 0 else None
                             odds = (good / bad) if bad > 0 else None
@@ -6104,6 +6321,10 @@ def save_finebin_details():
             cur.close()
             conn.close()
         
+        # Get feature type to determine correct prefix (c for continuous, d for discrete)
+        feature_type = feature.get('type', 'continuous')  # Default to continuous if not set
+        prefix = 'c' if feature_type == 'continuous' else 'd'
+        
         # Create merged bin records
         # bin_merges can be in two formats:
         # 1. Numeric indices: {"1": [0, 1, 2], "2": [3, 4]}
@@ -6126,7 +6347,14 @@ def save_finebin_details():
                         idx_int = int(idx)
                         if 0 <= idx_int < len(coarse_bins):
                             original_bin_ids.append(coarse_bins[idx_int]['id'])
-                            original_bin_labels.append(coarse_bins[idx_int].get('bin_label', f'Bin_{idx_int}'))
+                            # Use existing bin_label or create with correct prefix based on feature type
+                            existing_label = coarse_bins[idx_int].get('bin_label')
+                            if existing_label:
+                                original_bin_labels.append(existing_label)
+                            else:
+                                # Use feature type to determine prefix
+                                bin_num = coarse_bins[idx_int].get('bin_number', idx_int + 1)
+                                original_bin_labels.append(f'{prefix}{bin_num}')
                     except (ValueError, TypeError):
                         continue
             else:
@@ -6201,8 +6429,21 @@ def get_finebin_details(record_id, column_name):
             return jsonify([])
         
         coarse_bins = get_bins_by_step(coarse_step['id'])
+        # Get feature type to determine correct prefix (c for continuous, d for discrete)
+        feature_type = feature.get('type', 'continuous')  # Default to continuous if not set
+        prefix = 'c' if feature_type == 'continuous' else 'd'
+        
         # Create mappings: bin_id -> bin_label
-        bin_id_to_label = {bin_data['id']: bin_data.get('bin_label', f"Bin_{bin_data.get('bin_number', 0)}") for bin_data in coarse_bins}
+        # Create mapping with correct prefix based on feature type
+        bin_id_to_label = {}
+        for bin_data in coarse_bins:
+            existing_label = bin_data.get('bin_label')
+            if existing_label:
+                bin_id_to_label[bin_data['id']] = existing_label
+            else:
+                # Use feature type to determine prefix
+                bin_num = bin_data.get('bin_number', 0)
+                bin_id_to_label[bin_data['id']] = f'{prefix}{bin_num}'
         
         # Get merged bins for this step
         merged_bins = get_merged_bins_by_step(fine_step['id'])
@@ -6219,7 +6460,15 @@ def get_finebin_details(record_id, column_name):
             if original_labels and len(original_labels) == len(original_ids):
                 bin_labels = original_labels
             else:
-                bin_labels = [bin_id_to_label.get(bid, f"Bin_{bid}") for bid in original_ids]
+                # Use mapped labels, with fallback using feature type
+                bin_labels = []
+                for bid in original_ids:
+                    label = bin_id_to_label.get(bid)
+                    if label:
+                        bin_labels.append(label)
+                    else:
+                        # Use feature type to determine prefix (already set above)
+                        bin_labels.append(f'{prefix}{bid}')
             
             details.append({
                 'group_id': group_id,
@@ -6282,6 +6531,10 @@ def get_finebin_cache(record_id: int, column_name: str):
             except (TypeError, ValueError):
                 return None
 
+        # Get feature type to determine correct prefix (c for continuous, d for discrete)
+        feature_type = feature.get('type', 'continuous')  # Default to continuous if not set
+        prefix = 'c' if feature_type == 'continuous' else 'd'
+        
         stats = []
         for row in bins:
             # Use _row_to_native_types to handle Decimal/NumPy types and NaN/inf
@@ -6289,7 +6542,11 @@ def get_finebin_cache(record_id: int, column_name: str):
             label = native_row.get('bin_label')
             if not label:
                 bin_number = native_row.get('bin_number')
-                label = f"Bin_{bin_number}" if bin_number is not None else str(native_row.get('id', ''))
+                if bin_number is not None:
+                    # Use feature type to determine prefix
+                    label = f"{prefix}{bin_number}"
+                else:
+                    label = str(native_row.get('id', ''))
             stats.append({
                 'Bin': label,
                 'Range': native_row.get('range_text'),
@@ -6310,7 +6567,11 @@ def get_finebin_cache(record_id: int, column_name: str):
             labels = merged.get('original_bin_labels')
             if not labels:
                 ids = merged.get('original_bin_ids') or []
-                labels = [f"Bin_{bid}" for bid in ids]
+                # Use feature type to determine prefix (already set above)
+                # Note: original_bin_ids are bin IDs, not bin numbers, so we need to look them up
+                # For now, preserve the original_bin_labels if available, otherwise use IDs as-is
+                # The labels should already be in the database with correct c/d prefix
+                labels = labels or [str(bid) for bid in ids]  # Fallback to IDs if no labels
             merges_map[key] = labels
 
         response_payload = {

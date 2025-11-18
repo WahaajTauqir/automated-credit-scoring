@@ -1375,53 +1375,73 @@ const SelectedColumnsPage = () => {
   const resetFineBinning = async (col: string) => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
 
-    // Reset UI state
-    const clearedFine = { ...fineBinResults, [col]: [] };
-    const clearedHistory = { ...binMergeHistory, [col]: {} };
-    setFineBinResults(clearedFine);
-    setBinMergeHistory(clearedHistory);
-    setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
-
-    // Re-run coarse
-    const res = await fetch('http://localhost:5000/api/univariate-analysis', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        discrete: varType === 'discrete' ? [col] : [],
-        continuous: varType === 'continuous' ? [col] : [],
-        target: targetVariable,
-      }),
-    });
-    const data = await res.json();
-    const columnResult = data[col] || data;
-    const newStats = normalizeBinArray(columnResult?.stats || columnResult || []);
-    const updatedUnivariate = { ...univariateResults, [col]: { ...columnResult, stats: newStats } };
-    const updatedCoarse = { ...coarseBinResults, [col]: newStats };
-    const updatedFine = { ...clearedFine, [col]: newStats };
-    setUnivariateResults(updatedUnivariate);
-    setCoarseBinResults(updatedCoarse);
-    setFineBinResults(updatedFine);
-
-    // Recompute metrics for reset bins
     try {
-      await calculateAllBinMetrics(col, newStats);
-    } catch (e) {
+      // Call backend API to reset binning and delete all binning data including merged_bins
+      const resetRes = await fetch('http://localhost:5000/api/reset-bins', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          variable: col,
+          target: targetVariable,
+          type: varType,
+          record_id: recordId,
+        }),
+      });
 
+      if (!resetRes.ok) {
+        const errorData = await resetRes.json().catch(() => ({ error: 'Failed to reset binning' }));
+        throw new Error(errorData.error || 'Failed to reset binning');
+      }
+
+      const resetData = await resetRes.json();
+      
+      // Reset UI state
+      const clearedFine = { ...fineBinResults, [col]: [] };
+      const clearedHistory = { ...binMergeHistory, [col]: {} };
+      setFineBinResults(clearedFine);
+      setBinMergeHistory(clearedHistory);
+      setSelectedFineBins(prev => ({ ...prev, [col]: [] }));
+
+      // Get the coarse bins from the reset response
+      const newStats = normalizeBinArray(resetData?.stats || []);
+      const updatedUnivariate = { ...univariateResults, [col]: { stats: newStats } };
+      const updatedCoarse = { ...coarseBinResults, [col]: newStats };
+      const updatedFine = { ...clearedFine, [col]: newStats };
+      setUnivariateResults(updatedUnivariate);
+      setCoarseBinResults(updatedCoarse);
+      setFineBinResults(updatedFine);
+
+      // Recompute metrics for reset bins
+      try {
+        await calculateAllBinMetrics(col, newStats);
+      } catch (e) {
+        console.error('Error calculating bin metrics:', e);
+      }
+
+      // Fetch fresh WOE/IV data
+      const latestWoe = await fetchWoeIv(col, {}, false);
+      if (latestWoe) {
+        setWoeReadyColumns(prev => new Set(prev).add(col));
+      }
+
+      // Update WOE/IV results
+      setWoeIvResults((prev) => {
+        const updated = { ...prev };
+        if (latestWoe && latestWoe[col]) {
+          updated[col] = latestWoe[col];
+        } else {
+          delete updated[col];
+        }
+        return updated;
+      });
+
+      showNotification(`Binning reset for ${col}`);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to reset binning';
+      console.error('Error resetting binning:', err);
+      showNotification(`Error resetting binning: ${errorMessage}`);
+      alert(`Error resetting binning: ${errorMessage}`);
     }
-
-    const latestWoe = await fetchWoeIv(col, {}, false);
-    if (latestWoe) {
-      setWoeReadyColumns(prev => new Set(prev).add(col));
-    }
-
-    await persistFineBinColumn(col, {}, {
-      univariateResults: updatedUnivariate,
-      fineBinResults: updatedFine,
-      crosstabResults: updatedCoarse,
-      woeIvResults: latestWoe ?? woeIvResultsRef.current,
-    });
-
-    showNotification(`Binning reset for ${col}`);
   };
 
   const runAutoMonotonicBinning = async (

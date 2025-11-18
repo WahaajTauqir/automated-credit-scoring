@@ -722,8 +722,7 @@ def create_binning_step(feature_id: int, step_type: str, method: str = None,
             num_bins = EXCLUDED.num_bins,
             is_monotonic = EXCLUDED.is_monotonic,
             monotonic_direction = EXCLUDED.monotonic_direction,
-            iv_value = EXCLUDED.iv_value,
-            created_at = NOW()
+            iv_value = EXCLUDED.iv_value
         RETURNING id;
     """, (feature_id, step_type, method, num_bins, is_monotonic, monotonic_direction, iv_value))
     
@@ -1043,8 +1042,7 @@ def create_binning_totals(binning_step_id: int, total_good: int, total_bad: int,
             good_bad_ratio = EXCLUDED.good_bad_ratio,
             bad_rate = EXCLUDED.bad_rate,
             freq_percent = EXCLUDED.freq_percent,
-            iv = EXCLUDED.iv,
-            created_at = NOW()
+            iv = EXCLUDED.iv
         RETURNING id;
     """, (binning_step_id, total_good, total_bad, total_count,
           good_bad_ratio, bad_rate, freq_percent, iv))
@@ -1265,11 +1263,27 @@ def get_dataset_with_all_results(dataset_id: int) -> Optional[Dict]:
 def delete_all_binning_for_feature(feature_id: int) -> bool:
     """
     Delete all binning results (coarse and fine) for a feature.
+    This includes binning_steps, bins, merged_bins, and binning_totals.
     Useful for resetting a feature's binning.
     """
     conn = get_db_connection()
     cur = conn.cursor()
     
+    # Get all fine_step_ids for this feature before deleting binning_steps
+    # This ensures we can explicitly delete merged_bins (though CASCADE should handle it)
+    cur.execute("""
+        SELECT id FROM binning_steps 
+        WHERE feature_id = %s AND step_type = 'fine'
+    """, (feature_id,))
+    fine_step_ids = [row[0] for row in cur.fetchall()]
+    
+    # Explicitly delete merged_bins for all fine steps (for clarity, though CASCADE should handle it)
+    if fine_step_ids:
+        # Delete merged_bins one by one or use a subquery for safety
+        for fine_step_id in fine_step_ids:
+            cur.execute("DELETE FROM merged_bins WHERE fine_step_id = %s", (fine_step_id,))
+    
+    # Delete all binning steps (this will CASCADE delete bins and binning_totals)
     cur.execute("DELETE FROM binning_steps WHERE feature_id = %s", (feature_id,))
     
     conn.commit()

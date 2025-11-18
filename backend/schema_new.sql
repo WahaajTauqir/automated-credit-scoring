@@ -48,7 +48,6 @@ CREATE TABLE features (
     selected BOOLEAN DEFAULT FALSE,
     model_ready BOOLEAN DEFAULT FALSE,
     final_selected BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(dataset_id, name)
 );
 
@@ -77,7 +76,6 @@ CREATE TABLE binning_steps (
     is_monotonic BOOLEAN DEFAULT FALSE,
     monotonic_direction VARCHAR(20),
     iv_value NUMERIC(10, 6),
-    created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(feature_id, step_type)
 );
 
@@ -119,7 +117,6 @@ CREATE TABLE bins (
     dist_bad NUMERIC(10, 4),
     woe NUMERIC(10, 4),
     iv NUMERIC(10, 6),
-    created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(binning_step_id, bin_number)
 );
 
@@ -154,8 +151,7 @@ CREATE TABLE merged_bins (
     fine_step_id INT NOT NULL REFERENCES binning_steps(id) ON DELETE CASCADE,
     merged_bin_number INT NOT NULL,
     original_bin_ids INT[] NOT NULL,
-    original_bin_labels TEXT[] NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
+    original_bin_labels TEXT[] NOT NULL
 );
 
 COMMENT ON TABLE merged_bins IS 'Tracks which coarse bins were merged during fine binning';
@@ -181,7 +177,6 @@ CREATE TABLE binning_totals (
     bad_rate NUMERIC(10, 4),
     freq_percent NUMERIC(10, 4) DEFAULT 100.0,
     iv NUMERIC(10, 6),
-    created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(binning_step_id)
 );
 

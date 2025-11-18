@@ -37,25 +37,25 @@ def get_required_columns():
         ],
         'features': [
             'id', 'dataset_id', 'name', 'type', 'selected', 'model_ready',
-            'final_selected', 'created_at'
+            'final_selected'
         ],
         'binning_steps': [
             'id', 'feature_id', 'step_type', 'method', 'num_bins',
-            'is_monotonic', 'monotonic_direction', 'iv_value', 'created_at'
+            'is_monotonic', 'monotonic_direction', 'iv_value'
         ],
         'bins': [
             'id', 'binning_step_id', 'bin_number', 'bin_label', 'min_value',
             'max_value', 'range_text', 'good_count', 'bad_count', 'total_count',
             'good_bad_ratio', 'bad_rate', 'freq_percent', 'odds', 'index_value',
-            'odds_index', 'dist_good', 'dist_bad', 'woe', 'iv', 'created_at'
+            'odds_index', 'dist_good', 'dist_bad', 'woe', 'iv'
         ],
         'merged_bins': [
             'id', 'fine_step_id', 'merged_bin_number', 'original_bin_ids',
-            'original_bin_labels', 'created_at'
+            'original_bin_labels'
         ],
         'binning_totals': [
             'id', 'binning_step_id', 'total_good', 'total_bad', 'total_count',
-            'good_bad_ratio', 'bad_rate', 'freq_percent', 'iv', 'created_at'
+            'good_bad_ratio', 'bad_rate', 'freq_percent', 'iv'
         ]
     }
 
@@ -115,6 +115,65 @@ def validate_schema():
         if conn:
             conn.close()
 
+def remove_unwanted_columns():
+    """Remove created_at columns from tables that shouldn't have them."""
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Tables that should NOT have created_at (except datasets)
+        tables_to_check = [
+            'features',
+            'binning_steps',
+            'bins',
+            'merged_bins',
+            'binning_totals'
+        ]
+        
+        columns_removed = []
+        columns_skipped = []
+        
+        for table_name in tables_to_check:
+            # Check if table exists
+            if not check_table_exists(cur, table_name):
+                continue
+            
+            # Check if created_at column exists
+            if check_column_exists(cur, table_name, 'created_at'):
+                try:
+                    print(f"Removing created_at column from {table_name}...")
+                    cur.execute(f"ALTER TABLE {table_name} DROP COLUMN IF EXISTS created_at")
+                    conn.commit()
+                    columns_removed.append(table_name)
+                    print(f"✅ Removed created_at from {table_name}")
+                except Exception as e:
+                    conn.rollback()
+                    print(f"⚠️  Could not remove created_at from {table_name}: {e}")
+            else:
+                columns_skipped.append(table_name)
+        
+        if columns_removed:
+            print(f"\n✅ Removed created_at from {len(columns_removed)} table(s): {', '.join(columns_removed)}")
+        if columns_skipped:
+            print(f"ℹ️  Verified {len(columns_skipped)} table(s) don't have created_at: {', '.join(columns_skipped)}")
+        
+        return True
+        
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"❌ Error removing unwanted columns: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
 def apply_migrations():
     """Apply any missing migrations - add missing columns to existing tables."""
     conn = None
@@ -122,6 +181,11 @@ def apply_migrations():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # First, remove unwanted created_at columns
+        print("Checking for unwanted created_at columns...")
+        remove_unwanted_columns()
+        print()
         
         required_columns = get_required_columns()
         columns_added = []
@@ -149,7 +213,6 @@ def apply_migrations():
             'features.selected': 'BOOLEAN DEFAULT FALSE',
             'features.model_ready': 'BOOLEAN DEFAULT FALSE',
             'features.final_selected': 'BOOLEAN DEFAULT FALSE',
-            'features.created_at': 'TIMESTAMP DEFAULT NOW()',
             
             # binning_steps table
             'binning_steps.id': 'SERIAL PRIMARY KEY',
@@ -160,7 +223,6 @@ def apply_migrations():
             'binning_steps.is_monotonic': 'BOOLEAN DEFAULT FALSE',
             'binning_steps.monotonic_direction': 'VARCHAR(20)',
             'binning_steps.iv_value': 'NUMERIC(10, 6)',
-            'binning_steps.created_at': 'TIMESTAMP DEFAULT NOW()',
             
             # bins table
             'bins.id': 'SERIAL PRIMARY KEY',
@@ -183,7 +245,6 @@ def apply_migrations():
             'bins.dist_bad': 'NUMERIC(10, 4)',
             'bins.woe': 'NUMERIC(10, 4)',
             'bins.iv': 'NUMERIC(10, 6)',
-            'bins.created_at': 'TIMESTAMP DEFAULT NOW()',
             
             # merged_bins table
             'merged_bins.id': 'SERIAL PRIMARY KEY',
@@ -191,7 +252,6 @@ def apply_migrations():
             'merged_bins.merged_bin_number': 'INT NOT NULL',
             'merged_bins.original_bin_ids': 'INT[] NOT NULL',
             'merged_bins.original_bin_labels': 'TEXT[] NOT NULL',
-            'merged_bins.created_at': 'TIMESTAMP DEFAULT NOW()',
             
             # binning_totals table
             'binning_totals.id': 'SERIAL PRIMARY KEY',
@@ -203,7 +263,6 @@ def apply_migrations():
             'binning_totals.bad_rate': 'NUMERIC(10, 4)',
             'binning_totals.freq_percent': 'NUMERIC(10, 4) DEFAULT 100.0',
             'binning_totals.iv': 'NUMERIC(10, 6)',
-            'binning_totals.created_at': 'TIMESTAMP DEFAULT NOW()',
         }
         
         for table_name, columns in required_columns.items():
@@ -313,6 +372,12 @@ def recreate_schema(backup=False):
         conn.commit()
         
         print("✅ Schema recreated successfully")
+        
+        # After recreating schema, ensure created_at is removed from tables that shouldn't have it
+        # (This is a safety check in case the schema file is run on an existing database)
+        print("Verifying created_at columns are removed from non-dataset tables...")
+        remove_unwanted_columns()
+        
         return True
         
     except Exception as e:
@@ -357,6 +422,11 @@ def main():
             return 1
     
     # Default: validate schema
+    # First, always check and remove unwanted created_at columns
+    print("Checking for unwanted created_at columns...")
+    remove_unwanted_columns()
+    print()
+    
     is_valid, missing_columns = validate_schema()
     if is_valid:
         return 0
