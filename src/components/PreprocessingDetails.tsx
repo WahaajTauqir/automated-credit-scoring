@@ -40,8 +40,8 @@ interface DatasetStats {
 
 interface PreprocessingDetailsProps {
     datasetId?: number;
-    onPreprocessingComplete?: () => void;
-    onPreprocessSelectionSaved?: () => void;
+    onPreprocessingComplete?: (newDatasetId?: number) => void;
+    onPreprocessSelectionSaved?: () => void; // Keep for backward compatibility but will be called automatically
 }
 
 const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, onPreprocessSelectionSaved }) => {
@@ -64,12 +64,18 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
             });
 
             let preprocessSelectionSavedLocal = false;
+            let targetVariable = '';
             if (recordResponse.ok) {
                 const recordData = await recordResponse.json();
                 preprocessSelectionSavedLocal = recordData.preprocess_selection === true;
-                setPreprocessSelectionSaved(preprocessSelectionSavedLocal);
-                if (preprocessSelectionSavedLocal && onPreprocessSelectionSaved) {
-                    onPreprocessSelectionSaved();
+                targetVariable = recordData.target_variable || '';
+                
+                // Set state if already saved
+                if (preprocessSelectionSavedLocal) {
+                    setPreprocessSelectionSaved(true);
+                    if (onPreprocessSelectionSaved) {
+                        onPreprocessSelectionSaved();
+                    }
                 }
             }
 
@@ -133,9 +139,13 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
 
                 if (changesData.success) {
                     
-                    // Create a map of feature names to their selected status from database
+                    // Create a map of feature names to their data from database (selected status and type)
                     const featuresMap = new Map(
-                        featuresFromDb.map((f: any) => [f.name, { selected: f.selected, exists: true }])
+                        featuresFromDb.map((f: any) => [f.name, { 
+                            selected: f.selected, 
+                            type: f.type, // 'discrete' or 'continuous' from database
+                            exists: true 
+                        }])
                     );
 
                     // Include ALL columns (including removed ones) so they can be unchecked
@@ -186,6 +196,24 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                                     col.processed_dtype === 'float32');
                             
                             const dbFeature = featuresMap.get(col.column);
+                            
+                            // Determine feature type: use database type if available, otherwise infer from processed_dtype
+                            let featureType: 'discrete' | 'continuous';
+                            if (dbFeature?.type) {
+                                // Use type from database (from AI classification or manual setting)
+                                featureType = dbFeature.type as 'discrete' | 'continuous';
+                            } else {
+                                // Fallback: infer from processed_dtype
+                                if (col.processed_dtype === 'categorical') {
+                                    featureType = 'discrete';
+                                } else if (col.processed_dtype === 'REMOVED') {
+                                    // Default to continuous for removed columns (though they shouldn't be used)
+                                    featureType = 'continuous';
+                                } else {
+                                    // For numeric types, default to continuous
+                                    featureType = 'continuous';
+                                }
+                            }
                             
                             // Determine selection based on preprocess_selection flag
                             let shouldBeSelected: boolean;
@@ -284,7 +312,7 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                             
                             return {
                                 name: col.column,
-                                type: col.processed_dtype === 'categorical' ? 'discrete' : (col.processed_dtype === 'REMOVED' ? 'continuous' : 'continuous'),
+                                type: featureType, // Use type from database or inferred from processed_dtype
                                 selected: shouldBeSelected,
                                 original_dtype: col.original_dtype,
                                 processed_dtype: col.processed_dtype,
@@ -301,8 +329,50 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                 isRemoved: isRemoved
                             };
                         });
-                    // Include ALL features (including removed ones) so they can be displayed in dropped section
-                    setFeatures(featuresList);
+                    // Filter out target variable - it should not be visible in preprocessing
+                    // Also ensure target variable is always set to selected=false in database
+                    const filteredFeaturesList = featuresList.filter(f => f.name !== targetVariable);
+                    
+                    // Ensure target variable is always set to selected=false in database
+                    if (targetVariable) {
+                        // Check if target variable exists in the features list (before filtering)
+                        const targetFeature = featuresList.find(f => f.name === targetVariable);
+                        if (targetFeature) {
+                            // Always set target variable to selected=false
+                            fetch('http://localhost:5000/api/update-feature-selection', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    dataset_id: datasetId,
+                                    feature_name: targetVariable,
+                                    selected: false
+                                })
+                            }).catch(err => console.error('Error setting target variable to unselected:', err));
+                        }
+                    }
+                    
+                    // Include ALL features (including removed ones) except target variable
+                    setFeatures(filteredFeaturesList);
+                    
+                    // After all calculations are complete, automatically set preprocess_selection to true if it's false
+                    if (!preprocessSelectionSavedLocal) {
+                        try {
+                            const saveResponse = await fetch('http://localhost:5000/api/save-preprocess-selection', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ record_id: datasetId })
+                            });
+                            
+                            if (saveResponse.ok) {
+                                setPreprocessSelectionSaved(true);
+                                if (onPreprocessSelectionSaved) {
+                                    onPreprocessSelectionSaved();
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Error auto-saving preprocess_selection:', error);
+                        }
+                    }
                 }
             }
         } catch (error) {
@@ -586,38 +656,6 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                         <span className="stat-label">Quality Passed</span>
                         <span className="stat-value success">{qualityPassCount}</span>
                     </div>
-                    
-                    <button
-                        className="save-preprocess-btn"
-                        onClick={async () => {
-                            if (!datasetId) return;
-                            
-                            try {
-                                const response = await fetch('http://localhost:5000/api/save-preprocess-selection', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ record_id: datasetId })
-                                });
-                                
-                                if (response.ok) {
-                                    const data = await response.json();
-                                    setPreprocessSelectionSaved(true);
-                                    if (onPreprocessSelectionSaved) {
-                                        onPreprocessSelectionSaved();
-                                    }
-                                    alert('Preprocessing selection saved successfully!');
-                                } else {
-                                    const error = await response.json();
-                                    alert(`Failed to save: ${error.error || 'Unknown error'}`);
-                                }
-                            } catch (error) {
-                                console.error('Error saving preprocessing selection:', error);
-                                alert('Failed to save preprocessing selection');
-                            }
-                        }}
-                    >
-                        Save
-                    </button>
                 </div>
 
                 <div className="features-panel">

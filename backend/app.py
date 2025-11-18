@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
 from decimal import Decimal
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 # Import ONLY new database layer functions - NO MORE db_old imports!
 from db import (
@@ -41,7 +41,7 @@ from db import (
     create_binning_step, get_binning_step, get_binning_steps_by_feature, 
     get_binning_step_by_type, delete_binning_step, update_binning_step,
     # Bin operations
-    create_bin, create_bins_batch, get_bins_by_step, get_bin,
+    create_bin, create_bins_batch, get_bins_by_step, get_bin, delete_bins_by_step,
     # Merged bins operations
     create_merged_bin, get_merged_bins_by_step,
     # Binning totals operations
@@ -136,6 +136,74 @@ def load_model_artifact(dataset_id: int) -> Tuple[Optional[Dict[str, Any]], Opti
         except Exception as err:
             print(f"[MODEL ARTIFACT] Failed to load artifact {path}: {err}")
     return None, None
+def calculate_derived_bin_metrics(bins: List[Dict], totals: Optional[Dict] = None) -> List[Dict]:
+    """
+    Calculate derived metrics for bins (bad_rate, freq_percent, dist_good, dist_bad, etc.)
+    These are calculated on-the-fly from good_count, bad_count, total_count.
+    
+    Args:
+        bins: List of bin dictionaries from database
+        totals: Optional binning_totals dictionary for overall calculations
+    
+    Returns:
+        List of bin dictionaries with derived metrics added
+    """
+    if not bins:
+        return []
+    
+    # Calculate totals if not provided
+    if totals:
+        total_good = totals.get('total_good', 0)
+        total_bad = totals.get('total_bad', 0)
+        total_all = totals.get('total_count', 0)
+    else:
+        # Calculate from bins
+        total_good = sum(b.get('good_count', 0) for b in bins)
+        total_bad = sum(b.get('bad_count', 0) for b in bins)
+        total_all = sum(b.get('total_count', 0) for b in bins)
+    
+    overall_odds = (total_good / total_bad) if total_bad > 0 else None
+    
+    enriched_bins = []
+    for bin_data in bins:
+        good = bin_data.get('good_count', 0)
+        bad = bin_data.get('bad_count', 0)
+        total = bin_data.get('total_count', 0)
+        
+        # Calculate derived metrics
+        dist_good = (good / total_good) * 100 if total_good > 0 else None
+        dist_bad = (bad / total_bad) * 100 if total_bad > 0 else None
+        bad_rate = (bad / total) * 100 if total > 0 else None
+        freq_percent = (total / total_all) * 100 if total_all > 0 else None
+        odds = (good / bad) if bad > 0 else None
+        good_bad_ratio = odds
+        
+        # Index metrics
+        try:
+            index_value = (dist_good / dist_bad) * 100 if (dist_bad and dist_bad > 0) else None
+        except Exception:
+            index_value = None
+        
+        try:
+            odds_index = (odds / overall_odds) * 100 if (odds is not None and overall_odds and overall_odds > 0) else None
+        except Exception:
+            odds_index = None
+        
+        # Create enriched bin with derived metrics
+        enriched_bin = dict(bin_data)
+        enriched_bin['dist_good'] = dist_good
+        enriched_bin['dist_bad'] = dist_bad
+        enriched_bin['bad_rate'] = bad_rate
+        enriched_bin['freq_percent'] = freq_percent
+        enriched_bin['odds'] = odds
+        enriched_bin['good_bad_ratio'] = good_bad_ratio
+        enriched_bin['index_value'] = index_value
+        enriched_bin['odds_index'] = odds_index
+        
+        enriched_bins.append(enriched_bin)
+    
+    return enriched_bins
+
 def save_coarse_binning_to_db(feature_id, bins_df, var_type):
     """
     Save coarse binning results to the new normalized schema.
@@ -216,27 +284,9 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
             bin_data['min_value'] = None
             bin_data['max_value'] = None
 
-        # Calculate distributions and rates
+        # Calculate distributions for WOE calculation only (not stored in DB)
         dist_good = (good / total_good) * 100 if total_good > 0 else None
         dist_bad = (bad / total_bad) * 100 if total_bad > 0 else None
-        bin_data['dist_good'] = dist_good
-        bin_data['dist_bad'] = dist_bad
-        bin_data['bad_rate'] = (bad / total) * 100 if total > 0 else None
-        bin_data['freq_percent'] = (total / total_all) * 100 if total_all > 0 else None
-
-        # Odds and ratio (guard divide-by-zero)
-        bin_data['odds'] = (good / bad) if bad > 0 else None
-        bin_data['good_bad_ratio'] = bin_data['odds']
-
-        # Index metrics: index_value = dist_good / dist_bad, odds_index = odds / overall_odds
-        try:
-            bin_data['index_value'] = (dist_good / dist_bad) * 100 if (dist_bad and dist_bad > 0) else None
-        except Exception:
-            bin_data['index_value'] = None
-        try:
-            bin_data['odds_index'] = (bin_data['odds'] / overall_odds) * 100 if (bin_data['odds'] is not None and overall_odds and overall_odds > 0) else None
-        except Exception:
-            bin_data['odds_index'] = None
 
         # Calculate WOE for monotonicity detection
         if dist_good and dist_good > 0 and dist_bad and dist_bad > 0:
@@ -256,7 +306,8 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
     monotonic_dir = detect_monotonic_direction(woe_values)
     is_monotonic = monotonic_dir is not None
 
-    # Create binning step with monotonic_direction
+    # Create or update binning step with monotonic_direction
+    # Note: create_binning_step uses ON CONFLICT DO UPDATE, so it may update an existing step
     step_id = create_binning_step(
         feature_id=feature_id,
         step_type='coarse',
@@ -265,6 +316,12 @@ def save_coarse_binning_to_db(feature_id, bins_df, var_type):
         is_monotonic=is_monotonic,
         monotonic_direction=monotonic_dir
     )
+
+    # CRITICAL FIX: Delete existing bins for this step before creating new ones
+    # This prevents orphaned binning_steps (steps without bins) when ON CONFLICT updates an existing step
+    # If bins were previously deleted or creation failed, this ensures we start fresh
+    delete_bins_by_step(step_id)
+    print(f"[save_coarse_binning_to_db] Deleted existing bins for step_id={step_id} before creating new ones")
 
     # Persist bins and totals
     if bins_data:
@@ -2693,6 +2750,11 @@ def fine_bin_api():
         fine_step_id = create_binning_step(feature_id=feature['id'], step_type='fine', method='merged' if adjusted_merges else 'manual', num_bins=num_bins, iv_value=iv)
         print(f"[fine_bin_api] DEBUG: Created fine_step_id={fine_step_id}")
 
+        # CRITICAL FIX: Delete existing bins for this step before creating new ones
+        # This prevents orphaned binning_steps (steps without bins) when ON CONFLICT updates an existing step
+        delete_bins_by_step(fine_step_id)
+        print(f"[fine_bin_api] DEBUG: Deleted existing bins for fine_step_id={fine_step_id} before creating new ones")
+
         # Build bins payload and persist
         bins_data = []
         total_good = 0
@@ -3020,6 +3082,11 @@ def auto_monotonic_binning_api():
         fine_step_id = create_binning_step(feature_id=feature['id'], step_type='fine', method='merged' if adjusted_merges else 'auto_monotonic', num_bins=num_bins, iv_value=iv)
         print(f"[auto_monotonic_binning] DEBUG: Created fine_step_id={fine_step_id}")
 
+        # CRITICAL FIX: Delete existing bins for this step before creating new ones
+        # This prevents orphaned binning_steps (steps without bins) when ON CONFLICT updates an existing step
+        delete_bins_by_step(fine_step_id)
+        print(f"[auto_monotonic_binning] DEBUG: Deleted existing bins for fine_step_id={fine_step_id} before creating new ones")
+
         bins_data = []
         total_good = 0
         total_bad = 0
@@ -3256,6 +3323,11 @@ def univariate_analysis():
                     stats = None
                     stats_dict = None
                     
+                    # CRITICAL FIX: Always use 'discrete' as the var_type for discrete columns
+                    # Don't rely on feature type from DB which might be incorrect
+                    var_type = 'discrete'
+                    correct_prefix = 'd'
+                    
                     # Try to retrieve from database if record_id is provided
                     from_db = False
                     if record_id:
@@ -3266,6 +3338,19 @@ def univariate_analysis():
                             print(f"[univariate_analysis] DEBUG: Invalid dataset_id for {col}")
                         if dataset_id:
                             feature = get_feature_by_name(dataset_id, col)
+                            if not feature:
+                                # Create feature if it doesn't exist
+                                print(f"[univariate_analysis] DEBUG: Feature not found for {col}, creating it")
+                                fid = create_feature(dataset_id, col, var_type, selected=True)
+                                feature = get_feature(fid)
+                                print(f"[univariate_analysis] DEBUG: Created feature for {col}, feature_id={fid}")
+                            else:
+                                # Update feature type if it's wrong
+                                if feature.get('type') != var_type:
+                                    print(f"[univariate_analysis] DEBUG: Feature type mismatch for {col}, updating from '{feature.get('type')}' to '{var_type}'")
+                                    update_feature(feature['id'], type=var_type)
+                                    feature['type'] = var_type
+                                
                             if feature:
                                 print(f"[univariate_analysis] DEBUG: Feature found for {col}, feature_id={feature['id']}")
                                 # Check if coarse binning already exists
@@ -3276,37 +3361,55 @@ def univariate_analysis():
                                     bins = get_bins_by_step(coarse_step['id'])
                                     if bins:
                                         print(f"[univariate_analysis] DEBUG: Found {len(bins)} bins in DB for {col}")
-                                        # Transform DB format to frontend format
-                                        stats_dict = []
-                                        # Get feature type to determine correct prefix
-                                        feature_type = feature.get('type', 'discrete')  # Default to discrete for discrete columns
-                                        prefix = 'd' if feature_type == 'discrete' else 'c'
                                         
+                                        # CRITICAL FIX: Check if bins have wrong prefix (indicating they were saved with wrong type)
+                                        # If any bin has wrong prefix, we need to recalculate instead of just correcting labels
+                                        has_wrong_prefix = False
                                         for bin_row in bins:
-                                            native_row = _row_to_native_types(dict(bin_row))
-                                            # Use existing bin_label or create with correct prefix based on feature type
-                                            bin_label = native_row.get('bin_label')
-                                            if not bin_label:
-                                                bin_num = native_row.get('bin_number', '')
-                                                bin_label = f"{prefix}{bin_num}" if bin_num else f'{prefix}1'
-                                            frontend_row = {
-                                                'Bin': bin_label,
-                                                'Range': native_row.get('range_text'),
-                                                'Good': native_row.get('good_count', 0),
-                                                'Bad': native_row.get('bad_count', 0),
-                                                'Total': native_row.get('total_count', 0),
-                                                'Bad Rate': native_row.get('bad_rate'),
-                                                'Freq%': native_row.get('freq_percent'),
-                                                'WOE': native_row.get('woe'),
-                                                'IV': native_row.get('iv')
-                                            }
-                                            stats_dict.append(frontend_row)
-                                        from_db = True
-                                        print(f"[univariate_analysis] ✓ Retrieved discrete from DB: {col} ({len(bins)} bins)")
+                                            bin_label = str(bin_row.get('bin_label', ''))
+                                            if bin_label and not bin_label.startswith(correct_prefix):
+                                                has_wrong_prefix = True
+                                                print(f"[univariate_analysis] DEBUG: Detected wrong bin prefix for {col}: '{bin_label}' should start with '{correct_prefix}'")
+                                                break
+                                        
+                                        if has_wrong_prefix:
+                                            # Bins were saved with wrong type - delete and recalculate
+                                            print(f"[univariate_analysis] DEBUG: Bins have wrong prefix, deleting and recalculating for {col}")
+                                            delete_all_binning_for_feature(feature['id'])
+                                            stats_dict = None  # Force recalculation
+                                        else:
+                                            # Bins are correct - use them
+                                            # Get totals for derived metrics calculation
+                                            totals = get_binning_totals(coarse_step['id'])
+                                            # Calculate derived metrics on-the-fly
+                                            bins = calculate_derived_bin_metrics(bins, totals)
+                                            # Transform DB format to frontend format
+                                            stats_dict = []
+                                            
+                                            for bin_row in bins:
+                                                native_row = _row_to_native_types(dict(bin_row))
+                                                # Use existing bin_label (should already have correct prefix)
+                                                bin_label = native_row.get('bin_label')
+                                                if not bin_label:
+                                                    bin_num = native_row.get('bin_number', '')
+                                                    bin_label = f"{correct_prefix}{bin_num}" if bin_num else f'{correct_prefix}1'
+                                                
+                                                frontend_row = {
+                                                    'Bin': bin_label,
+                                                    'Range': native_row.get('range_text'),
+                                                    'Good': native_row.get('good_count', 0),
+                                                    'Bad': native_row.get('bad_count', 0),
+                                                    'Total': native_row.get('total_count', 0),
+                                                    'Bad Rate': native_row.get('bad_rate'),
+                                                    'Freq%': native_row.get('freq_percent'),
+                                                    'WOE': native_row.get('woe'),
+                                                    'IV': native_row.get('iv')
+                                                }
+                                                stats_dict.append(frontend_row)
+                                            from_db = True
+                                            print(f"[univariate_analysis] ✓ Retrieved discrete from DB: {col} ({len(bins)} bins)")
                                 else:
                                     print(f"[univariate_analysis] DEBUG: No coarse step found for {col}")
-                            else:
-                                print(f"[univariate_analysis] DEBUG: No feature found for {col}")
                     
                     # If not in database, calculate fresh
                     if stats_dict is None:
@@ -3322,8 +3425,19 @@ def univariate_analysis():
                                 dataset_id = None
                             if dataset_id:
                                 feature = get_feature_by_name(dataset_id, col)
+                                if not feature:
+                                    # Create feature if it doesn't exist
+                                    fid = create_feature(dataset_id, col, var_type, selected=True)
+                                    feature = get_feature(fid)
+                                    print(f"[univariate_analysis] DEBUG: Created feature for {col}, feature_id={fid}")
+                                else:
+                                    # Update feature type if it's wrong
+                                    if feature.get('type') != var_type:
+                                        print(f"[univariate_analysis] DEBUG: Feature type mismatch for {col}, updating from '{feature.get('type')}' to '{var_type}'")
+                                        update_feature(feature['id'], type=var_type)
+                                
                                 if feature:
-                                    step_id = save_coarse_binning_to_db(feature['id'], stats, 'discrete')
+                                    step_id = save_coarse_binning_to_db(feature['id'], stats, var_type)
                                     print(f"[univariate_analysis] 💾 Saved discrete to DB: {col}, step_id={step_id}")
                         if stats_dict is None:
                             stats_dict = stats.to_dict(orient='records')
@@ -3346,6 +3460,11 @@ def univariate_analysis():
                     stats = None
                     stats_dict = None
                     
+                    # CRITICAL FIX: Always use 'continuous' as the var_type for continuous columns
+                    # Don't rely on feature type from DB which might be incorrect
+                    var_type = 'continuous'
+                    correct_prefix = 'c'
+                    
                     # Try to retrieve from database if record_id is provided
                     from_db = False
                     if record_id:
@@ -3356,6 +3475,19 @@ def univariate_analysis():
                             print(f"[univariate_analysis] DEBUG: Invalid dataset_id for {col}")
                         if dataset_id:
                             feature = get_feature_by_name(dataset_id, col)
+                            if not feature:
+                                # Create feature if it doesn't exist
+                                print(f"[univariate_analysis] DEBUG: Feature not found for {col}, creating it")
+                                fid = create_feature(dataset_id, col, var_type, selected=True)
+                                feature = get_feature(fid)
+                                print(f"[univariate_analysis] DEBUG: Created feature for {col}, feature_id={fid}")
+                            else:
+                                # Update feature type if it's wrong
+                                if feature.get('type') != var_type:
+                                    print(f"[univariate_analysis] DEBUG: Feature type mismatch for {col}, updating from '{feature.get('type')}' to '{var_type}'")
+                                    update_feature(feature['id'], type=var_type)
+                                    feature['type'] = var_type
+                                
                             if feature:
                                 print(f"[univariate_analysis] DEBUG: Feature found for {col}, feature_id={feature['id']}")
                                 # Check if coarse binning already exists
@@ -3366,38 +3498,56 @@ def univariate_analysis():
                                     bins = get_bins_by_step(coarse_step['id'])
                                     if bins:
                                         print(f"[univariate_analysis] DEBUG: Found {len(bins)} bins in DB for {col}")
-                                        # Transform DB format to frontend format
-                                        stats_dict = []
-                                        # Get feature type to determine correct prefix
-                                        feature_type = feature.get('type', 'continuous')  # Default to continuous for continuous columns
-                                        prefix = 'c' if feature_type == 'continuous' else 'd'
                                         
+                                        # CRITICAL FIX: Check if bins have wrong prefix (indicating they were saved with wrong type)
+                                        # If any bin has wrong prefix, we need to recalculate instead of just correcting labels
+                                        has_wrong_prefix = False
                                         for bin_row in bins:
-                                            native_row = _row_to_native_types(dict(bin_row))
-                                            # Use existing bin_label or create with correct prefix based on feature type
-                                            bin_label = native_row.get('bin_label')
-                                            if not bin_label:
-                                                bin_num = native_row.get('bin_number', '')
-                                                bin_label = f"{prefix}{bin_num}" if bin_num else f'{prefix}1'
-                                            frontend_row = {
-                                                'Bin': bin_label,
-                                                'Min': native_row.get('min_value'),
-                                                'Max': native_row.get('max_value'),
-                                                'Good': native_row.get('good_count', 0),
-                                                'Bad': native_row.get('bad_count', 0),
-                                                'Total': native_row.get('total_count', 0),
-                                                'Bad Rate': native_row.get('bad_rate'),
-                                                'Freq%': native_row.get('freq_percent'),
-                                                'WOE': native_row.get('woe'),
-                                                'IV': native_row.get('iv')
-                                            }
-                                            stats_dict.append(frontend_row)
-                                        from_db = True
-                                        print(f"[univariate_analysis] ✓ Retrieved continuous from DB: {col} ({len(bins)} bins)")
+                                            bin_label = str(bin_row.get('bin_label', ''))
+                                            if bin_label and not bin_label.startswith(correct_prefix):
+                                                has_wrong_prefix = True
+                                                print(f"[univariate_analysis] DEBUG: Detected wrong bin prefix for {col}: '{bin_label}' should start with '{correct_prefix}'")
+                                                break
+                                        
+                                        if has_wrong_prefix:
+                                            # Bins were saved with wrong type - delete and recalculate
+                                            print(f"[univariate_analysis] DEBUG: Bins have wrong prefix, deleting and recalculating for {col}")
+                                            delete_all_binning_for_feature(feature['id'])
+                                            stats_dict = None  # Force recalculation
+                                        else:
+                                            # Bins are correct - use them
+                                            # Get totals for derived metrics calculation
+                                            totals = get_binning_totals(coarse_step['id'])
+                                            # Calculate derived metrics on-the-fly
+                                            bins = calculate_derived_bin_metrics(bins, totals)
+                                            # Transform DB format to frontend format
+                                            stats_dict = []
+                                            
+                                            for bin_row in bins:
+                                                native_row = _row_to_native_types(dict(bin_row))
+                                                # Use existing bin_label (should already have correct prefix)
+                                                bin_label = native_row.get('bin_label')
+                                                if not bin_label:
+                                                    bin_num = native_row.get('bin_number', '')
+                                                    bin_label = f"{correct_prefix}{bin_num}" if bin_num else f'{correct_prefix}1'
+                                                
+                                                frontend_row = {
+                                                    'Bin': bin_label,
+                                                    'Min': native_row.get('min_value'),
+                                                    'Max': native_row.get('max_value'),
+                                                    'Good': native_row.get('good_count', 0),
+                                                    'Bad': native_row.get('bad_count', 0),
+                                                    'Total': native_row.get('total_count', 0),
+                                                    'Bad Rate': native_row.get('bad_rate'),
+                                                    'Freq%': native_row.get('freq_percent'),
+                                                    'WOE': native_row.get('woe'),
+                                                    'IV': native_row.get('iv')
+                                                }
+                                                stats_dict.append(frontend_row)
+                                            from_db = True
+                                            print(f"[univariate_analysis] ✓ Retrieved continuous from DB: {col} ({len(bins)} bins)")
                                 else:
                                     print(f"[univariate_analysis] DEBUG: No coarse step found for {col}")
-                            else:
-                                print(f"[univariate_analysis] DEBUG: No feature found for {col}")
                     
                     # If not in database, calculate fresh
                     if stats_dict is None:
@@ -3413,8 +3563,19 @@ def univariate_analysis():
                                 dataset_id = None
                             if dataset_id:
                                 feature = get_feature_by_name(dataset_id, col)
+                                if not feature:
+                                    # Create feature if it doesn't exist
+                                    fid = create_feature(dataset_id, col, var_type, selected=True)
+                                    feature = get_feature(fid)
+                                    print(f"[univariate_analysis] DEBUG: Created feature for {col}, feature_id={fid}")
+                                else:
+                                    # Update feature type if it's wrong
+                                    if feature.get('type') != var_type:
+                                        print(f"[univariate_analysis] DEBUG: Feature type mismatch for {col}, updating from '{feature.get('type')}' to '{var_type}'")
+                                        update_feature(feature['id'], type=var_type)
+                                
                                 if feature:
-                                    step_id = save_coarse_binning_to_db(feature['id'], stats, 'continuous')
+                                    step_id = save_coarse_binning_to_db(feature['id'], stats, var_type)
                                     print(f"[univariate_analysis] 💾 Saved continuous to DB: {col}, step_id={step_id}")
                         if stats_dict is None:
                             stats_dict = stats.to_dict(orient='records')
@@ -4454,6 +4615,10 @@ def woe_iv_api():
                         iv_value=float(iv_value) if iv_value is not None else None
                     )
 
+                    # CRITICAL FIX: Delete existing bins for this step before creating new ones
+                    # This prevents orphaned binning_steps (steps without bins) when ON CONFLICT updates an existing step
+                    delete_bins_by_step(step_id)
+
                     # Get var_type for this variable to determine how to save range data
                     var_type_for_save = feature.get('type', 'continuous')
                     
@@ -4533,20 +4698,8 @@ def woe_iv_api():
                                 min_value = None
                                 max_value = None
 
-                            freq_percent = (total / total_all) * 100 if total_all > 0 else None
-                            odds = (good / bad) if bad > 0 else None
-                            good_bad_ratio = odds
-                            # CRITICAL FIX: Calculate bad_rate (percentage of bad cases in this bin)
-                            bad_rate = (bad / total) * 100 if total > 0 else None
-                            try:
-                                index_value = ( (dist_good / dist_bad) * 100 ) if (dist_bad and dist_bad > 0) else None
-                            except Exception:
-                                index_value = None
-                            try:
-                                odds_index = ( (odds / overall_odds) * 100 ) if (odds is not None and overall_odds and overall_odds > 0) else None
-                            except Exception:
-                                odds_index = None
-
+                            # Derived values are calculated on-the-fly, not stored
+                            # Only store raw counts and calculated WOE/IV
                             bin_entry = {
                                 'bin_number': bin_number,
                                 'bin_label': bin_label,
@@ -4556,16 +4709,8 @@ def woe_iv_api():
                                 'good_count': good,
                                 'bad_count': bad,
                                 'total_count': total,
-                                'dist_good': dist_good,
-                                'dist_bad': dist_bad,
                                 'woe': woe,
-                                'iv': iv_bin,
-                                'freq_percent': freq_percent,
-                                'odds': odds,
-                                'good_bad_ratio': good_bad_ratio,
-                                'bad_rate': bad_rate,
-                                'index_value': index_value,
-                                'odds_index': odds_index
+                                'iv': iv_bin
                             }
                             bins_data.append(bin_entry)
                         except Exception:
@@ -4784,10 +4929,12 @@ def upsert_single_record():
         all_columns = set(discrete_columns + continuous_columns)
         
         # Create new features that don't exist
+        # Target variable is always set to selected=False
         for col in all_columns:
             if col not in existing_feature_names:
                 var_type = 'discrete' if col in discrete_columns else 'continuous'
-                is_selected = col in selected_columns
+                # Target variable is always False, others follow selected_columns
+                is_selected = False if col == target_variable else (col in selected_columns)
                 create_feature(
                     dataset_id=dataset_id,
                     name=col,
@@ -4799,12 +4946,16 @@ def upsert_single_record():
         # NOTE: Only update selected if feature is explicitly in selected_columns
         # This preserves the selected state from preprocessing step
         # IMPORTANT: Never set selected=False - only set to True if in selected_columns
+        # Target variable is always set to selected=False
         for feature in existing_features:
             if feature['name'] in all_columns:
                 new_type = 'discrete' if feature['name'] in discrete_columns else 'continuous'
-                # Only update selected to True if the feature is explicitly in selected_columns
-                # Never set selected to False - preserve existing state
-                if selected_columns and feature['name'] in selected_columns:
+                
+                # Target variable is always set to selected=False
+                if feature['name'] == target_variable:
+                    if feature['type'] != new_type or feature['selected'] != False:
+                        update_feature(feature['id'], type=new_type, selected=False)
+                elif selected_columns and feature['name'] in selected_columns:
                     # Feature is in selected_columns - set to True
                     is_selected = True
                     if feature['type'] != new_type or feature['selected'] != is_selected:
@@ -5004,6 +5155,7 @@ def update_feature_final_selected():
 def update_feature_selection():
     """
     Update feature's selected status from preprocessing details page.
+    Target variable is always set to selected=False and cannot be changed.
     """
     try:
         data = request.get_json()
@@ -5020,6 +5172,11 @@ def update_feature_selection():
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
         
+        # Check if this is the target variable - always set to False
+        dataset = get_dataset(dataset_id)
+        if dataset and dataset.get('target_variable') == feature_name:
+            is_selected = False  # Force target variable to always be False
+        
         # Get feature, create if it doesn't exist
         feature = get_feature_by_name(dataset_id, feature_name)
         if not feature:
@@ -5028,7 +5185,7 @@ def update_feature_selection():
             feature_id = create_feature(dataset_id, feature_name, 'continuous', selected=is_selected)
             feature = get_feature(feature_id)
         else:
-            # Update selected status
+            # Update selected status (will be False if target variable)
             update_feature(feature['id'], selected=is_selected)
         
         return jsonify({"success": True})
@@ -5163,13 +5320,23 @@ def get_record(record_id):
             fine = binning.get('fine')
             
             if coarse:
+                # Calculate derived metrics for coarse bins
+                coarse_bins = coarse.get('bins', [])
+                coarse_totals = coarse.get('totals')
+                if coarse_bins:
+                    coarse_bins = calculate_derived_bin_metrics(coarse_bins, coarse_totals)
                 feature_binning['coarse'] = {
                     'type': feature.get('type'),
-                    'bins': coarse.get('bins', [])
+                    'bins': coarse_bins
                 }
             if fine:
+                # Calculate derived metrics for fine bins
+                fine_bins = fine.get('bins', [])
+                fine_totals = fine.get('totals')
+                if fine_bins:
+                    fine_bins = calculate_derived_bin_metrics(fine_bins, fine_totals)
                 feature_binning['fine'] = {
-                    'bins': fine.get('bins', []),
+                    'bins': fine_bins,
                     'merged_bins': fine.get('merged_bins', []),
                     'iv': fine.get('iv')
                 }
@@ -5177,9 +5344,13 @@ def get_record(record_id):
             woe_source = fine if fine else coarse
             step_meta = (woe_source or {}).get('step')
             if step_meta and step_meta.get('iv_value') is not None:
+                woe_bins = (woe_source or {}).get('bins', [])
+                woe_totals = (woe_source or {}).get('totals')
+                if woe_bins:
+                    woe_bins = calculate_derived_bin_metrics(woe_bins, woe_totals)
                 feature_binning['woe_iv'] = {
                     'iv': float(step_meta['iv_value']),
-                    'bins': (woe_source or {}).get('bins', [])
+                    'bins': woe_bins
                 }
             
             if coarse or fine:
@@ -6610,6 +6781,9 @@ def get_finebin_cache(record_id: int, column_name: str):
         merged_bins = get_merged_bins_by_step(fine_step_id) or []
         print(f"[get_finebin_cache] DEBUG: Found {len(merged_bins)} merged bins")
         totals = get_binning_totals(fine_step_id)
+        
+        # Calculate derived metrics on-the-fly
+        bins = calculate_derived_bin_metrics(bins, totals)
 
         def _safe_float(value):
             """Safely convert to float, handling NaN/inf"""

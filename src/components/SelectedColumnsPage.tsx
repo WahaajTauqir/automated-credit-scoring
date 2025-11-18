@@ -59,7 +59,7 @@ const SelectedColumnsPage = () => {
     finalSelectedColumns: navFinalSelectedColumns,
   } = state || {};
   // State declarations
-  const [columns, setColumns] = useState<string[]>(navColumns || []);
+  const [columns] = useState<string[]>(navColumns || []);
   const [selectedColumns, setSelectedColumns] = useState<string[]>(navSelectedColumns || []);
   const [discreteColumns, setDiscreteColumns] = useState<string[]>(navDiscreteColumns || []);
   const [continuousColumns, setContinuousColumns] = useState<string[]>(navContinuousColumns || []);
@@ -75,7 +75,7 @@ const SelectedColumnsPage = () => {
     if (currentStep !== 0) return; // Only calculate for Classification step
     
     let resizeObserver: ResizeObserver | null = null;
-    let timeoutIds: NodeJS.Timeout[] = [];
+    let timeoutIds: ReturnType<typeof setTimeout>[] = [];
     
     const calculateColumnsPerPage = () => {
       let availableHeight = 0;
@@ -164,7 +164,6 @@ const SelectedColumnsPage = () => {
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
   const [selectedForModeling, setSelectedForModeling] = useState<string[]>(navModelReadyColumns || []); // For Column Selection & Binning (model_ready)
   const [selectedForFinalModeling, setSelectedForFinalModeling] = useState<string[]>(navFinalSelectedColumns || []); // For Model Training (final_selected)
-  const [preprocessingSelectedColumns, setPreprocessingSelectedColumns] = useState<string[]>([]); // Selected columns from PreprocessingDetails
   const [preprocessSelectionSaved, setPreprocessSelectionSaved] = useState(false); // Whether preprocessing selection has been saved
   const [notification, setNotification] = useState<string | null>(null);
   const [scoreCardData, setScoreCardData] = useState<any>(null);
@@ -180,18 +179,19 @@ const SelectedColumnsPage = () => {
   const [xgboostResults, setXgboostResults] = useState<any>(null);
   const [binningMode, setBinningMode] = useState<'manual' | 'auto'>('manual');
   const isLoadingAutoBinning = useRef(false);
-  const [loadingColumns, setLoadingColumns] = useState<Set<string>>(new Set());
-  const loadedColumnsRef = useRef<Set<string>>(new Set());
+  const [loadingColumns] = useState<Set<string>>(new Set());
   const [autoBinningModeLoading, setAutoBinningModeLoading] = useState(false);
   const [autoBinningModeProgress, setAutoBinningModeProgress] = useState<string>('');
   const [autoBinningModePercentage, setAutoBinningModePercentage] = useState<number>(0);
   const [fullAutoMonotonicLoading, setFullAutoMonotonicLoading] = useState(false);
   const [fullAutoMonotonicProgress, setFullAutoMonotonicProgress] = useState('');
+  const [coarseBinningLoading, setCoarseBinningLoading] = useState(false);
+  const [coarseBinningProgress, setCoarseBinningProgress] = useState<string>('');
+  const [coarseBinningPercentage, setCoarseBinningPercentage] = useState<number>(0);
+  const [coarseBinningCurrentFeature, setCoarseBinningCurrentFeature] = useState<string>('');
   const [fullAutoMonotonicPercentage, setFullAutoMonotonicPercentage] = useState(0);
   const [fullAutoMonotonicCurrent, setFullAutoMonotonicCurrent] = useState('');
   const FULL_AUTO_CONCURRENCY = 4;
-  const [showPreprocessing, setShowPreprocessing] = useState(false);
-  const [preprocessedDatasetId, setPreprocessedDatasetId] = useState<number | undefined>();
   const updateLocalWoeState = useCallback(
     (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
       if (!payload) {
@@ -756,7 +756,7 @@ const SelectedColumnsPage = () => {
       const firstBin = fineBinResults[activeColumn][0];
       if (firstBin) {
         const firstBinLabel = firstBin.Bin ?? `Bin_1`;
-        const matchedMetric = binScoringMetrics[activeColumn]?.find(m => m.bin_name === String(firstBinLabel));
+        binScoringMetrics[activeColumn]?.find(m => m.bin_name === String(firstBinLabel));
       }
     }
   }, [activeColumn, binScoringMetrics, fineBinResults]);
@@ -856,10 +856,6 @@ const SelectedColumnsPage = () => {
         if (data.scorecard_bins) {
           const totalBins = data.scorecard_bins.length;
           const varsToUse = selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling;
-          const variableCounts = varsToUse.map(variable => {
-            const variableBins = data.scorecard_bins.filter((bin: any) => bin.variable === variable);
-            return { variable, count: variableBins.length };
-          });
           showNotification(`Score card generated with ${totalBins} bins across ${varsToUse.length} variables using ${selectedModelForScorecard} model`);
         } else {
           showNotification(`Score card generated successfully using ${selectedModelForScorecard} model!`);
@@ -1091,28 +1087,56 @@ const SelectedColumnsPage = () => {
       return; // Prevent re-fetching if already active and has data
     }
     setActiveColumn(col);
+    
+    // Show loading overlay
+    setCoarseBinningLoading(true);
+    setCoarseBinningCurrentFeature(col);
+    setCoarseBinningProgress('Initializing...');
+    setCoarseBinningPercentage(0);
+    
     try {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
+      const featureTypeLabel = varType === 'discrete' ? 'discrete' : 'continuous';
+
+      setCoarseBinningProgress(`Loading ${col} (${featureTypeLabel})...`);
+      setCoarseBinningPercentage(10);
 
       // First, try to load saved fine bins from database
+      setCoarseBinningProgress('Checking for saved bins...');
+      setCoarseBinningPercentage(20);
       const { merges, hydrated } = await loadSavedFineBins(col, varType);
 
       if (hydrated) {
+        setCoarseBinningPercentage(100);
+        setCoarseBinningProgress('Loaded from cache!');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        setCoarseBinningLoading(false);
         return;
       }
 
       if (merges && Object.keys(merges).length > 0) {
         // Data exists in database, bins were loaded by loadSavedFineBins
+        setCoarseBinningProgress('Loading saved bins...');
+        setCoarseBinningPercentage(40);
         const mergePayload = merges;
 
         // Fetch WOE/IV using existing bins
+        setCoarseBinningProgress('Calculating WOE/IV...');
+        setCoarseBinningPercentage(60);
         const updatedWoe = await fetchWoeIv(col, mergePayload, false);
 
         if (updatedWoe) {
           setWoeReadyColumns((prev) => new Set(prev).add(col));
         }
+        setCoarseBinningPercentage(100);
+        setCoarseBinningProgress('Complete!');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        setCoarseBinningLoading(false);
       } else {
         // No saved data - calculate from scratch and store
+        setCoarseBinningProgress(`Calculating ${featureTypeLabel} bins...`);
+        setCoarseBinningPercentage(30);
+        
         const res = await fetch('http://localhost:5000/api/univariate-analysis', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1123,12 +1147,19 @@ const SelectedColumnsPage = () => {
             record_id: recordId, // Pass record_id to persist results
           }),
         });
+        
+        setCoarseBinningProgress('Processing binning results...');
+        setCoarseBinningPercentage(60);
+        
         const data = await res.json();
         const coarseStats = normalizeBinArray(data[col]?.stats || data[col] || []);
         setUnivariateResults((prev) => ({ ...prev, [col]: { ...(data[col] || {}), stats: coarseStats } }));
         setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
         setFineBinResults((prev) => ({ ...prev, [col]: coarseStats }));
 
+        setCoarseBinningProgress('Calculating bin metrics...');
+        setCoarseBinningPercentage(80);
+        
         // Precompute bin scoring metrics for the initial fine/coarse bins
         try {
           await calculateAllBinMetrics(col, coarseStats);
@@ -1139,15 +1170,27 @@ const SelectedColumnsPage = () => {
         setBinMergeHistory((prev) => ({ ...prev, [col]: prev[col] || {} }));
         setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
 
+        setCoarseBinningProgress('Calculating WOE/IV...');
+        setCoarseBinningPercentage(90);
+        
         // Calculate and store WOE/IV
         const updatedWoe = await fetchWoeIv(col, undefined, false);
 
         if (updatedWoe) {
           setWoeReadyColumns((prev) => new Set(prev).add(col));
         }
+        
+        setCoarseBinningPercentage(100);
+        setCoarseBinningProgress('Complete!');
+        await new Promise(resolve => setTimeout(resolve, 300));
+        setCoarseBinningLoading(false);
       }
     } catch (err) {
       console.error('Error in handleColumnClick:', err);
+      setCoarseBinningProgress('Error occurred!');
+      setCoarseBinningPercentage(0);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      setCoarseBinningLoading(false);
       alert('Error fetching coarse bin results');
     }
   };
@@ -1261,7 +1304,7 @@ const SelectedColumnsPage = () => {
         setWoeReadyColumns(prev => new Set(prev).add(col));
       }
 
-      const persistedRecordId = await persistFineBinColumn(col, mergesReturned, {
+      await persistFineBinColumn(col, mergesReturned, {
         univariateResults: updatedUnivariate,
         fineBinResults: updatedFine,
         crosstabResults: updatedCoarse,
@@ -1805,53 +1848,6 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  const loadColumnData = async (col: string) => {
-
-    // Skip if already has WOE/IV data, is currently loading, or has been attempted
-    if (woeIvResults[col] || loadingColumns.has(col) || loadedColumnsRef.current.has(col)) return;
-
-    // Mark as loading and attempted
-    loadedColumnsRef.current.add(col);
-    setLoadingColumns(prev => new Set(prev).add(col));
-
-    const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-    try {
-      // Check if there are saved fine bins for this column
-      const { merges, hydrated } = await loadSavedFineBins(col, varType);
-      if (hydrated) {
-        return;
-      }
-      const mergePayload = merges && Object.keys(merges).length > 0 ? merges : undefined;
-
-
-      // Fetch WOE/IV data (this will use existing bins, not run auto-binning)
-      const fetched = await fetchWoeIv(col, mergePayload, false);
-
-      // After auto-loading WOE/IV, compute bin scoring metrics so display matches manual flow
-      try {
-        const bins = fineBinResults[col] && fineBinResults[col].length > 0
-          ? fineBinResults[col]
-          : (coarseBinResults[col] && coarseBinResults[col].length > 0 ? coarseBinResults[col] : []);
-        if (Array.isArray(bins) && bins.length > 0) {
-
-          await calculateAllBinMetrics(col, bins);
-        } else {
-
-        }
-      } catch (e) {
-
-      }
-    } catch (e) {
-
-    } finally {
-      // Remove from loading set
-      setLoadingColumns(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(col);
-        return newSet;
-      });
-    }
-  };
 
   const handleConfigureManually = async (col: string) => {
     setBinningMode('manual');
@@ -2118,15 +2114,6 @@ const SelectedColumnsPage = () => {
 
       const data = await res.json();
 
-      // Log whether the backend returned bin stats for the column (length and sample)
-      try {
-        const stats = data?.[col]?.stats ?? data?.[col]?.statistics ?? null;
-        const statsLen = Array.isArray(stats) ? stats.length : (stats ? 1 : 0);
-        const sample = Array.isArray(stats) && stats.length > 0 ? stats[0] : stats;
-
-      } catch (e) {
-
-      }
 
       if (!data.error && data[col]) {
         const normalizedEntry: { iv?: number; stats: NormalizedBin[] } = {
@@ -2171,23 +2158,11 @@ const SelectedColumnsPage = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeColumn, woeIvResults]);
-  const canGoToStep = (step: number) => {
-    switch (step) {
-      case 1:
-        return true;
-      case 2:
-        return woeReadyColumns.size > 0; // Logistic Regression requires at least one WOE-ready column
-      case 3:
-        return woeReadyColumns.size > 0; // Score Card requires at least one WOE-ready column
-      default:
-        return false;
-    }
-  };
   const canGoNext = () => {
     switch (currentStep) {
       case 0: // Classification - need at least one column (discrete or continuous) and target variable
         return (discreteColumns.length > 0 || continuousColumns.length > 0) && targetVariable !== '';
-      case 1: // Data Preprocessing - need preprocess_selection to be saved
+      case 1: // Data Preprocessing - preprocess_selection is automatically set to true after calculations complete
         return preprocessSelectionSaved;
       case 2: // Binning - need at least one WOE-ready column
         return woeReadyColumns.size > 0;
@@ -2197,35 +2172,6 @@ const SelectedColumnsPage = () => {
         return false;
       default:
         return false;
-    }
-  };
-  const handleSave = async () => {
-    if (!window.confirm('Are you sure you want to save the current analysis?')) return;
-    try {
-      const response = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dataset_path: datasetPath || undefined,
-          discrete_columns: discreteColumns || [],
-          continuous_columns: continuousColumns || [],
-          selected_columns: selectedColumns,
-          dashboard_selected_columns: selectedForModeling,
-          target_variable: targetVariable || '',
-          record_id: recordId,
-        }),
-      });
-      const data = await response.json();
-      if (!data.error && data.id) {
-        setRecordId(data.id);
-        showNotification('Analysis saved successfully!');
-      } else {
-
-        alert(`Error saving analysis: ${data.error || 'Unknown error'}`);
-      }
-    } catch (error) {
-
-      alert(`Error saving analysis: ${error}`);
     }
   };
   useEffect(() => {
@@ -2263,10 +2209,10 @@ const SelectedColumnsPage = () => {
 
             if (featuresResp.ok) {
               const featuresData = await featuresResp.json();
-              const selectedFeatureNames = featuresData
+              // Load selected features from database (not stored in state as not used elsewhere)
+              featuresData
                 .filter((f: any) => f.selected === true)
                 .map((f: any) => f.name);
-              setPreprocessingSelectedColumns(selectedFeatureNames);
             }
           }
         } catch (error) {
@@ -2566,7 +2512,7 @@ const SelectedColumnsPage = () => {
                     datasetPath={datasetPath}
                     recordId={recordId}
                     showCheckboxes={false}
-                    columnListRef={columnListRef}
+                    columnListRef={columnListRef as React.RefObject<HTMLDivElement>}
                   />
                 </div>
               </div>
@@ -2577,9 +2523,10 @@ const SelectedColumnsPage = () => {
               <div className="preprocessing-step" style={{ width: '100%' }}>
                 <PreprocessingDetails
                   datasetId={recordId}
-                  onPreprocessingComplete={(newDatasetId) => {
-                    setPreprocessedDatasetId(newDatasetId);
-                    setRecordId(newDatasetId);
+                  onPreprocessingComplete={(newDatasetId?: number) => {
+                    if (newDatasetId) {
+                      setRecordId(newDatasetId);
+                    }
                     setCurrentStep(2);
                     showNotification('Data preprocessing completed successfully!');
                     loadSavedData();
@@ -2627,7 +2574,6 @@ const SelectedColumnsPage = () => {
                   {selectedColumns.map((col) => {
                     const woeData = woeIvResults[col];
                     const isLoading = loadingColumns.has(col);
-                    const hasData = !!woeData;
 
                     const woeStats: NormalizedBin[] = woeData?.stats ?? [];
                     const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
@@ -3823,6 +3769,36 @@ const SelectedColumnsPage = () => {
                 {fullAutoMonotonicPercentage < 100
                   ? 'Applying monotonic binning across all features...'
                   : 'All features processed.'}
+              </p>
+            </div>
+          </div>
+        )}
+        {/* Coarse Binning Loading Overlay */}
+        {coarseBinningLoading && (
+          <div className="auto-binning-loading-overlay">
+            <div className="auto-binning-loading-modal">
+              <div className="loading-animation">
+                <div className="pulse-ring"></div>
+                <div className="pulse-ring-delay"></div>
+                <div className="loading-icon">📊</div>
+              </div>
+              <h3 className="loading-title">Calculating Coarse Bins</h3>
+              <p className="loading-progress">
+                {coarseBinningProgress}
+                {coarseBinningCurrentFeature ? ` • ${coarseBinningCurrentFeature}` : ''}
+              </p>
+              <div className="progress-bar-container">
+                <div
+                  className="progress-bar-fill"
+                  style={{ width: `${coarseBinningPercentage}%` }}
+                ></div>
+              </div>
+              <p className="loading-subtitle">
+                {coarseBinningPercentage > 0 && coarseBinningPercentage < 100
+                  ? 'Processing binning calculations...'
+                  : coarseBinningPercentage === 100
+                  ? 'Binning complete!'
+                  : 'Please wait while we calculate bins...'}
               </p>
             </div>
           </div>

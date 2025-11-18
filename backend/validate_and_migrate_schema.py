@@ -46,8 +46,7 @@ def get_required_columns():
         'bins': [
             'id', 'binning_step_id', 'bin_number', 'bin_label', 'min_value',
             'max_value', 'range_text', 'good_count', 'bad_count', 'total_count',
-            'good_bad_ratio', 'bad_rate', 'freq_percent', 'odds', 'index_value',
-            'odds_index', 'dist_good', 'dist_bad', 'woe', 'iv'
+            'woe', 'iv'
         ],
         'merged_bins': [
             'id', 'fine_step_id', 'merged_bin_number', 'original_bin_ids',
@@ -116,7 +115,8 @@ def validate_schema():
             conn.close()
 
 def remove_unwanted_columns():
-    """Remove created_at columns from tables that shouldn't have them."""
+    """Remove created_at columns from tables that shouldn't have them.
+    Also remove derived columns from bins table (good_bad_ratio, bad_rate, etc.)."""
     conn = None
     cur = None
     try:
@@ -135,6 +135,7 @@ def remove_unwanted_columns():
         columns_removed = []
         columns_skipped = []
         
+        # First, remove created_at columns
         for table_name in tables_to_check:
             # Check if table exists
             if not check_table_exists(cur, table_name):
@@ -146,18 +147,41 @@ def remove_unwanted_columns():
                     print(f"Removing created_at column from {table_name}...")
                     cur.execute(f"ALTER TABLE {table_name} DROP COLUMN IF EXISTS created_at")
                     conn.commit()
-                    columns_removed.append(table_name)
+                    columns_removed.append(f"{table_name}.created_at")
                     print(f"✅ Removed created_at from {table_name}")
                 except Exception as e:
                     conn.rollback()
                     print(f"⚠️  Could not remove created_at from {table_name}: {e}")
-            else:
-                columns_skipped.append(table_name)
+        
+        # Second, remove derived columns from bins table
+        if check_table_exists(cur, 'bins'):
+            derived_columns = [
+                'good_bad_ratio',
+                'bad_rate',
+                'freq_percent',
+                'odds',
+                'index_value',
+                'odds_index',
+                'dist_good',
+                'dist_bad'
+            ]
+            
+            for col_name in derived_columns:
+                if check_column_exists(cur, 'bins', col_name):
+                    try:
+                        print(f"Removing derived column {col_name} from bins...")
+                        cur.execute(f"ALTER TABLE bins DROP COLUMN IF EXISTS {col_name}")
+                        conn.commit()
+                        columns_removed.append(f"bins.{col_name}")
+                        print(f"✅ Removed {col_name} from bins")
+                    except Exception as e:
+                        conn.rollback()
+                        print(f"⚠️  Could not remove {col_name} from bins: {e}")
         
         if columns_removed:
-            print(f"\n✅ Removed created_at from {len(columns_removed)} table(s): {', '.join(columns_removed)}")
-        if columns_skipped:
-            print(f"ℹ️  Verified {len(columns_skipped)} table(s) don't have created_at: {', '.join(columns_skipped)}")
+            print(f"\n✅ Removed {len(columns_removed)} unwanted column(s): {', '.join(columns_removed)}")
+        else:
+            print(f"ℹ️  No unwanted columns found to remove")
         
         return True
         
@@ -236,14 +260,6 @@ def apply_migrations():
             'bins.good_count': 'INT NOT NULL DEFAULT 0',
             'bins.bad_count': 'INT NOT NULL DEFAULT 0',
             'bins.total_count': 'INT NOT NULL DEFAULT 0',
-            'bins.good_bad_ratio': 'NUMERIC(10, 4)',
-            'bins.bad_rate': 'NUMERIC(10, 4)',
-            'bins.freq_percent': 'NUMERIC(10, 4)',
-            'bins.odds': 'NUMERIC(10, 4)',
-            'bins.index_value': 'NUMERIC(10, 4)',
-            'bins.odds_index': 'NUMERIC(10, 4)',
-            'bins.dist_good': 'NUMERIC(10, 4)',
-            'bins.dist_bad': 'NUMERIC(10, 4)',
             'bins.woe': 'NUMERIC(10, 4)',
             'bins.iv': 'NUMERIC(10, 6)',
             

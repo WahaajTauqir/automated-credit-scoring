@@ -847,25 +847,16 @@ def create_bin(binning_step_id: int, bin_number: int, bin_label: str = None,
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # Extract additional metrics from kwargs
-    good_bad_ratio = kwargs.get('good_bad_ratio')
-    bad_rate = kwargs.get('bad_rate')
-    freq_percent = kwargs.get('freq_percent')
-    odds = kwargs.get('odds')
-    index_value = kwargs.get('index_value')
-    odds_index = kwargs.get('odds_index')
-    dist_good = kwargs.get('dist_good')
-    dist_bad = kwargs.get('dist_bad')
+    # Extract additional metrics from kwargs (only woe and iv are stored)
     woe = kwargs.get('woe')
     iv = kwargs.get('iv')
     
     cur.execute("""
         INSERT INTO bins (
             binning_step_id, bin_number, bin_label, min_value, max_value, range_text,
-            good_count, bad_count, total_count, good_bad_ratio, bad_rate, freq_percent,
-            odds, index_value, odds_index, dist_good, dist_bad, woe, iv
+            good_count, bad_count, total_count, woe, iv
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (binning_step_id, bin_number)
         DO UPDATE SET
             bin_label = EXCLUDED.bin_label,
@@ -875,20 +866,11 @@ def create_bin(binning_step_id: int, bin_number: int, bin_label: str = None,
             good_count = EXCLUDED.good_count,
             bad_count = EXCLUDED.bad_count,
             total_count = EXCLUDED.total_count,
-            good_bad_ratio = EXCLUDED.good_bad_ratio,
-            bad_rate = EXCLUDED.bad_rate,
-            freq_percent = EXCLUDED.freq_percent,
-            odds = EXCLUDED.odds,
-            index_value = EXCLUDED.index_value,
-            odds_index = EXCLUDED.odds_index,
-            dist_good = EXCLUDED.dist_good,
-            dist_bad = EXCLUDED.dist_bad,
             woe = EXCLUDED.woe,
             iv = EXCLUDED.iv
         RETURNING id;
     """, (binning_step_id, bin_number, bin_label, min_value, max_value, range_text,
-          good_count, bad_count, total_count, good_bad_ratio, bad_rate, freq_percent,
-          odds, index_value, odds_index, dist_good, dist_bad, woe, iv))
+          good_count, bad_count, total_count, woe, iv))
     
     bin_id = cur.fetchone()[0]
     conn.commit()
@@ -933,6 +915,23 @@ def get_bins_by_step(binning_step_id: int) -> List[Dict]:
     conn.close()
     
     return [dict(b) for b in bins]
+
+
+def delete_bins_by_step(binning_step_id: int) -> bool:
+    """
+    Delete all bins for a specific binning step.
+    This ensures we start fresh when updating a binning step.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("DELETE FROM bins WHERE binning_step_id = %s", (binning_step_id,))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return True
 
 
 def get_bin(bin_id: int) -> Optional[Dict]:
@@ -1240,6 +1239,9 @@ def get_dataset_with_all_results(dataset_id: int) -> Optional[Dict]:
     cur.close()
     conn.close()
     
+    # Import calculate_derived_bin_metrics from app.py
+    # Note: This creates a circular import, so we'll calculate in app.py instead
+    # For now, bins are returned as-is from db.py, and app.py will enrich them
     for step in steps:
         feature = feature_lookup.get(step['feature_id'])
         if not feature:

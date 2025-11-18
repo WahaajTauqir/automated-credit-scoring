@@ -109,14 +109,6 @@ CREATE TABLE bins (
     good_count INT NOT NULL DEFAULT 0,
     bad_count INT NOT NULL DEFAULT 0,
     total_count INT NOT NULL DEFAULT 0,
-    good_bad_ratio NUMERIC(10, 4),
-    bad_rate NUMERIC(10, 4),
-    freq_percent NUMERIC(10, 4),
-    odds NUMERIC(10, 4),
-    index_value NUMERIC(10, 4),
-    odds_index NUMERIC(10, 4),
-    dist_good NUMERIC(10, 4),
-    dist_bad NUMERIC(10, 4),
     woe NUMERIC(10, 4),
     iv NUMERIC(10, 6),
     UNIQUE(binning_step_id, bin_number)
@@ -132,13 +124,16 @@ COMMENT ON COLUMN bins.range_text IS 'Text representation of range (for discrete
 COMMENT ON COLUMN bins.good_count IS 'Count of Good cases (target=0)';
 COMMENT ON COLUMN bins.bad_count IS 'Count of Bad cases (target=1)';
 COMMENT ON COLUMN bins.total_count IS 'Total count (Good + Bad)';
-COMMENT ON COLUMN bins.good_bad_ratio IS 'Ratio of Good to Bad';
-COMMENT ON COLUMN bins.bad_rate IS 'Percentage of Bad cases';
-COMMENT ON COLUMN bins.freq_percent IS 'Percentage of total population in this bin';
-COMMENT ON COLUMN bins.dist_good IS 'Distribution of Good (percentage)';
-COMMENT ON COLUMN bins.dist_bad IS 'Distribution of Bad (percentage)';
 COMMENT ON COLUMN bins.woe IS 'Weight of Evidence';
 COMMENT ON COLUMN bins.iv IS 'Information Value contribution';
+COMMENT ON COLUMN bins.good_bad_ratio IS 'DEPRECATED: Calculated as good_count/bad_count';
+COMMENT ON COLUMN bins.bad_rate IS 'DEPRECATED: Calculated as (bad_count/total_count)*100';
+COMMENT ON COLUMN bins.freq_percent IS 'DEPRECATED: Calculated from total_count and binning_totals';
+COMMENT ON COLUMN bins.odds IS 'DEPRECATED: Same as good_bad_ratio';
+COMMENT ON COLUMN bins.index_value IS 'DEPRECATED: Calculated from dist_good/dist_bad';
+COMMENT ON COLUMN bins.odds_index IS 'DEPRECATED: Calculated from odds/overall_odds';
+COMMENT ON COLUMN bins.dist_good IS 'DEPRECATED: Calculated as (good_count/total_good)*100';
+COMMENT ON COLUMN bins.dist_bad IS 'DEPRECATED: Calculated as (bad_count/total_bad)*100';
 
 -- Index for faster bin lookups
 CREATE INDEX idx_bins_binning_step_id ON bins(binning_step_id);
