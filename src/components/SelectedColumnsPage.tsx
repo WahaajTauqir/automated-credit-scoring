@@ -165,6 +165,7 @@ const SelectedColumnsPage = () => {
   const [selectedForModeling, setSelectedForModeling] = useState<string[]>(navModelReadyColumns || []); // For Column Selection & Binning (model_ready)
   const [selectedForFinalModeling, setSelectedForFinalModeling] = useState<string[]>(navFinalSelectedColumns || []); // For Model Training (final_selected)
   const [preprocessingSelectedColumns, setPreprocessingSelectedColumns] = useState<string[]>([]); // Selected columns from PreprocessingDetails
+  const [preprocessSelectionSaved, setPreprocessSelectionSaved] = useState(false); // Whether preprocessing selection has been saved
   const [notification, setNotification] = useState<string | null>(null);
   const [scoreCardData, setScoreCardData] = useState<any>(null);
   const [testScoreLoading, setTestScoreLoading] = useState(false);
@@ -413,7 +414,7 @@ const SelectedColumnsPage = () => {
         return newSet;
       });
       setSelectedForModeling((prev) => prev.filter((col) => selectedColumns.includes(col)));
-      showNotification(`WOE/IV data cleaned for dropped columns: ${columnsToRemove.join(', ')}`);
+      // Notification removed per user request
     }
   }, [selectedColumns, woeIvResults, woeReadyColumns]);
   // Column Selection functions (from ColumnSelectionPage)
@@ -2075,7 +2076,7 @@ const SelectedColumnsPage = () => {
         return next;
       });
       setSelectedForModeling((prev) => prev.filter((col) => !removedColumns.includes(col)));
-      showNotification(`WOE/IV data cleaned for dropped columns: ${removedColumns.join(', ')}`);
+      // Notification removed per user request
     }
 
     prevSelectedColumnsRef.current = selectedColumns;
@@ -2186,8 +2187,8 @@ const SelectedColumnsPage = () => {
     switch (currentStep) {
       case 0: // Classification - need at least one column (discrete or continuous) and target variable
         return (discreteColumns.length > 0 || continuousColumns.length > 0) && targetVariable !== '';
-      case 1: // Data Preprocessing - need at least one selected column from preprocessing
-        return preprocessingSelectedColumns.length > 0;
+      case 1: // Data Preprocessing - need preprocess_selection to be saved
+        return preprocessSelectionSaved;
       case 2: // Binning - need at least one WOE-ready column
         return woeReadyColumns.size > 0;
       case 3: // Models - need at least one WOE-ready column
@@ -2234,6 +2235,7 @@ const SelectedColumnsPage = () => {
   }, [recordId]);
 
   // Load selected columns from database when on Data Preprocessing step
+  // Also check if preprocess_selection is saved
   useEffect(() => {
     const loadPreprocessingSelectedColumns = async () => {
       if (currentStep === 1 && recordId) {
@@ -2249,6 +2251,20 @@ const SelectedColumnsPage = () => {
               .filter((f: any) => f.selected === true)
               .map((f: any) => f.name);
             setPreprocessingSelectedColumns(selectedFeatureNames);
+            
+            // Also check if preprocess_selection is saved
+            try {
+              const recordResponse = await fetch(`http://localhost:5000/api/record/${recordId}`, {
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' }
+              });
+              if (recordResponse.ok) {
+                const recordData = await recordResponse.json();
+                setPreprocessSelectionSaved(recordData.preprocess_selection === true);
+              }
+            } catch (err) {
+              console.error('Error checking preprocess_selection:', err);
+            }
           }
         } catch (error) {
           console.error('Error loading preprocessing selected columns:', error);
@@ -2329,8 +2345,27 @@ const SelectedColumnsPage = () => {
 
   // Removed useEffect for auto binning mode - now handled by handleSwitchToAutoBinning
 
+  // Add/remove no-scroll class on body/html when component mounts/unmounts
+  useEffect(() => {
+    document.body.classList.add('no-scroll');
+    document.documentElement.classList.add('no-scroll');
+    const rootElement = document.getElementById('root');
+    if (rootElement) {
+      rootElement.classList.add('no-scroll');
+    }
+
+    return () => {
+      document.body.classList.remove('no-scroll');
+      document.documentElement.classList.remove('no-scroll');
+      const rootElementCleanup = document.getElementById('root');
+      if (rootElementCleanup) {
+        rootElementCleanup.classList.remove('no-scroll');
+      }
+    };
+  }, []);
+
   return (
-    <div>
+    <div className="selected-columns-page">
       <Navbar />
       <div className="page-container">
         <div className="progress-header">
@@ -2451,9 +2486,9 @@ const SelectedColumnsPage = () => {
             {/* Step 0: Classification */}
             {currentStep === 0 && (
               <div className="column-selection-step" style={{ width: '100%' }}>
-                <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginTop: '24px', marginBottom: '16px' }}>
                   <button
-                    className="assign-button"
+                    className="full-auto-monotonic-btn"
                     onClick={async () => {
                       try {
                         const colsToClassify = columns;
@@ -2509,7 +2544,7 @@ const SelectedColumnsPage = () => {
                       }
                     }}
                   >
-                    AI Separation (All Columns)
+                    <span className="btn-text">AI Enabled Classification of Discrete and Continuous</span>
                   </button>
                 </div>
                 <div style={{ width: '100%', flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -2552,6 +2587,9 @@ const SelectedColumnsPage = () => {
                     setCurrentStep(2);
                     showNotification('Data preprocessing completed successfully!');
                     loadSavedData();
+                  }}
+                  onPreprocessSelectionSaved={() => {
+                    setPreprocessSelectionSaved(true);
                   }}
                 />
               </div>

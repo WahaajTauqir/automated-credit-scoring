@@ -1,5 +1,6 @@
 import ColumnPanels from './ColumnsPanel';
 import Navbar from './Navbar';
+import './SelectedColumnsPage.css';
 
 interface ColumnSelectionPageProps {
   columns: string[];
@@ -89,9 +90,9 @@ const ColumnSelectionPage = ({
         )}
         {columns.length > 0 && !hasWrongCsv && (
           <>
-            <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginTop: '24px', marginBottom: '16px' }}>
               <button
-                className="assign-button"
+                className="full-auto-monotonic-btn"
                 onClick={async () => {
                   // Classify ALL columns using backend AI endpoint (not just current page)
                   try {
@@ -157,7 +158,7 @@ const ColumnSelectionPage = ({
                   }
                 }}
               >
-                AI Separation (All Columns)
+                <span className="btn-text">AI Enabled Classification of Discrete and Continuous</span>
               </button>
             </div>
 

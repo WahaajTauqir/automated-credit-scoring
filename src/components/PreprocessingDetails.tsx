@@ -41,12 +41,14 @@ interface DatasetStats {
 interface PreprocessingDetailsProps {
     datasetId?: number;
     onPreprocessingComplete?: () => void;
+    onPreprocessSelectionSaved?: () => void;
 }
 
-const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId }) => {
+const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, onPreprocessSelectionSaved }) => {
     const [datasetStats, setDatasetStats] = useState<DatasetStats | null>(null);
     const [features, setFeatures] = useState<FeaturePreprocessingDetail[]>([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [preprocessSelectionSaved, setPreprocessSelectionSaved] = useState(false);
 
     // Load dataset stats and feature preprocessing details
     const loadPreprocessingData = async () => {
@@ -55,6 +57,35 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId }
         try {
             setIsLoading(true);
 
+            // Check if preprocess_selection is saved by getting the record
+            const recordResponse = await fetch(`http://localhost:5000/api/record/${datasetId}`, {
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            let preprocessSelectionSavedLocal = false;
+            if (recordResponse.ok) {
+                const recordData = await recordResponse.json();
+                preprocessSelectionSavedLocal = recordData.preprocess_selection === true;
+                setPreprocessSelectionSaved(preprocessSelectionSavedLocal);
+                if (preprocessSelectionSavedLocal && onPreprocessSelectionSaved) {
+                    onPreprocessSelectionSaved();
+                }
+            }
+
+            // Load features from database to get selected status
+            const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${datasetId}/features`, {
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            let featuresFromDb: any[] = [];
+            if (featuresResponse.ok) {
+                featuresFromDb = await featuresResponse.json();
+            }
+
+            // Always perform calculations to show stats and quality metrics
+            // But use database selected status to determine selected/dropped
             // Load quality metrics for stats
             const metricsResponse = await fetch('http://localhost:5000/api/dataset-quality-metrics', {
                 method: 'POST',
@@ -78,20 +109,9 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId }
                 })
             });
 
-            // Load features from database to get selected status
-            const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${datasetId}/features`, {
-                method: 'GET',
-                headers: { 'Content-Type': 'application/json' }
-            });
-
             if (metricsResponse.ok && changesResponse.ok) {
                 const metricsData = await metricsResponse.json();
                 const changesData = await changesResponse.json();
-                let featuresFromDb: any[] = [];
-                
-                if (featuresResponse.ok) {
-                    featuresFromDb = await featuresResponse.json();
-                }
 
                 // Get total rows for calculating missing percentage
                 let totalRows = 1;
@@ -167,22 +187,41 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId }
                             
                             const dbFeature = featuresMap.get(col.column);
                             
-                            // Determine selection:
-                            // 1. If feature is removed, automatically uncheck it
-                            // 2. If feature has >95% missing values, automatically uncheck it
-                            // 3. If feature has zero variance, automatically uncheck it
-                            // 4. If feature has low variance (CV < 5%), automatically uncheck it (but allow user to select)
-                            // 5. If feature has high repeat rate (>95%), automatically uncheck it (but allow user to select)
-                            // 6. If feature passes quality checks, auto-select it
-                            // 7. Otherwise, use DB value (if exists) or false
+                            // Determine selection based on preprocess_selection flag
                             let shouldBeSelected: boolean;
-                            if (isRemoved || hasHighMissingValues || hasZeroVariance) {
-                                // Removed, high missing, or zero variance - automatically uncheck
-                                shouldBeSelected = false;
-                                // Update DB to uncheck if feature exists and is currently selected
-                                // Also create feature with selected=false if it doesn't exist (for removed/high missing/zero variance)
-                                if (dbFeature?.exists) {
-                                    if (dbFeature.selected) {
+                            
+                            if (preprocessSelectionSavedLocal) {
+                                // If preprocess_selection is true, strictly use database selected status
+                                // Calculations are only for display purposes (stats, quality checks, etc.)
+                                shouldBeSelected = dbFeature?.selected || false;
+                            } else {
+                                // If preprocess_selection is false, use calculation-based logic
+                                // 1. If feature is removed, automatically uncheck it
+                                // 2. If feature has >95% missing values, automatically uncheck it
+                                // 3. If feature has zero variance, automatically uncheck it
+                                // 4. If feature has low variance (CV < 5%), automatically uncheck it (but allow user to select)
+                                // 5. If feature has high repeat rate (>95%), automatically uncheck it (but allow user to select)
+                                // 6. If feature passes quality checks, auto-select it
+                                // 7. Otherwise, use DB value (if exists) or false
+                                if (isRemoved || hasHighMissingValues || hasZeroVariance) {
+                                    // Removed, high missing, or zero variance - automatically uncheck
+                                    shouldBeSelected = false;
+                                    // Update DB to uncheck if feature exists and is currently selected
+                                    // Also create feature with selected=false if it doesn't exist
+                                    if (dbFeature?.exists) {
+                                        if (dbFeature.selected) {
+                                            fetch('http://localhost:5000/api/update-feature-selection', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({
+                                                    dataset_id: datasetId,
+                                                    feature_name: col.column,
+                                                    selected: false
+                                                })
+                                            }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                        }
+                                    } else {
+                                        // Create feature with selected=false for removed/high missing/zero variance features
                                         fetch('http://localhost:5000/api/update-feature-selection', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
@@ -193,40 +232,40 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId }
                                             })
                                         }).catch(err => console.error('Error auto-saving feature selection:', err));
                                     }
-                                } else if (isRemoved || hasHighMissingValues || hasZeroVariance) {
-                                    // Create feature with selected=false for removed/high missing/zero variance features
-                                    fetch('http://localhost:5000/api/update-feature-selection', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({
-                                            dataset_id: datasetId,
-                                            feature_name: col.column,
-                                            selected: false
-                                        })
-                                    }).catch(err => console.error('Error auto-saving feature selection:', err));
-                                }
-                            } else if (hasLowVariance || hasHighRepeatRate) {
-                                // Low variance or high repeat rate features - automatically uncheck but allow user to select
-                                shouldBeSelected = false;
-                                // Update DB to uncheck if feature exists and is currently selected
-                                if (dbFeature?.exists && dbFeature.selected) {
-                                    fetch('http://localhost:5000/api/update-feature-selection', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({
-                                            dataset_id: datasetId,
-                                            feature_name: col.column,
-                                            selected: false
-                                        })
-                                    }).catch(err => console.error('Error auto-saving feature selection:', err));
-                                }
-                            } else if (isFitForBinning) {
-                                // Auto-select features that pass quality checks
-                                shouldBeSelected = true;
-                                // Update DB if feature exists, or create it if it doesn't
-                                if (dbFeature?.exists) {
-                                    // Only update if it's currently false (to avoid unnecessary updates)
-                                    if (!dbFeature.selected) {
+                                } else if (hasLowVariance || hasHighRepeatRate) {
+                                    // Low variance or high repeat rate features - automatically uncheck but allow user to select
+                                    shouldBeSelected = false;
+                                    // Update DB to uncheck if feature exists and is currently selected
+                                    if (dbFeature?.exists && dbFeature.selected) {
+                                        fetch('http://localhost:5000/api/update-feature-selection', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({
+                                                dataset_id: datasetId,
+                                                feature_name: col.column,
+                                                selected: false
+                                            })
+                                        }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                    }
+                                } else if (isFitForBinning) {
+                                    // Auto-select features that pass quality checks
+                                    shouldBeSelected = true;
+                                    // Update DB if feature exists, or create it if it doesn't
+                                    if (dbFeature?.exists) {
+                                        // Only update if it's currently false (to avoid unnecessary updates)
+                                        if (!dbFeature.selected) {
+                                            fetch('http://localhost:5000/api/update-feature-selection', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({
+                                                    dataset_id: datasetId,
+                                                    feature_name: col.column,
+                                                    selected: true
+                                                })
+                                            }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                        }
+                                    } else {
+                                        // Feature doesn't exist in DB, create it with selected=true
                                         fetch('http://localhost:5000/api/update-feature-selection', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
@@ -238,20 +277,9 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId }
                                         }).catch(err => console.error('Error auto-saving feature selection:', err));
                                     }
                                 } else {
-                                    // Feature doesn't exist in DB, create it with selected=true
-                                    fetch('http://localhost:5000/api/update-feature-selection', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({
-                                            dataset_id: datasetId,
-                                            feature_name: col.column,
-                                            selected: true
-                                        })
-                                    }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                    // Feature doesn't pass quality checks, use DB value or false
+                                    shouldBeSelected = dbFeature?.selected || false;
                                 }
-                            } else {
-                                // Feature doesn't pass quality checks, use DB value or false
-                                shouldBeSelected = dbFeature?.selected || false;
                             }
                             
                             return {
@@ -558,6 +586,38 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId }
                         <span className="stat-label">Quality Passed</span>
                         <span className="stat-value success">{qualityPassCount}</span>
                     </div>
+                    
+                    <button
+                        className="save-preprocess-btn"
+                        onClick={async () => {
+                            if (!datasetId) return;
+                            
+                            try {
+                                const response = await fetch('http://localhost:5000/api/save-preprocess-selection', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ record_id: datasetId })
+                                });
+                                
+                                if (response.ok) {
+                                    const data = await response.json();
+                                    setPreprocessSelectionSaved(true);
+                                    if (onPreprocessSelectionSaved) {
+                                        onPreprocessSelectionSaved();
+                                    }
+                                    alert('Preprocessing selection saved successfully!');
+                                } else {
+                                    const error = await response.json();
+                                    alert(`Failed to save: ${error.error || 'Unknown error'}`);
+                                }
+                            } catch (error) {
+                                console.error('Error saving preprocessing selection:', error);
+                                alert('Failed to save preprocessing selection');
+                            }
+                        }}
+                    >
+                        Save
+                    </button>
                 </div>
 
                 <div className="features-panel">

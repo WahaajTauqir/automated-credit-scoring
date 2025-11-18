@@ -119,6 +119,47 @@
   color: #48bb78;
 }
 
+/* Save Preprocessing Selection Button */
+.save-preprocess-btn {
+  margin-top: var(--spacing-md);
+  padding: 0.75rem 1.5rem;
+  background: linear-gradient(135deg, #2ea043 0%, #26a641 50%, #2ea043 100%);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-medium);
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 
+    0 2px 8px rgba(46, 160, 67, 0.3),
+    0 1px 4px rgba(46, 160, 67, 0.2);
+  width: 100%;
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+.save-preprocess-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #26a641 0%, #2ea043 50%, #26a641 100%);
+  transform: translateY(-1px);
+  box-shadow: 
+    0 4px 12px rgba(46, 160, 67, 0.4),
+    0 2px 6px rgba(46, 160, 67, 0.3);
+}
+
+.save-preprocess-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 
+    0 2px 6px rgba(46, 160, 67, 0.3),
+    0 1px 3px rgba(46, 160, 67, 0.2);
+}
+
+.save-preprocess-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
 /* ===== FEATURES SECTIONS CONTAINER ===== */
 .features-sections-container {
   display: grid;

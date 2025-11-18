@@ -46,15 +46,19 @@
 body,
 html {
   width: 100%;
-  height: 100%;
+  min-height: 100%;
   background-color: var(--bg-primary);
   font-family: var(--font-modern);
   color: var(--fg-primary);
+  overflow-x: hidden; /* Prevent horizontal scroll */
+  overflow-y: auto; /* Allow vertical scroll on default page */
 }
 
 #root {
   width: 100%;
   min-height: 100vh;
+  overflow-x: hidden; /* Prevent horizontal scroll */
+  overflow-y: auto; /* Allow vertical scroll on default page */
 }
 
 /* Main Page Wrapper */
@@ -62,6 +66,8 @@ html {
   min-height: 100vh;
   background: var(--bg-primary);
   position: relative;
+  overflow-x: hidden; /* Prevent horizontal scroll */
+  overflow-y: visible; /* Allow content to flow naturally */
 }
 
 /* Hero Info Section */

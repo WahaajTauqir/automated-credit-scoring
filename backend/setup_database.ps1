@@ -65,6 +65,24 @@ if (-not (Test-Path -Path ".env")) {
     }
 }
 
+Write-Host "Step 0: Cleaning up legacy tables..."
+Write-Host "-----------------------------------"
+$cleanupScript = @"
+try:
+    from db import get_db_connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS datasets CASCADE")
+    conn.commit()
+    cur.close()
+    conn.close()
+    print("🧹 Removed legacy 'datasets' table (if it existed).")
+except Exception as e:
+    print(f"⚠️  Warning: Could not drop legacy 'datasets' table automatically: {e}")
+"@
+& $pythonCmd -c $cleanupScript
+Write-Host ""
+
 Write-Host "`nStep 1: Validating current database schema..."
 Write-Host "-------------------------------------------"
 Write-Host "Note: This will automatically remove created_at columns from"

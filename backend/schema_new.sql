@@ -8,13 +8,13 @@ DROP TABLE IF EXISTS merged_bins CASCADE;
 DROP TABLE IF EXISTS bins CASCADE;
 DROP TABLE IF EXISTS binning_steps CASCADE;
 DROP TABLE IF EXISTS features CASCADE;
-DROP TABLE IF EXISTS datasets CASCADE;
+DROP TABLE IF EXISTS records CASCADE;
 
 -- =====================================================
--- 1. DATASETS TABLE
+-- 1. RECORDS TABLE
 -- Stores dataset/run information
 -- =====================================================
-CREATE TABLE datasets (
+CREATE TABLE records (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     file_path TEXT,
@@ -24,17 +24,19 @@ CREATE TABLE datasets (
     target_variable TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
-    identifier TEXT
+    identifier TEXT,
+    preprocess_selection BOOLEAN DEFAULT FALSE
 );
 
-COMMENT ON TABLE datasets IS 'Stores information about each credit scoring dataset/run';
-COMMENT ON COLUMN datasets.name IS 'Human-readable name for the dataset';
-COMMENT ON COLUMN datasets.file_path IS 'Path to the CSV file';
-COMMENT ON COLUMN datasets.total_features IS 'Total number of features in dataset';
-COMMENT ON COLUMN datasets.discrete_features IS 'Number of discrete/categorical features';
-COMMENT ON COLUMN datasets.continuous_features IS 'Number of continuous/numeric features';
-COMMENT ON COLUMN datasets.target_variable IS 'Name of the target/dependent variable';
-COMMENT ON COLUMN datasets.identifier IS 'Human readable identifier or artifact reference';
+COMMENT ON TABLE records IS 'Stores information about each credit scoring dataset/run';
+COMMENT ON COLUMN records.name IS 'Human-readable name for the dataset';
+COMMENT ON COLUMN records.file_path IS 'Path to the CSV file';
+COMMENT ON COLUMN records.total_features IS 'Total number of features in dataset';
+COMMENT ON COLUMN records.discrete_features IS 'Number of discrete/categorical features';
+COMMENT ON COLUMN records.continuous_features IS 'Number of continuous/numeric features';
+COMMENT ON COLUMN records.target_variable IS 'Name of the target/dependent variable';
+COMMENT ON COLUMN records.identifier IS 'Human readable identifier or artifact reference';
+COMMENT ON COLUMN records.preprocess_selection IS 'Whether preprocessing selection has been saved (true) or needs calculation (false)';
 
 -- =====================================================
 -- 2. FEATURES TABLE
@@ -42,7 +44,7 @@ COMMENT ON COLUMN datasets.identifier IS 'Human readable identifier or artifact 
 -- =====================================================
 CREATE TABLE features (
     id SERIAL PRIMARY KEY,
-    dataset_id INT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    dataset_id INT NOT NULL REFERENCES records(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     type VARCHAR(20) NOT NULL CHECK (type IN ('discrete', 'continuous')),
     selected BOOLEAN DEFAULT FALSE,
@@ -52,7 +54,7 @@ CREATE TABLE features (
 );
 
 COMMENT ON TABLE features IS 'Stores individual features/columns for each dataset';
-COMMENT ON COLUMN features.dataset_id IS 'Foreign key to datasets table';
+COMMENT ON COLUMN features.dataset_id IS 'Foreign key to records table';
 COMMENT ON COLUMN features.name IS 'Name of the feature/column';
 COMMENT ON COLUMN features.type IS 'Type of feature: discrete or continuous';
 COMMENT ON COLUMN features.selected IS 'Whether this feature is selected for analysis';
@@ -206,9 +208,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Trigger to automatically update updated_at for datasets
-CREATE TRIGGER update_datasets_updated_at
-    BEFORE UPDATE ON datasets
+-- Trigger to automatically update updated_at for records
+CREATE TRIGGER update_records_updated_at
+    BEFORE UPDATE ON records
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
@@ -217,7 +219,7 @@ CREATE TRIGGER update_datasets_updated_at
 -- =====================================================
 
 -- Uncomment to insert sample data:
--- INSERT INTO datasets (name, total_features, discrete_features, continuous_features, target_variable)
+-- INSERT INTO records (name, total_features, discrete_features, continuous_features, target_variable)
 -- VALUES ('Loan_Data_Run1', 30, 10, 20, 'default');
 
 -- INSERT INTO features (dataset_id, name, type, selected)
@@ -242,7 +244,7 @@ SELECT
     d.target_variable,
     d.created_at AS dataset_created_at
 FROM features f
-JOIN datasets d ON f.dataset_id = d.id;
+JOIN records d ON f.dataset_id = d.id;
 
 -- View to see all binning results with feature and dataset info
 CREATE OR REPLACE VIEW v_binning_results AS
@@ -267,7 +269,7 @@ SELECT
 FROM bins b
 JOIN binning_steps bs ON b.binning_step_id = bs.id
 JOIN features f ON bs.feature_id = f.id
-JOIN datasets d ON f.dataset_id = d.id
+JOIN records d ON f.dataset_id = d.id
 ORDER BY d.id, f.id, bs.step_type, b.bin_number;
 
 COMMENT ON VIEW v_binning_results IS 'Comprehensive view of all binning results with context';

@@ -2035,13 +2035,20 @@ def coarse_bin_continuous(df, var, target, bins=10):
             other_mask = (df[var] != most_frequent_value) & df[var].notna()
             
             # Bin other (non-dominant) values
+            # Create 9 bins for other values (1 bin for dominant = total 10 bins)
             other_data = df.loc[other_mask, var]
             if len(other_data) > 0:
-                # Use fewer bins for other values to avoid over-binning
-                other_bins = min(bins, max(3, len(other_data.unique())))
+                other_bins = bins - 1  # 9 bins for other values (1 for dominant = 10 total)
                 try:
                     _, bin_edges = pd.qcut(other_data, q=other_bins, retbins=True, labels=False, duplicates='drop')
                     n_other_bins = len(bin_edges) - 1
+                    
+                    # If qcut created fewer bins, use equal-width binning
+                    if n_other_bins < other_bins:
+                        min_val = other_data.min()
+                        max_val = other_data.max()
+                        bin_edges = np.linspace(min_val, max_val, other_bins + 1)
+                        n_other_bins = other_bins
                     
                     if n_other_bins > 0:
                         other_bin_labels = [f'c{i}' for i in range(2, n_other_bins + 2)]  # Start from c2
@@ -2053,13 +2060,33 @@ def coarse_bin_continuous(df, var, target, bins=10):
                             right=True
                         )
                     else:
-                        # If qcut fails, create a single bin for all other values
-                        df.loc[other_mask, f'{var}_binned'] = 'c2'
+                        # Fallback: create equal-width bins
+                        min_val = other_data.min()
+                        max_val = other_data.max()
+                        bin_edges = np.linspace(min_val, max_val, other_bins + 1)
+                        other_bin_labels = [f'c{i}' for i in range(2, other_bins + 2)]
+                        df.loc[other_mask, f'{var}_binned'] = pd.cut(
+                            other_data, 
+                            bins=bin_edges, 
+                            labels=other_bin_labels, 
+                            include_lowest=True, 
+                            right=True
+                        )
                 except (ValueError, Exception):
-                    # If qcut fails, create a single bin for all other values
-                    df.loc[other_mask, f'{var}_binned'] = 'c2'
+                    # If qcut fails, use equal-width binning
+                    min_val = other_data.min()
+                    max_val = other_data.max()
+                    bin_edges = np.linspace(min_val, max_val, other_bins + 1)
+                    other_bin_labels = [f'c{i}' for i in range(2, other_bins + 2)]
+                    df.loc[other_mask, f'{var}_binned'] = pd.cut(
+                        other_data, 
+                        bins=bin_edges, 
+                        labels=other_bin_labels, 
+                        include_lowest=True, 
+                        right=True
+                    )
             else:
-                # All values are the dominant value
+                # All values are the dominant value - create only 1 bin
                 n_other_bins = 0
             
             # Assign dominant value to c1
@@ -2070,12 +2097,38 @@ def coarse_bin_continuous(df, var, target, bins=10):
             
         else:
             # Standard binning for non-sparse columns
-            # Perform qcut to get bin edges and assign labels
-            _, bin_edges = pd.qcut(df[var], q=bins, retbins=True, labels=False, duplicates='drop')
-            n_bins = len(bin_edges) - 1
+            # Always create exactly 10 bins
+            # Try quantile-based binning first, fallback to equal-width if needed
+            try:
+                _, bin_edges = pd.qcut(df[var], q=bins, retbins=True, labels=False, duplicates='drop')
+                n_bins = len(bin_edges) - 1
+                
+                # If qcut created fewer than 10 bins, use equal-width binning instead
+                if n_bins < bins:
+                    # Create equal-width bins manually
+                    min_val = df[var].min()
+                    max_val = df[var].max()
+                    bin_edges = np.linspace(min_val, max_val, bins + 1)
+                    n_bins = bins
+            except (ValueError, Exception) as e:
+                # If qcut fails, use equal-width binning
+                try:
+                    min_val = df[var].min()
+                    max_val = df[var].max()
+                    bin_edges = np.linspace(min_val, max_val, bins + 1)
+                    n_bins = bins
+                except Exception:
+                    raise ValueError(f"No valid bins could be created for '{var}': {str(e)}")
             
             if n_bins <= 0:
                 raise ValueError(f"No valid bins could be created for '{var}'.")
+            
+            # Ensure exactly 10 bins
+            if n_bins != bins:
+                min_val = df[var].min()
+                max_val = df[var].max()
+                bin_edges = np.linspace(min_val, max_val, bins + 1)
+                n_bins = bins
             
             bin_labels = [f'c{i}' for i in range(1, n_bins + 1)]
             df[f'{var}_binned'] = pd.cut(df[var], bins=bin_edges, labels=bin_labels, include_lowest=True, right=True)
@@ -4743,12 +4796,24 @@ def upsert_single_record():
                 )
         
         # Update existing features (type and selection)
+        # NOTE: Only update selected if feature is explicitly in selected_columns
+        # This preserves the selected state from preprocessing step
+        # IMPORTANT: Never set selected=False - only set to True if in selected_columns
         for feature in existing_features:
             if feature['name'] in all_columns:
                 new_type = 'discrete' if feature['name'] in discrete_columns else 'continuous'
-                is_selected = feature['name'] in selected_columns
-                if feature['type'] != new_type or feature['selected'] != is_selected:
-                    update_feature(feature['id'], type=new_type, selected=is_selected)
+                # Only update selected to True if the feature is explicitly in selected_columns
+                # Never set selected to False - preserve existing state
+                if selected_columns and feature['name'] in selected_columns:
+                    # Feature is in selected_columns - set to True
+                    is_selected = True
+                    if feature['type'] != new_type or feature['selected'] != is_selected:
+                        update_feature(feature['id'], type=new_type, selected=is_selected)
+                else:
+                    # Feature not in selected_columns OR selected_columns is empty
+                    # Only update type, NEVER touch the selected state
+                    if feature['type'] != new_type:
+                        update_feature(feature['id'], type=new_type)
         
         # Update model_ready for features (set in Column Selection & Binning)
         try:
@@ -4973,6 +5038,33 @@ def update_feature_selection():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/save-preprocess-selection', methods=['POST'])
+def save_preprocess_selection():
+    """
+    Save the preprocess_selection flag for a record.
+    When this is set to true, the preprocessing calculations will be skipped
+    and features will be loaded from the database instead.
+    """
+    try:
+        data = request.get_json()
+        record_id = data.get('record_id')
+        
+        if not record_id:
+            return jsonify({"error": "Missing record_id"}), 400
+        
+        # Update the preprocess_selection flag
+        success = update_dataset(record_id, preprocess_selection=True)
+        
+        if success:
+            return jsonify({"success": True, "message": "Preprocessing selection saved successfully"})
+        else:
+            return jsonify({"error": "Failed to save preprocessing selection"}), 500
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/records', methods=['GET'])
 def get_records():
     """
@@ -5110,7 +5202,8 @@ def get_record(record_id):
             'continuous_features': dataset.get('continuous_features', 0),
             'binning_data': binning_data,  # New structured binning data
             'dashboard_selected_columns': model_ready_cols,
-            'final_selected_columns': final_selected_cols
+            'final_selected_columns': final_selected_cols,
+            'preprocess_selection': dataset.get('preprocess_selection', False)
         }
         
         return jsonify(result)

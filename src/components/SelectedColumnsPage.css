@@ -116,9 +116,12 @@ body {
 }
 
 /* Hide the browser's page-level horizontal scrollbar completely to remove the bottom bar.
-   Keep internal scrollbars (panels) intact by scoping their scrollbar styling separately. */
-html, body, #root {
-  /* Ensure no page-level overflow shows a scrollbar */
+   Keep internal scrollbars (panels) intact by scoping their scrollbar styling separately.
+   Only apply these styles when body has the 'no-scroll' class (added by SelectedColumnsPage). */
+body.no-scroll,
+html.no-scroll,
+#root.no-scroll {
+  /* Ensure no page-level overflow shows a scrollbar when on selected-columns page */
   overflow-x: hidden !important; /* hide horizontal scrollbar */
   overflow-y: hidden !important; /* hide vertical scrollbar for selected-columns route */
   scrollbar-width: none; /* Firefox - hide scrollbar */
@@ -126,14 +129,15 @@ html, body, #root {
   max-height: 100vh !important;
 }
 
-/* WebKit browsers: hide the root scrollbar */
-html::-webkit-scrollbar, body::-webkit-scrollbar {
+/* WebKit browsers: hide the root scrollbar when on selected-columns page */
+body.no-scroll::-webkit-scrollbar,
+html.no-scroll::-webkit-scrollbar {
   width: 0;
   height: 0;
 }
 
 /* Provide a layout-safe gutter so content doesn't shift when scrollbars are hidden */
-body {
+body.no-scroll {
   scrollbar-gutter: stable both-edges;
 }
 

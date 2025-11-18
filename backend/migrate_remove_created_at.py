@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Migration script to remove created_at columns from all tables except datasets.
+Migration script to remove created_at columns from all tables except records.
 Run this script to update existing databases.
 """
 
@@ -8,14 +8,14 @@ import sys
 from db import get_db_connection
 
 def drop_created_at_columns():
-    """Drop created_at columns from tables (except datasets)."""
+    """Drop created_at columns from tables (except records)."""
     conn = None
     cur = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Tables to remove created_at from (excluding datasets)
+        # Tables to remove created_at from (excluding records)
         tables_to_update = [
             'features',
             'binning_steps',
@@ -74,7 +74,7 @@ def drop_created_at_columns():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("Migration: Remove created_at from all tables (except datasets)")
+    print("Migration: Remove created_at from all tables (except records)")
     print("=" * 60)
     print()
     

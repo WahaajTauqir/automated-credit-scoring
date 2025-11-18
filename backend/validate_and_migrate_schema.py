@@ -30,10 +30,10 @@ def check_column_exists(cursor, table_name, column_name):
 def get_required_columns():
     """Return a dictionary of required columns for each table."""
     return {
-        'datasets': [
+        'records': [
             'id', 'name', 'file_path', 'total_features', 'discrete_features',
             'continuous_features', 'target_variable', 'created_at', 'updated_at',
-            'identifier'
+            'identifier', 'preprocess_selection'
         ],
         'features': [
             'id', 'dataset_id', 'name', 'type', 'selected', 'model_ready',
@@ -68,7 +68,7 @@ def validate_schema():
         cur = conn.cursor()
         
         required_tables = [
-            'datasets',
+            'records',
             'features',
             'binning_steps',
             'bins',
@@ -123,7 +123,7 @@ def remove_unwanted_columns():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Tables that should NOT have created_at (except datasets)
+        # Tables that should NOT have created_at (except records)
         tables_to_check = [
             'features',
             'binning_steps',
@@ -193,21 +193,22 @@ def apply_migrations():
         
         # Column type mappings for ALTER TABLE statements
         column_definitions = {
-            # datasets table
-            'datasets.id': 'SERIAL PRIMARY KEY',  # This should already exist
-            'datasets.name': 'TEXT NOT NULL',
-            'datasets.file_path': 'TEXT',
-            'datasets.total_features': 'INT',
-            'datasets.discrete_features': 'INT',
-            'datasets.continuous_features': 'INT',
-            'datasets.target_variable': 'TEXT',
-            'datasets.created_at': 'TIMESTAMP DEFAULT NOW()',
-            'datasets.updated_at': 'TIMESTAMP DEFAULT NOW()',
-            'datasets.identifier': 'TEXT',
+            # records table
+            'records.id': 'SERIAL PRIMARY KEY',  # This should already exist
+            'records.name': 'TEXT NOT NULL',
+            'records.file_path': 'TEXT',
+            'records.total_features': 'INT',
+            'records.discrete_features': 'INT',
+            'records.continuous_features': 'INT',
+            'records.target_variable': 'TEXT',
+            'records.created_at': 'TIMESTAMP DEFAULT NOW()',
+            'records.updated_at': 'TIMESTAMP DEFAULT NOW()',
+            'records.identifier': 'TEXT',
+            'records.preprocess_selection': 'BOOLEAN DEFAULT FALSE',
             
             # features table
             'features.id': 'SERIAL PRIMARY KEY',  # This should already exist
-            'features.dataset_id': 'INT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE',
+            'features.dataset_id': 'INT NOT NULL REFERENCES records(id) ON DELETE CASCADE',
             'features.name': 'TEXT NOT NULL',
             'features.type': 'VARCHAR(20) NOT NULL',
             'features.selected': 'BOOLEAN DEFAULT FALSE',

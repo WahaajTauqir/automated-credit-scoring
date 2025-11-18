@@ -43,6 +43,22 @@ if [ ! -f ".env" ]; then
 fi
 
 echo ""
+echo "Step 0: Cleaning up legacy tables..."
+echo "-----------------------------------"
+$PYTHON_CMD - <<'PY'
+try:
+    from db import get_db_connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS datasets CASCADE")
+    conn.commit()
+    cur.close()
+    conn.close()
+    print("🧹 Removed legacy 'datasets' table (if it existed).")
+except Exception as e:
+    print(f"⚠️  Warning: Could not drop legacy 'datasets' table automatically: {e}")
+PY
+echo ""
 echo "Step 1: Validating current database schema..."
 echo "-------------------------------------------"
 echo "Note: This will automatically remove created_at columns from"

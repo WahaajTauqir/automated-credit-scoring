@@ -1,6 +1,6 @@
 """
 New Database Layer for Credit Scoring Application
-Uses the restructured schema with datasets, features, binning_steps, bins, and merged_bins tables
+Uses the restructured schema with records, features, binning_steps, bins, and merged_bins tables
 """
 
 import psycopg2
@@ -147,19 +147,19 @@ def ensure_model_ready_column():
         conn.close()
 
 def ensure_dataset_identifier_column():
-    """Ensure the identifier column exists in the datasets table."""
+    """Ensure the identifier column exists in the records table."""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
             SELECT column_name
             FROM information_schema.columns
-            WHERE table_name='datasets' AND column_name='identifier'
+            WHERE table_name='records' AND column_name='identifier'
         """)
         if not cur.fetchone():
-            cur.execute("ALTER TABLE datasets ADD COLUMN identifier TEXT")
+            cur.execute("ALTER TABLE records ADD COLUMN identifier TEXT")
             conn.commit()
-            print("[DB] Added missing identifier column to datasets table")
+            print("[DB] Added missing identifier column to records table")
         else:
             print("[DB] identifier column already exists")
     except Exception as e:
@@ -235,7 +235,7 @@ def create_dataset(name: str, file_path: str, total_features: int,
     cur = conn.cursor()
     
     cur.execute("""
-        INSERT INTO datasets (name, file_path, total_features, discrete_features, 
+        INSERT INTO records (name, file_path, total_features, discrete_features, 
                             continuous_features, target_variable, identifier)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
@@ -254,7 +254,7 @@ def get_dataset(dataset_id: int) -> Optional[Dict]:
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    cur.execute("SELECT * FROM datasets WHERE id = %s", (dataset_id,))
+    cur.execute("SELECT * FROM records WHERE id = %s", (dataset_id,))
     dataset = cur.fetchone()
     
     cur.close()
@@ -268,7 +268,7 @@ def get_all_datasets() -> List[Dict]:
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    cur.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+    cur.execute("SELECT * FROM records ORDER BY created_at DESC")
     datasets = cur.fetchall()
     
     cur.close()
@@ -285,7 +285,7 @@ def get_all_datasets_with_features() -> List[Dict]:
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    cur.execute("SELECT * FROM datasets ORDER BY created_at DESC")
+    cur.execute("SELECT * FROM records ORDER BY created_at DESC")
     datasets = [dict(row) for row in cur.fetchall()]
     dataset_ids = [d['id'] for d in datasets]
     features_by_dataset: Dict[int, List[Dict]] = {d['id']: [] for d in datasets}
@@ -316,7 +316,7 @@ def get_latest_dataset() -> Optional[Dict]:
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    cur.execute("SELECT * FROM datasets ORDER BY created_at DESC LIMIT 1")
+    cur.execute("SELECT * FROM records ORDER BY created_at DESC LIMIT 1")
     dataset = cur.fetchone()
     
     cur.close()
@@ -347,7 +347,7 @@ def update_dataset(dataset_id: int, **kwargs) -> bool:
     values = list(kwargs.values()) + [dataset_id]
     
     cur.execute(f"""
-        UPDATE datasets 
+        UPDATE records 
         SET {set_clause}
         WHERE id = %s
     """, values)
@@ -364,7 +364,7 @@ def delete_dataset(dataset_id: int) -> bool:
     conn = get_db_connection()
     cur = conn.cursor()
     
-    cur.execute("DELETE FROM datasets WHERE id = %s", (dataset_id,))
+    cur.execute("DELETE FROM records WHERE id = %s", (dataset_id,))
     
     conn.commit()
     cur.close()
@@ -547,6 +547,8 @@ def update_feature(feature_id: int, **kwargs) -> bool:
 def update_features_selection(dataset_id: int, selected_feature_names: List[str]) -> bool:
     """
     Update which features are selected for analysis.
+    NOTE: This function no longer sets all features to FALSE first.
+    It only updates the specified features to maintain existing state.
     
     Args:
         dataset_id: ID of the dataset
@@ -558,11 +560,10 @@ def update_features_selection(dataset_id: int, selected_feature_names: List[str]
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # First, deselect all features for this dataset
-    cur.execute("UPDATE features SET selected = FALSE WHERE dataset_id = %s", (dataset_id,))
-    
-    # Then, select the specified features
+    # Only update the specified features - don't deselect all first
+    # This preserves the existing state of features not in the list
     if selected_feature_names:
+        # Set selected features to TRUE
         cur.execute("""
             UPDATE features 
             SET selected = TRUE 

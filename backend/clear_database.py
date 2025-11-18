@@ -44,7 +44,7 @@ def clear_all_data(force=False):
         'bins',
         'binning_steps',
         'features',
-        'datasets'
+        'records'
     ]
     
     if not force:
@@ -135,7 +135,7 @@ def show_database_stats():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        tables = ['datasets', 'features', 'binning_steps', 'bins', 'merged_bins', 'binning_totals']
+        tables = ['records', 'features', 'binning_steps', 'bins', 'merged_bins', 'binning_totals']
         
         print("\n" + "="*60)
         print("CURRENT DATABASE STATISTICS")
