@@ -1,5 +1,6 @@
 import Pagination from './Pagination';
 import './ColumnsPanel.css';
+import { RefObject } from 'react';
 
 interface ColumnPanelsProps {
   columns: string[];
@@ -22,6 +23,8 @@ interface ColumnPanelsProps {
   handleFineBin: (column: string) => Promise<void>;
   datasetPath: string;
   recordId?: number;
+  showCheckboxes?: boolean; // New prop to control checkbox visibility
+  columnListRef?: RefObject<HTMLDivElement>; // Ref for dynamic pagination calculation
 }
 
 const ColumnPanels = ({
@@ -44,6 +47,8 @@ const ColumnPanels = ({
   toggleSelectAllContinuous,
   datasetPath,
   recordId,
+  showCheckboxes = true, // Default to true for backward compatibility
+  columnListRef,
 }: ColumnPanelsProps) => {
   return (
     <div className="columns-layout">
@@ -51,7 +56,7 @@ const ColumnPanels = ({
       <div className="column-panel">
         <h3>All Columns</h3>
         <p className="column-count">Total: {columns.length} columns</p>
-        <div className="column-list">
+        <div className="column-list" ref={columnListRef}>
           {paginatedColumns.map((col, idx) => (
             <div key={idx} className="column-box">
               {col}
@@ -123,29 +128,35 @@ const ColumnPanels = ({
       {/* Discrete Columns */}
       <div className="column-panel">
         <h3>Discrete Columns</h3>
-        <div style={{ marginBottom: '8px' }}>
-          <button
-            className="assign-button"
-            onClick={() => toggleSelectAllDiscrete && toggleSelectAllDiscrete()}
-            title="Tick/untick all discrete variables"
-          >
-            Tick all discrete
-          </button>
-        </div>
+        {showCheckboxes && (
+          <div style={{ marginBottom: '8px' }}>
+            <button
+              className="assign-button"
+              onClick={() => toggleSelectAllDiscrete && toggleSelectAllDiscrete()}
+              title="Tick/untick all discrete variables"
+            >
+              Tick all discrete
+            </button>
+          </div>
+        )}
         <div className="column-list">
           {discreteColumns.length === 0 && (
             <div className="column-box">(None selected)</div>
           )}
           {discreteColumns.map((col, idx) => (
             <div key={idx} className="column-box">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={selectedForUnivariate.includes(col)}
-                  onChange={() => toggleSelectedForUnivariate(col)}
-                />
-                {col}
-              </label>
+              {showCheckboxes ? (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={selectedForUnivariate.includes(col)}
+                    onChange={() => toggleSelectedForUnivariate(col)}
+                  />
+                  {col}
+                </label>
+              ) : (
+                col
+              )}
             </div>
           ))}
         </div>
@@ -154,29 +165,35 @@ const ColumnPanels = ({
       {/* Continuous Columns */}
       <div className="column-panel">
         <h3>Continuous Columns</h3>
-        <div style={{ marginBottom: '8px' }}>
-          <button
-            className="assign-button"
-            onClick={() => toggleSelectAllContinuous && toggleSelectAllContinuous()}
-            title="Tick/untick all continuous variables"
-          >
-            Tick all continuous
-          </button>
-        </div>
+        {showCheckboxes && (
+          <div style={{ marginBottom: '8px' }}>
+            <button
+              className="assign-button"
+              onClick={() => toggleSelectAllContinuous && toggleSelectAllContinuous()}
+              title="Tick/untick all continuous variables"
+            >
+              Tick all continuous
+            </button>
+          </div>
+        )}
         <div className="column-list">
           {continuousColumns.length === 0 && (
             <div className="column-box">(None selected)</div>
           )}
           {continuousColumns.map((col, idx) => (
             <div key={idx} className="column-box">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={selectedForUnivariate.includes(col)}
-                  onChange={() => toggleSelectedForUnivariate(col)}
-                />
-                {col}
-              </label>
+              {showCheckboxes ? (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={selectedForUnivariate.includes(col)}
+                    onChange={() => toggleSelectedForUnivariate(col)}
+                  />
+                  {col}
+                </label>
+              ) : (
+                col
+              )}
             </div>
           ))}
         </div>

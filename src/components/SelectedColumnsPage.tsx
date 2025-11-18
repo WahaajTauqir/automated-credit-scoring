@@ -67,7 +67,84 @@ const SelectedColumnsPage = () => {
   const [activeColumn, setActiveColumn] = useState<string>('');
   const [currentStep, setCurrentStep] = useState(0); // Start at step 0 (Column Selection)
   const [currentPage, setCurrentPage] = useState(1);
-  const columnsPerPage = 7;
+  const [columnsPerPage, setColumnsPerPage] = useState(7);
+  const columnListRef = useRef<HTMLDivElement>(null);
+  
+  // Calculate columns per page based on available viewport height
+  useEffect(() => {
+    if (currentStep !== 0) return; // Only calculate for Classification step
+    
+    let resizeObserver: ResizeObserver | null = null;
+    let timeoutIds: NodeJS.Timeout[] = [];
+    
+    const calculateColumnsPerPage = () => {
+      let availableHeight = 0;
+      
+      // Try to get height from ref first
+      if (columnListRef.current) {
+        availableHeight = columnListRef.current.clientHeight;
+      }
+      
+      // Fallback: use viewport height calculation if ref height is not available
+      if (availableHeight <= 50) {
+        // Calculate based on viewport height minus estimated header/footer space
+        const viewportHeight = window.innerHeight;
+        const estimatedHeaderFooterSpace = 300; // navbar, progress bar, padding, etc.
+        availableHeight = viewportHeight - estimatedHeaderFooterSpace;
+        
+        // If still too small, use a reasonable default
+        if (availableHeight <= 50) {
+          availableHeight = 500; // fallback default
+        }
+      }
+      
+      // Estimate height per column box: padding (20px) + content (~40px) + gap (8px) ≈ 68px
+      // Using a more conservative estimate to account for radio buttons and variable content
+      const estimatedColumnHeight = 75; // pixels per column including gap
+      
+      // Calculate how many columns can fit, with a minimum of 3 and maximum of 20
+      const calculatedColumns = Math.max(3, Math.min(20, Math.floor(availableHeight / estimatedColumnHeight)));
+      
+      // Always update to ensure it changes from the initial 7
+      setColumnsPerPage(calculatedColumns);
+    };
+
+    // Calculate multiple times to ensure we get the right value
+    timeoutIds.push(setTimeout(calculateColumnsPerPage, 100));
+    timeoutIds.push(setTimeout(calculateColumnsPerPage, 300));
+    timeoutIds.push(setTimeout(calculateColumnsPerPage, 600));
+    timeoutIds.push(setTimeout(calculateColumnsPerPage, 1000));
+    
+    // Setup ResizeObserver
+    const setupObserver = () => {
+      if (columnListRef.current) {
+        if (resizeObserver) {
+          resizeObserver.disconnect();
+        }
+        resizeObserver = new ResizeObserver(() => {
+          calculateColumnsPerPage();
+        });
+        resizeObserver.observe(columnListRef.current);
+      } else {
+        const retryId = setTimeout(setupObserver, 200);
+        timeoutIds.push(retryId);
+      }
+    };
+    
+    timeoutIds.push(setTimeout(setupObserver, 500));
+    
+    // Also listen to window resize
+    window.addEventListener('resize', calculateColumnsPerPage);
+
+    return () => {
+      timeoutIds.forEach(id => clearTimeout(id));
+      window.removeEventListener('resize', calculateColumnsPerPage);
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+    };
+  }, [currentStep]);
+
   const totalPages = Math.ceil(columns.length / columnsPerPage);
   const paginatedColumns = columns.slice(
     (currentPage - 1) * columnsPerPage,
@@ -87,6 +164,7 @@ const SelectedColumnsPage = () => {
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
   const [selectedForModeling, setSelectedForModeling] = useState<string[]>(navModelReadyColumns || []); // For Column Selection & Binning (model_ready)
   const [selectedForFinalModeling, setSelectedForFinalModeling] = useState<string[]>(navFinalSelectedColumns || []); // For Model Training (final_selected)
+  const [preprocessingSelectedColumns, setPreprocessingSelectedColumns] = useState<string[]>([]); // Selected columns from PreprocessingDetails
   const [notification, setNotification] = useState<string | null>(null);
   const [scoreCardData, setScoreCardData] = useState<any>(null);
   const [testScoreLoading, setTestScoreLoading] = useState(false);
@@ -292,7 +370,7 @@ const SelectedColumnsPage = () => {
     if (navSelectedColumns) {
       console.log('✅ Setting selected columns:', navSelectedColumns.length);
       setSelectedColumns(navSelectedColumns);
-      // Also set selectedForUnivariate for Feature Selection checkboxes
+      // Also set selectedForUnivariate for Classification checkboxes
       setSelectedForUnivariate(navSelectedColumns);
     }
     if (navDiscreteColumns) {
@@ -455,6 +533,7 @@ const SelectedColumnsPage = () => {
   };
 
   const handleNextPage = () => {
+    const totalPages = Math.ceil(columns.length / columnsPerPage);
     if (currentPage < totalPages) {
       setCurrentPage(prev => prev + 1);
     }
@@ -465,14 +544,42 @@ const SelectedColumnsPage = () => {
       setCurrentPage(prev => prev - 1);
     }
   };
+  
+  // Reset to page 1 when columnsPerPage changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [columnsPerPage]);
 
   const handleProceedToFeatureSelection = async () => {
-    if (selectedForUnivariate.length === 0) {
-      alert('Please select at least one column.');
-      return;
-    }
-
+    // Fetch selected columns from database (from PreprocessingDetails)
     try {
+      if (!recordId) {
+        alert('No dataset ID available.');
+        return;
+      }
+
+      // Fetch selected features from database
+      const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      if (!featuresResp.ok) {
+        alert('Failed to fetch selected columns from database.');
+        return;
+      }
+
+      const featuresData = await featuresResp.json();
+      const selectedFeatureNames = featuresData
+        .filter((f: any) => f.selected === true)
+        .map((f: any) => f.name);
+
+      if (selectedFeatureNames.length === 0) {
+        alert('Please select at least one column in the Data Preprocessing section.');
+        return;
+      }
+
+      // Update the record with selected columns
       const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -480,7 +587,7 @@ const SelectedColumnsPage = () => {
           dataset_path: datasetPath,
           discrete_columns: discreteColumns,
           continuous_columns: continuousColumns,
-          selected_columns: selectedForUnivariate,
+          selected_columns: selectedFeatureNames,
           target_variable: targetVariable,
           record_id: recordId
         }),
@@ -488,7 +595,7 @@ const SelectedColumnsPage = () => {
       const data = await resp.json();
       if (!data.error) {
         if (data.id) setRecordId(data.id);
-        setSelectedColumns(selectedForUnivariate);
+        setSelectedColumns(selectedFeatureNames);
         setCurrentStep(2); // Move to Binning step (Step 2)
       } else {
         alert(`Error: ${data.error}`);
@@ -928,7 +1035,7 @@ const SelectedColumnsPage = () => {
 
       if (Array.isArray(recordData.selected_columns)) {
         setSelectedColumns(recordData.selected_columns);
-        // Load selectedForUnivariate from database for Feature Selection checkboxes
+        // Load selectedForUnivariate from database for Classification checkboxes
         setSelectedForUnivariate(recordData.selected_columns);
       }
 
@@ -1366,11 +1473,12 @@ const SelectedColumnsPage = () => {
         console.error('Error calculating bin metrics:', e);
       }
 
-      const woeApplied = updateLocalWoeState(col, data.woe_iv);
-      let latestWoe: Record<string, any> | null = null;
-      if (!woeApplied) {
-        latestWoe = await fetchWoeIv(col, data.bin_merges || {}, false);
-      }
+      // Always refresh WOE/IV from the backend to ensure we have the latest data
+      // This ensures the auto binning section shows updated WOE/IV after auto fine binning
+      const latestWoe = await fetchWoeIv(col, data.bin_merges || {}, false);
+      
+      // Also update local state with the response data as a fallback
+      updateLocalWoeState(col, data.woe_iv);
 
       await persistFineBinColumn(col, data.bin_merges || {}, {
         fineBinResults: updatedFine,
@@ -1489,6 +1597,27 @@ const SelectedColumnsPage = () => {
     });
 
     await Promise.all(workers);
+
+    // Refresh WOE/IV for all successfully processed columns to ensure UI is up-to-date
+    const successfullyProcessed = eligibleColumns.filter(
+      (col) => !failedColumns.some((f) => f.column === col)
+    );
+    
+    setFullAutoMonotonicProgress('Refreshing WOE/IV data...');
+    
+    // Refresh WOE/IV for all processed columns
+    const refreshPromises = successfullyProcessed.map(async (col) => {
+      try {
+        const mergesForCol = binMergeHistory[col] && Object.keys(binMergeHistory[col] || {}).length > 0
+          ? binMergeHistory[col]
+          : undefined;
+        await fetchWoeIv(col, mergesForCol, false);
+      } catch (err) {
+        console.error(`Failed to refresh WOE/IV for ${col}:`, err);
+      }
+    });
+    
+    await Promise.all(refreshPromises);
 
     setFullAutoMonotonicProgress(
       failedColumns.length === 0
@@ -2035,10 +2164,10 @@ const SelectedColumnsPage = () => {
   };
   const canGoNext = () => {
     switch (currentStep) {
-      case 0: // Data Preprocessing - can always proceed
-        return true;
-      case 1: // Feature Selection - need selected columns and target
-        return selectedForUnivariate.length > 0 && targetVariable !== '';
+      case 0: // Classification - need at least one column (discrete or continuous) and target variable
+        return (discreteColumns.length > 0 || continuousColumns.length > 0) && targetVariable !== '';
+      case 1: // Data Preprocessing - need at least one selected column from preprocessing
+        return preprocessingSelectedColumns.length > 0;
       case 2: // Binning - need at least one WOE-ready column
         return woeReadyColumns.size > 0;
       case 3: // Models - need at least one WOE-ready column
@@ -2083,9 +2212,44 @@ const SelectedColumnsPage = () => {
     loadSavedData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordId]);
-  // Load model_ready checkboxes when moving to Binning section (step 1)
+
+  // Load selected columns from database when on Data Preprocessing step
   useEffect(() => {
+    const loadPreprocessingSelectedColumns = async () => {
+      if (currentStep === 1 && recordId) {
+        try {
+          const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' }
+          });
+
+          if (featuresResp.ok) {
+            const featuresData = await featuresResp.json();
+            const selectedFeatureNames = featuresData
+              .filter((f: any) => f.selected === true)
+              .map((f: any) => f.name);
+            setPreprocessingSelectedColumns(selectedFeatureNames);
+          }
+        } catch (error) {
+          console.error('Error loading preprocessing selected columns:', error);
+        }
+      }
+    };
+
+    loadPreprocessingSelectedColumns();
+    // Poll every 2 seconds when on step 1 to update selected columns
+    let interval: NodeJS.Timeout | null = null;
     if (currentStep === 1 && recordId) {
+      interval = setInterval(loadPreprocessingSelectedColumns, 2000);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [currentStep, recordId]);
+  // Load model_ready checkboxes when moving to Classification section (step 0)
+  useEffect(() => {
+    if (currentStep === 0 && recordId) {
       fetch(`http://localhost:5000/api/dataset/${recordId}/features`)
         .then(r => r.json())
         .then((features: any[]) => {
@@ -2133,8 +2297,8 @@ const SelectedColumnsPage = () => {
   }, [currentStep, recordId]);
 
   useEffect(() => {
-    // Only trigger WOE/IV fetch when entering step 1 (Binning), 2 (Models), or 3 (Score Card), not in a loop
-    if (currentStep === 1 || currentStep === 2 || currentStep === 3) {
+    // Only trigger WOE/IV fetch when entering step 2 (Binning), 3 (Models), or 4 (Score Card), not in a loop
+    if (currentStep === 2 || currentStep === 3 || currentStep === 4) {
       const cols: string[] = selectedColumns;
       const missing = cols.filter((c) => !woeIvResults[c]);
       if (missing.length > 0) {
@@ -2151,7 +2315,7 @@ const SelectedColumnsPage = () => {
       <div className="page-container">
         <div className="progress-header">
           <div className="progress-bar" role="navigation" aria-label="Analysis steps">
-            {['Data Preprocessing', 'Feature Selection', 'Binning', 'Models', 'Score Card'].map((step, index) => (
+            {['Classification', 'Data Preprocessing', 'Binning', 'Models', 'Score Card'].map((step, index) => (
               <button
                 key={step}
                 className={`progress-step ${currentStep === index ? 'active' : ''} ${currentStep > index ? 'completed' : ''}`}
@@ -2182,15 +2346,14 @@ const SelectedColumnsPage = () => {
               className="progress-action-btn next-button"
               disabled={currentStep === 4 || !canGoNext()} // Updated to 4 since you have 5 steps (0-4)
               onClick={() => {
-                if (currentStep === 0) {
-                  // From Data Preprocessing, go to Feature Selection
-                  setCurrentStep(1);
-                } else if (currentStep === 1) {
-                  // From Feature Selection, go to Binning
-                  handleProceedToFeatureSelection();
-                } else if (currentStep < 4) {
-                  // For other steps, just increment
-                  setCurrentStep((prev) => Math.min(4, prev + 1));
+                if (currentStep < 4) {
+                  if (currentStep === 1) {
+                    // From Data Preprocessing, go to Binning (may need special handling)
+                    handleProceedToFeatureSelection();
+                  } else {
+                    // For other steps, just increment
+                    setCurrentStep((prev) => Math.min(4, prev + 1));
+                  }
                 }
               }}
               aria-label="Go to next step"
@@ -2265,45 +2428,8 @@ const SelectedColumnsPage = () => {
           )}
 
           <section className="content-section">
-            {/* Step 0: Data Preprocessing */}
+            {/* Step 0: Classification */}
             {currentStep === 0 && (
-              <div className="preprocessing-step" style={{ width: '100%' }}>
-                <PreprocessingDetails
-                  datasetId={recordId}
-                  onPreprocessingComplete={(newDatasetId) => {
-                    setPreprocessedDatasetId(newDatasetId);
-                    setRecordId(newDatasetId);
-                    setCurrentStep(1);
-                    showNotification('Data preprocessing completed successfully!');
-                    loadSavedData();
-                  }}
-                />
-
-                {/* Skip preprocessing option */}
-                <div className="preprocessing-skip" style={{ textAlign: 'center', marginTop: '20px' }}>
-                  <button
-                    className="skip-preprocessing-btn"
-                    onClick={() => setCurrentStep(1)}
-                    style={{
-                      background: 'transparent',
-                      border: '1px solid #ccc',
-                      color: '#666',
-                      padding: '8px 16px',
-                      borderRadius: '4px',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    Skip Preprocessing & Continue
-                  </button>
-                  <p style={{ fontSize: '12px', color: '#888', marginTop: '8px' }}>
-                    You can always come back to preprocessing later
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* Step 1: Feature Selection */}
-            {currentStep === 1 && (
               <div className="column-selection-step" style={{ width: '100%' }}>
                 <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '16px' }}>
                   <button
@@ -2365,15 +2491,8 @@ const SelectedColumnsPage = () => {
                   >
                     AI Separation (All Columns)
                   </button>
-                  <button
-                    className="assign-button"
-                    onClick={() => setCurrentStep(0)}
-                    style={{ background: '#28a745' }}
-                  >
-                    Back to Preprocessing
-                  </button>
                 </div>
-                <div style={{ width: '100%' }}>
+                <div style={{ width: '100%', flex: 1, display: 'flex', flexDirection: 'column' }}>
                   <ColumnPanels
                     columns={columns}
                     paginatedColumns={paginatedColumns}
@@ -2395,10 +2514,29 @@ const SelectedColumnsPage = () => {
                     handleFineBin={async () => { }}
                     datasetPath={datasetPath}
                     recordId={recordId}
+                    showCheckboxes={false}
+                    columnListRef={columnListRef}
                   />
                 </div>
               </div>
             )}
+
+            {/* Step 1: Data Preprocessing */}
+            {currentStep === 1 && (
+              <div className="preprocessing-step" style={{ width: '100%' }}>
+                <PreprocessingDetails
+                  datasetId={recordId}
+                  onPreprocessingComplete={(newDatasetId) => {
+                    setPreprocessedDatasetId(newDatasetId);
+                    setRecordId(newDatasetId);
+                    setCurrentStep(2);
+                    showNotification('Data preprocessing completed successfully!');
+                    loadSavedData();
+                  }}
+                />
+              </div>
+            )}
+
             {currentStep === 2 && (
               <div className="binning-mode-toggle">
                 <div className="mode-toggle-group">
@@ -2416,20 +2554,20 @@ const SelectedColumnsPage = () => {
                   >
                     Manual Binning
                   </button>
-                  {binningMode === 'auto' && (
-                    <button
-                      className={`mode-toggle-btn full-auto-action ${fullAutoMonotonicLoading ? 'loading' : ''}`}
-                      onClick={runFullAutoMonotonicBinning}
-                      disabled={fullAutoMonotonicLoading}
-                    >
-                      <span className="btn-icon">⚡</span>
-                      Full Auto Monotonic
-                    </button>
-                  )}
                 </div>
+                {binningMode === 'auto' && (
+                  <button
+                    className={`full-auto-monotonic-btn ${fullAutoMonotonicLoading ? 'loading' : ''}`}
+                    onClick={runFullAutoMonotonicBinning}
+                    disabled={fullAutoMonotonicLoading}
+                  >
+                    <span className="btn-icon">⚡</span>
+                    <span className="btn-text">Full Auto Monotonic</span>
+                  </button>
+                )}
               </div>
             )}
-            {binningMode === 'auto' && (
+            {currentStep === 2 && binningMode === 'auto' && (
               <div className="auto-binning-container">
                 <div className="auto-binning-grid">
                   {selectedColumns.map((col) => {

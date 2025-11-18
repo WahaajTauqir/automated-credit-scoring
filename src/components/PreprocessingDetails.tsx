@@ -1,95 +1,69 @@
 import React, { useState, useEffect } from 'react';
 import './PreprocessingDetails.css';
 
-interface QualityMetrics {
-    basic_info: {
-        num_rows: number;
-        num_columns: number;
-        memory_usage_mb: number;
-        total_cells: number;
-    };
-    missing_analysis: {
-        total_missing: number;
-        missing_percentage: number;
-        columns_with_missing: string[];
-        severity: string;
-    };
-    duplicate_analysis: {
-        exact_duplicates: number;
-        percentage_duplicates: number;
-        severity: string;
-    };
-    dtype_analysis: {
-        numeric_columns: string[];
-        categorical_columns: string[];
-        datetime_columns: string[];
-    };
-    outlier_analysis: Record<string, any>;
-    cardinality_analysis: Record<string, any>;
-    quality_score: number;
-    quality_rating: string;
+interface FeatureStats {
+    min?: number;
+    max?: number;
+    mean?: number;
+    median?: number;
+    std?: number;
 }
 
-interface PreprocessingStep {
-    step_name: string;
-    description: string;
-    status: 'pending' | 'completed' | 'error';
-    changes?: any;
-    sample_data?: any[];
-}
-
-interface ColumnChange {
-    column: string;
-    changes: string[];
+interface FeaturePreprocessingDetail {
+    name: string;
+    type: 'discrete' | 'continuous';
+    selected: boolean;
     original_dtype: string;
     processed_dtype: string;
     original_missing: number;
     processed_missing: number;
-    has_changes: boolean;
+    changes_applied: string[];
+    passes_quality_check: boolean; // Auto-checked if true
+    variance: number; // Variance of the processed feature
+    coefficient_of_variation?: number; // Coefficient of variation (CV)
+    repeat_rate?: number; // Repeat rate (percentage of most frequent value)
+    processed_stats?: FeatureStats; // Statistical information
+    original_stats?: FeatureStats; // Original statistical information
+    missingPercentage?: number; // Percentage of missing values
+    isRemoved?: boolean; // Whether the column was removed
+}
+
+interface DatasetStats {
+    total_rows: number;
+    total_features: number;
+    discrete_features: number;
+    continuous_features: number;
+    missing_values: number;
+    duplicates_removed: number;
+    quality_score: number;
 }
 
 interface PreprocessingDetailsProps {
     datasetId?: number;
-    onPreprocessingComplete?: (newDatasetId: number) => void;
+    onPreprocessingComplete?: () => void;
 }
 
-const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, onPreprocessingComplete }) => {
-    const [qualityMetrics, setQualityMetrics] = useState<QualityMetrics | null>(null);
-    const [preprocessingSteps, setPreprocessingSteps] = useState<PreprocessingStep[]>([]);
-    const [columnChanges, setColumnChanges] = useState<ColumnChange[]>([]);
+const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId }) => {
+    const [datasetStats, setDatasetStats] = useState<DatasetStats | null>(null);
+    const [features, setFeatures] = useState<FeaturePreprocessingDetail[]>([]);
     const [isLoading, setIsLoading] = useState(false);
-    const [activeTab, setActiveTab] = useState('quality');
-    const [previewData, setPreviewData] = useState<any>(null);
-    const [selectedColumns, setSelectedColumns] = useState<Set<string>>(new Set());
 
-    // Load quality metrics
-    const loadQualityMetrics = async () => {
+    // Load dataset stats and feature preprocessing details
+    const loadPreprocessingData = async () => {
         if (!datasetId) return;
 
         try {
-            const response = await fetch('http://localhost:5000/api/dataset-quality-metrics', {
+            setIsLoading(true);
+
+            // Load quality metrics for stats
+            const metricsResponse = await fetch('http://localhost:5000/api/dataset-quality-metrics', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ dataset_id: datasetId })
             });
 
-            if (response.ok) {
-                const data = await response.json();
-                if (data.success) {
-                    setQualityMetrics(data.quality_metrics);
-                }
-            }
-        } catch (error) {
-            console.error('Error loading quality metrics:', error);
-        }
-    };
-
-    // Load preprocessing steps
-    const loadPreprocessingSteps = async () => {
-        if (!datasetId) return;
-
-        try {
-            const response = await fetch('http://localhost:5000/api/preprocessing-steps-detailed', {
+            // Load column changes for feature details
+            const changesResponse = await fetch('http://localhost:5000/api/preprocessing-column-changes', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -98,594 +72,539 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                         detect_types: true,
                         handle_missing: true,
                         remove_duplicates: true,
-                        handle_outliers: true,
-                        encode_categorical: true
+                        handle_outliers: false,
+                        encode_categorical: false
                     }
                 })
             });
 
-            if (response.ok) {
-                const data = await response.json();
-                if (data.success) {
-                    setPreprocessingSteps(data.preprocessing_details.steps);
-                    setPreviewData(data.preprocessing_details);
-                }
-            }
-        } catch (error) {
-            console.error('Error loading preprocessing steps:', error);
-        }
-    };
-
-    // Load column changes
-    const loadColumnChanges = async () => {
-        if (!datasetId) return;
-
-        try {
-            const response = await fetch('http://localhost:5000/api/preprocessing-column-changes', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    dataset_id: datasetId,
-                    preprocessing_steps: {
-                        detect_types: true,
-                        handle_missing: true,
-                        remove_duplicates: true,
-                        handle_outliers: true,
-                        encode_categorical: true
-                    }
-                })
+            // Load features from database to get selected status
+            const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${datasetId}/features`, {
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' }
             });
 
-            if (response.ok) {
-                const data = await response.json();
-                if (data.success) {
-                    setColumnChanges(data.column_changes);
+            if (metricsResponse.ok && changesResponse.ok) {
+                const metricsData = await metricsResponse.json();
+                const changesData = await changesResponse.json();
+                let featuresFromDb: any[] = [];
+                
+                if (featuresResponse.ok) {
+                    featuresFromDb = await featuresResponse.json();
+                }
+
+                // Get total rows for calculating missing percentage
+                let totalRows = 1;
+                if (metricsData.success) {
+                    const metrics = metricsData.quality_metrics;
+                    totalRows = metrics.basic_info.num_rows || 1;
+                    setDatasetStats({
+                        total_rows: metrics.basic_info.num_rows,
+                        total_features: metrics.basic_info.num_columns,
+                        discrete_features: metrics.dtype_analysis.categorical_columns.length,
+                        continuous_features: metrics.dtype_analysis.numeric_columns.length,
+                        missing_values: metrics.missing_analysis.total_missing,
+                        duplicates_removed: metrics.duplicate_analysis.exact_duplicates,
+                        quality_score: metrics.quality_score
+                    });
+                } else if (changesData.summary?.original_shape?.[0]) {
+                    totalRows = changesData.summary.original_shape[0];
+                }
+
+                if (changesData.success) {
+                    
+                    // Create a map of feature names to their selected status from database
+                    const featuresMap = new Map(
+                        featuresFromDb.map((f: any) => [f.name, { selected: f.selected, exists: true }])
+                    );
+
+                    // Include ALL columns (including removed ones) so they can be unchecked
+                    const featuresList: FeaturePreprocessingDetail[] = changesData.column_changes
+                        .map((col: any) => {
+                            // Get variance (default to 0 if not provided)
+                            const variance = col.variance !== undefined ? col.variance : 0;
+                            const coefficientOfVariation = col.coefficient_of_variation !== undefined ? col.coefficient_of_variation : null;
+                            const repeatRate = col.repeat_rate !== undefined ? col.repeat_rate : null;
+                            
+                            // Calculate missing percentage
+                            const missingPercentage = totalRows > 0 ? (col.original_missing / totalRows) * 100 : 0;
+                            const hasHighMissingValues = missingPercentage > 95;
+                            
+                            // Check if column is removed
+                            const isRemoved = col.processed_dtype === 'REMOVED' || col.removed === true;
+                            
+                            // Check for low variance (CV < 5%)
+                            const hasLowVariance = coefficientOfVariation !== null && coefficientOfVariation < 5 && coefficientOfVariation > 0;
+                            
+                            // Check for high repeat rate (>95%) for continuous columns
+                            const isContinuous = col.processed_dtype === 'int64' || 
+                                                col.processed_dtype === 'float64' ||
+                                                col.processed_dtype === 'int32' ||
+                                                col.processed_dtype === 'float32';
+                            const hasHighRepeatRate = isContinuous && repeatRate !== null && repeatRate > 95;
+                            
+                            // Feature is fit for binning if:
+                            // 1. Not removed
+                            // 2. Has no missing values after preprocessing
+                            // 3. Has a valid data type (discrete or continuous)
+                            // 4. Has non-zero variance (variance > 0)
+                            // 5. Missing values are not > 95%
+                            // 6. Coefficient of variation is not < 5% (low variance)
+                            // 7. Repeat rate is not > 95% (high repeat rate for continuous)
+                            const hasZeroVariance = variance === 0 || (typeof variance === 'number' && Math.abs(variance) < 1e-10);
+                            const isFitForBinning = !isRemoved &&
+                                                   col.processed_missing === 0 && 
+                                                   col.processed_dtype !== 'REMOVED' &&
+                                                   !hasZeroVariance &&
+                                                   !hasHighMissingValues &&
+                                                   !hasLowVariance &&
+                                                   !hasHighRepeatRate &&
+                                                   (col.processed_dtype === 'categorical' || 
+                                                    col.processed_dtype === 'int64' || 
+                                                    col.processed_dtype === 'float64' ||
+                                                    col.processed_dtype === 'int32' ||
+                                                    col.processed_dtype === 'float32');
+                            
+                            const dbFeature = featuresMap.get(col.column);
+                            
+                            // Determine selection:
+                            // 1. If feature is removed, automatically uncheck it
+                            // 2. If feature has >95% missing values, automatically uncheck it
+                            // 3. If feature has zero variance, automatically uncheck it
+                            // 4. If feature has low variance (CV < 5%), automatically uncheck it (but allow user to select)
+                            // 5. If feature has high repeat rate (>95%), automatically uncheck it (but allow user to select)
+                            // 6. If feature passes quality checks, auto-select it
+                            // 7. Otherwise, use DB value (if exists) or false
+                            let shouldBeSelected: boolean;
+                            if (isRemoved || hasHighMissingValues || hasZeroVariance) {
+                                // Removed, high missing, or zero variance - automatically uncheck
+                                shouldBeSelected = false;
+                                // Update DB to uncheck if feature exists and is currently selected
+                                // Also create feature with selected=false if it doesn't exist (for removed/high missing/zero variance)
+                                if (dbFeature?.exists) {
+                                    if (dbFeature.selected) {
+                                        fetch('http://localhost:5000/api/update-feature-selection', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({
+                                                dataset_id: datasetId,
+                                                feature_name: col.column,
+                                                selected: false
+                                            })
+                                        }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                    }
+                                } else if (isRemoved || hasHighMissingValues || hasZeroVariance) {
+                                    // Create feature with selected=false for removed/high missing/zero variance features
+                                    fetch('http://localhost:5000/api/update-feature-selection', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({
+                                            dataset_id: datasetId,
+                                            feature_name: col.column,
+                                            selected: false
+                                        })
+                                    }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                }
+                            } else if (hasLowVariance || hasHighRepeatRate) {
+                                // Low variance or high repeat rate features - automatically uncheck but allow user to select
+                                shouldBeSelected = false;
+                                // Update DB to uncheck if feature exists and is currently selected
+                                if (dbFeature?.exists && dbFeature.selected) {
+                                    fetch('http://localhost:5000/api/update-feature-selection', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({
+                                            dataset_id: datasetId,
+                                            feature_name: col.column,
+                                            selected: false
+                                        })
+                                    }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                }
+                            } else if (isFitForBinning) {
+                                // Auto-select features that pass quality checks
+                                shouldBeSelected = true;
+                                // Update DB if feature exists, or create it if it doesn't
+                                if (dbFeature?.exists) {
+                                    // Only update if it's currently false (to avoid unnecessary updates)
+                                    if (!dbFeature.selected) {
+                                        fetch('http://localhost:5000/api/update-feature-selection', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({
+                                                dataset_id: datasetId,
+                                                feature_name: col.column,
+                                                selected: true
+                                            })
+                                        }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                    }
+                                } else {
+                                    // Feature doesn't exist in DB, create it with selected=true
+                                    fetch('http://localhost:5000/api/update-feature-selection', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({
+                                            dataset_id: datasetId,
+                                            feature_name: col.column,
+                                            selected: true
+                                        })
+                                    }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                }
+                            } else {
+                                // Feature doesn't pass quality checks, use DB value or false
+                                shouldBeSelected = dbFeature?.selected || false;
+                            }
+                            
+                            return {
+                                name: col.column,
+                                type: col.processed_dtype === 'categorical' ? 'discrete' : (col.processed_dtype === 'REMOVED' ? 'continuous' : 'continuous'),
+                                selected: shouldBeSelected,
+                                original_dtype: col.original_dtype,
+                                processed_dtype: col.processed_dtype,
+                                original_missing: col.original_missing,
+                                processed_missing: col.processed_missing,
+                                changes_applied: col.changes || [],
+                                passes_quality_check: isFitForBinning,
+                                variance: variance,
+                                coefficient_of_variation: coefficientOfVariation,
+                                repeat_rate: repeatRate,
+                                processed_stats: col.processed_stats,
+                                original_stats: col.original_stats,
+                                missingPercentage: missingPercentage,
+                                isRemoved: isRemoved
+                            };
+                        });
+                    // Include ALL features (including removed ones) so they can be displayed in dropped section
+                    setFeatures(featuresList);
                 }
             }
         } catch (error) {
-            console.error('Error loading column changes:', error);
-        }
-    };
-
-    // Apply preprocessing
-    const applyPreprocessing = async () => {
-        if (!datasetId) return;
-
-        try {
-            setIsLoading(true);
-            const response = await fetch('http://localhost:5000/api/preprocess-dataset', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    dataset_id: datasetId,
-                    preprocessing_steps: {
-                        detect_types: true,
-                        handle_missing: true,
-                        remove_duplicates: true,
-                        handle_outliers: true,
-                        encode_categorical: true
-                    }
-                })
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                if (data.success && onPreprocessingComplete) {
-                    onPreprocessingComplete(data.new_dataset_id);
-                }
-                // Reload all data
-                await Promise.all([
-                    loadQualityMetrics(),
-                    loadPreprocessingSteps(),
-                    loadColumnChanges()
-                ]);
-            }
-        } catch (error) {
-            console.error('Error applying preprocessing:', error);
+            console.error('Error loading preprocessing data:', error);
         } finally {
             setIsLoading(false);
         }
     };
 
-    // Load all data on component mount
+    // Toggle feature selection
+    const handleFeatureToggle = async (featureName: string) => {
+        // Find the current feature to get its current selected state
+        const currentFeature = features.find(f => f.name === featureName);
+        if (!currentFeature) return;
+        
+        const newSelectedState = !currentFeature.selected;
+        
+        // Update local state immediately for responsiveness
+        setFeatures(prev => prev.map(f => 
+            f.name === featureName ? { ...f, selected: newSelectedState } : f
+        ));
+
+        // Update database
+        try {
+            await fetch('http://localhost:5000/api/update-feature-selection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    dataset_id: datasetId,
+                    feature_name: featureName,
+                    selected: newSelectedState
+                })
+            });
+        } catch (error) {
+            console.error('Error updating feature selection:', error);
+            // Revert on error
+            setFeatures(prev => prev.map(f => 
+                f.name === featureName ? { ...f, selected: !newSelectedState } : f
+            ));
+        }
+    };
+
+    // Load data on mount
     useEffect(() => {
         if (datasetId) {
-            Promise.all([
-                loadQualityMetrics(),
-                loadPreprocessingSteps(),
-                loadColumnChanges()
-            ]);
+            loadPreprocessingData();
         }
     }, [datasetId]);
 
-    // Handle column selection
-    const handleColumnSelect = (columnName: string) => {
-        setSelectedColumns(prev => {
-            const newSelected = new Set(prev);
-            if (newSelected.has(columnName)) {
-                newSelected.delete(columnName);
-            } else {
-                newSelected.add(columnName);
-            }
-            return newSelected;
-        });
-    };
+    const selectedFeatures = features.filter(f => f.selected);
+    const droppedFeatures = features.filter(f => !f.selected);
+    const selectedCount = selectedFeatures.length;
+    const droppedCount = droppedFeatures.length;
+    const qualityPassCount = features.filter(f => f.passes_quality_check).length;
 
-    // Handle select all/none
-    const handleSelectAll = () => {
-        if (selectedColumns.size === columnChanges.length) {
-            setSelectedColumns(new Set());
-        } else {
-            setSelectedColumns(new Set(columnChanges.map(col => col.column)));
-        }
-    };
-
-    const getSeverityColor = (severity: string) => {
-        switch (severity.toLowerCase()) {
-            case 'high': return '#ff6b6b';
-            case 'medium': return '#ffd93d';
-            case 'low': return '#6bcf7f';
-            default: return '#cccccc';
-        }
-    };
-
-    const getStatusIcon = (status: string) => {
-        switch (status) {
-            case 'completed': return '✅';
-            case 'error': return '❌';
-            case 'pending': return '⏳';
-            default: return '🔵';
-        }
-    };
-
-    return (
-        <div className="preprocessing-grid">
-            {/* Header */}
-            <div className="grid-header">
-                <h1>Data Preprocessing Dashboard</h1>
-                <p>Comprehensive data quality assessment and preprocessing pipeline</p>
-            </div>
-
-            {/* Navigation Tabs */}
-            <div className="nav-tabs">
-                <button
-                    className={`tab-button ${activeTab === 'quality' ? 'active' : ''}`}
-                    onClick={() => setActiveTab('quality')}
-                >
-                    📊 Quality Report
-                </button>
-                <button
-                    className={`tab-button ${activeTab === 'pipeline' ? 'active' : ''}`}
-                    onClick={() => setActiveTab('pipeline')}
-                >
-                    ⚙️ Preprocessing Pipeline
-                </button>
-                <button
-                    className={`tab-button ${activeTab === 'changes' ? 'active' : ''}`}
-                    onClick={() => setActiveTab('changes')}
-                >
-                    🔄 Column Changes
-                </button>
-            </div>
-
-            {/* Quality Metrics Grid */}
-            {activeTab === 'quality' && qualityMetrics && (
-                <div className="tab-content">
-                    <div className="section-header">
-                        <h2>Data Quality Assessment</h2>
-                        <div className="quality-score">
-                            <div className="score-circle">
-                                <span className="score-value">{qualityMetrics.quality_score}</span>
-                                <span className="score-label">/100</span>
-                            </div>
-                            <div className="score-rating">
-                                <span className="rating">{qualityMetrics.quality_rating}</span>
-                                <span className="rating-description">Overall Quality</span>
-                            </div>
-                        </div>
+    // Helper function to render feature card
+    const renderFeatureCard = (feature: FeaturePreprocessingDetail, index: number, isSelected: boolean) => {
+        const hasZeroVariance = feature.variance === 0 || (typeof feature.variance === 'number' && Math.abs(feature.variance) < 1e-10);
+        const hasHighMissing = feature.missingPercentage !== undefined && feature.missingPercentage > 95;
+        const hasLowVariance = feature.coefficient_of_variation !== undefined && feature.coefficient_of_variation < 5 && feature.coefficient_of_variation > 0;
+        const hasHighRepeatRate = feature.type === 'continuous' && feature.repeat_rate !== undefined && feature.repeat_rate > 95;
+        // Low variance and high repeat rate features are selectable (not disabled), but zero variance, high missing, and removed are disabled
+        const shouldDisable = hasZeroVariance || hasHighMissing || feature.isRemoved;
+        const disableReason = hasZeroVariance ? "This feature has zero variance and cannot be selected" 
+                              : hasHighMissing ? `This feature has ${feature.missingPercentage.toFixed(1)}% missing values (>95%) and cannot be selected`
+                              : feature.isRemoved ? "This feature was removed during preprocessing"
+                              : "";
+        return (
+            <div
+                key={feature.name}
+                className={`feature-card ${feature.selected ? 'selected' : ''} ${hasZeroVariance ? 'zero-variance' : ''} ${hasHighMissing ? 'high-missing' : ''} ${hasLowVariance ? 'low-variance' : ''} ${hasHighRepeatRate ? 'high-repeat-rate' : ''}`}
+            >
+                <div className="feature-header">
+                    <div className="checkbox-wrapper">
+                        <input
+                            type="checkbox"
+                            id={`feature-${index}`}
+                            checked={feature.selected}
+                            onChange={() => handleFeatureToggle(feature.name)}
+                            disabled={shouldDisable}
+                            className="feature-checkbox"
+                            title={disableReason}
+                        />
+                        <label htmlFor={`feature-${index}`}></label>
                     </div>
-
-                    <div className="metrics-grid">
-                        {/* Basic Info Card */}
-                        <div className="metric-card basic-info">
-                            <div className="card-header">
-                                <span className="card-icon">📋</span>
-                                <h3>Dataset Overview</h3>
+                    <div className="feature-name-container">
+                        <div className="feature-name">{feature.name}</div>
+                        <div className="feature-type-badge">{feature.type}</div>
+                        {hasZeroVariance && (
+                            <div className="quality-badge" style={{ backgroundColor: '#ef4444', color: 'white', marginLeft: '8px' }}>
+                                Zero Variance
                             </div>
-                            <div className="card-content">
-                                <div className="info-grid">
-                                    <div className="info-item">
-                                        <span className="info-label">Rows</span>
-                                        <span className="info-value">{qualityMetrics.basic_info.num_rows.toLocaleString()}</span>
-                                    </div>
-                                    <div className="info-item">
-                                        <span className="info-label">Columns</span>
-                                        <span className="info-value">{qualityMetrics.basic_info.num_columns}</span>
-                                    </div>
-                                    <div className="info-item">
-                                        <span className="info-label">Memory</span>
-                                        <span className="info-value">{qualityMetrics.basic_info.memory_usage_mb} MB</span>
-                                    </div>
-                                    <div className="info-item">
-                                        <span className="info-label">Total Cells</span>
-                                        <span className="info-value">{qualityMetrics.basic_info.total_cells.toLocaleString()}</span>
-                                    </div>
-                                </div>
+                        )}
+                        {hasHighMissing && !hasZeroVariance && (
+                            <div className="quality-badge" style={{ backgroundColor: '#f59e0b', color: 'white', marginLeft: '8px' }}>
+                                High Missing ({feature.missingPercentage.toFixed(1)}%)
                             </div>
-                        </div>
-
-                        {/* Missing Values Card */}
-                        <div className="metric-card missing-values">
-                            <div className="card-header">
-                                <span className="card-icon">❓</span>
-                                <h3>Missing Values</h3>
+                        )}
+                        {hasLowVariance && !hasZeroVariance && !hasHighMissing && (
+                            <div className="quality-badge" style={{ backgroundColor: '#eab308', color: 'white', marginLeft: '8px' }}>
+                                Low Variance (CV: {feature.coefficient_of_variation.toFixed(2)}%)
                             </div>
-                            <div className="card-content">
-                                <div className="metric-main">
-                                    <span className="metric-value">{qualityMetrics.missing_analysis.total_missing}</span>
-                                    <span className="metric-percentage">
-                                        ({qualityMetrics.missing_analysis.missing_percentage}%)
-                                    </span>
-                                </div>
-                                <div
-                                    className="severity-badge"
-                                    style={{ backgroundColor: getSeverityColor(qualityMetrics.missing_analysis.severity) }}
-                                >
-                                    {qualityMetrics.missing_analysis.severity} Severity
-                                </div>
-                                <div className="metric-details">
-                                    <span>{qualityMetrics.missing_analysis.columns_with_missing.length} columns affected</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Duplicates Card */}
-                        <div className="metric-card duplicates">
-                            <div className="card-header">
-                                <span className="card-icon">🔍</span>
-                                <h3>Duplicate Rows</h3>
-                            </div>
-                            <div className="card-content">
-                                <div className="metric-main">
-                                    <span className="metric-value">{qualityMetrics.duplicate_analysis.exact_duplicates}</span>
-                                    <span className="metric-percentage">
-                                        ({qualityMetrics.duplicate_analysis.percentage_duplicates}%)
-                                    </span>
-                                </div>
-                                <div
-                                    className="severity-badge"
-                                    style={{ backgroundColor: getSeverityColor(qualityMetrics.duplicate_analysis.severity) }}
-                                >
-                                    {qualityMetrics.duplicate_analysis.severity} Severity
-                                </div>
-                                <div className="metric-details">
-                                    <span>Exact duplicate rows detected</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Data Types Card */}
-                        <div className="metric-card data-types">
-                            <div className="card-header">
-                                <span className="card-icon">🎯</span>
-                                <h3>Data Types</h3>
-                            </div>
-                            <div className="card-content">
-                                <div className="type-distribution">
-                                    <div className="type-item">
-                                        <span className="type-name">Numeric</span>
-                                        <span className="type-count">
-                                            {qualityMetrics.dtype_analysis.numeric_columns.length}
-                                        </span>
-                                    </div>
-                                    <div className="type-item">
-                                        <span className="type-name">Categorical</span>
-                                        <span className="type-count">
-                                            {qualityMetrics.dtype_analysis.categorical_columns.length}
-                                        </span>
-                                    </div>
-                                    <div className="type-item">
-                                        <span className="type-name">Datetime</span>
-                                        <span className="type-count">
-                                            {qualityMetrics.dtype_analysis.datetime_columns.length}
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Outliers Card */}
-                        <div className="metric-card outliers">
-                            <div className="card-header">
-                                <span className="card-icon">📊</span>
-                                <h3>Outlier Analysis</h3>
-                            </div>
-                            <div className="card-content">
-                                <div className="outlier-summary">
-                                    {Object.entries(qualityMetrics.outlier_analysis).slice(0, 3).map(([col, analysis]) => (
-                                        <div key={col} className="outlier-item">
-                                            <span className="column-name">{col}</span>
-                                            <span className="outlier-count">{analysis.outliers_count} outliers</span>
-                                            <span className="outlier-percentage">({analysis.outliers_percentage}%)</span>
-                                        </div>
-                                    ))}
-                                </div>
-                                {Object.keys(qualityMetrics.outlier_analysis).length > 3 && (
-                                    <div className="more-items">
-                                        +{Object.keys(qualityMetrics.outlier_analysis).length - 3} more columns
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Preprocessing Pipeline Grid */}
-            {activeTab === 'pipeline' && (
-                <div className="tab-content">
-                    <div className="section-header">
-                        <h2>Preprocessing Pipeline</h2>
-                        <p>Step-by-step data transformation process</p>
-                    </div>
-
-                    <div className="pipeline-grid">
-                        {preprocessingSteps.map((step, index) => (
-                            <div key={step.step_name} className={`pipeline-step ${step.status}`}>
-                                <div className="step-header">
-                                    <div className="step-number">{(index + 1).toString().padStart(2, '0')}</div>
-                                    <div className="step-title">
-                                        <h3>{step.step_name}</h3>
-                                        <span className="step-status">
-                                            {getStatusIcon(step.status)} {step.status}
-                                        </span>
-                                    </div>
-                                </div>
-
-                                <div className="step-description">
-                                    {step.description}
-                                </div>
-
-                                {step.changes && (
-                                    <div className="step-changes">
-                                        <h4>Changes Applied:</h4>
-                                        {step.step_name === 'Type Detection' && (
-                                            <div className="change-details">
-                                                <div className="change-item">
-                                                    <span>Discrete Columns:</span>
-                                                    <strong>{step.changes.discrete_count}</strong>
-                                                </div>
-                                                <div className="change-item">
-                                                    <span>Continuous Columns:</span>
-                                                    <strong>{step.changes.continuous_count}</strong>
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {step.step_name === 'Missing Values Treatment' && (
-                                            <div className="change-details">
-                                                <div className="change-item">
-                                                    <span>Missing Values Before:</span>
-                                                    <strong>{step.changes.total_missing_before}</strong>
-                                                </div>
-                                                <div className="change-item">
-                                                    <span>Missing Values After:</span>
-                                                    <strong>{step.changes.total_missing_after}</strong>
-                                                </div>
-                                                <div className="change-item highlight">
-                                                    <span>Values Imputed:</span>
-                                                    <strong>{step.changes.total_missing_before - step.changes.total_missing_after}</strong>
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {step.step_name === 'Duplicate Removal' && (
-                                            <div className="change-details">
-                                                <div className="change-item">
-                                                    <span>Rows Before:</span>
-                                                    <strong>{step.changes.rows_before}</strong>
-                                                </div>
-                                                <div className="change-item">
-                                                    <span>Rows After:</span>
-                                                    <strong>{step.changes.rows_after}</strong>
-                                                </div>
-                                                <div className="change-item highlight">
-                                                    <span>Duplicates Removed:</span>
-                                                    <strong>{step.changes.duplicates_removed}</strong>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-
-                                {step.sample_data && step.sample_data.length > 0 && (
-                                    <div className="step-preview">
-                                        <h4>Data Preview:</h4>
-                                        <div className="preview-table">
-                                            <div className="table-scroll-container">
-                                                <table>
-                                                    <thead>
-                                                        <tr>
-                                                            {Object.keys(step.sample_data[0]).slice(0, 4).map(key => (
-                                                                <th key={key}>{key}</th>
-                                                            ))}
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {step.sample_data.slice(0, 3).map((row, idx) => (
-                                                            <tr key={idx}>
-                                                                {Object.values(row).slice(0, 4).map((value, cellIdx) => (
-                                                                    <td key={cellIdx}>{String(value)}</td>
-                                                                ))}
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-
-            {/* Column Changes Grid */}
-            {activeTab === 'changes' && (
-                <div className="tab-content">
-                    <div className="section-header">
-                        <h2>Column Changes Analysis</h2>
-                        <p>Detailed view of transformations applied to each column</p>
-                        <div className="columns-count">
-                            Total Columns: {columnChanges.length} | Selected: {selectedColumns.size}
-                        </div>
-                    </div>
-
-                    <div className="changes-summary">
-                        <div className="summary-card">
-                            <span className="summary-value">
-                                {columnChanges.filter(c => c.has_changes).length}
-                            </span>
-                            <span className="summary-label">Columns Modified</span>
-                        </div>
-                        <div className="summary-card">
-                            <span className="summary-value">
-                                {columnChanges.filter(c => c.original_dtype !== c.processed_dtype).length}
-                            </span>
-                            <span className="summary-label">Type Changes</span>
-                        </div>
-                        <div className="summary-card">
-                            <span className="summary-value">
-                                {columnChanges.filter(c => c.original_missing > c.processed_missing).length}
-                            </span>
-                            <span className="summary-label">Missing Values Treated</span>
-                        </div>
-                        <div className="summary-card">
-                            <span className="summary-value">
-                                {selectedColumns.size}
-                            </span>
-                            <span className="summary-label">Selected Columns</span>
-                        </div>
-                    </div>
-
-                    {/* Selection Controls */}
-                    <div className="selection-controls">
-                        <div className="select-all-container">
-                            <label className="select-all-checkbox">
-                                <input
-                                    type="checkbox"
-                                    checked={selectedColumns.size === columnChanges.length && columnChanges.length > 0}
-                                    onChange={handleSelectAll}
-                                    disabled={columnChanges.length === 0}
-                                />
-                                <span className="checkmark"></span>
-                                {selectedColumns.size === columnChanges.length && columnChanges.length > 0 ? 'Deselect All' : 'Select All'}
-                            </label>
-                        </div>
-                        {selectedColumns.size > 0 && (
-                            <div className="selection-actions">
-                                <button className="btn-secondary btn-small">
-                                    Use Selected ({selectedColumns.size})
-                                </button>                             
+                        )}
+                        {hasHighRepeatRate && !hasZeroVariance && !hasHighMissing && !hasLowVariance && (
+                            <div className="quality-badge" style={{ backgroundColor: '#eab308', color: 'white', marginLeft: '8px' }}>
+                                High Repeat Rate ({feature.repeat_rate.toFixed(1)}%)
                             </div>
                         )}
                     </div>
+                </div>
 
-                    <div className="changes-grid">
-                        <div className="changes-header">
-                            <div className="column-number-header">#</div>
-                            <div className="checkbox-column">
-                                <span>Select</span>
-                            </div>
-                            <div>Column Name</div>
-                            <div>Data Type</div>
-                            <div>Missing Values</div>
-                            <div>Changes Applied</div>
-                        </div>
+                <div className="feature-details">
+                    <div className="detail-row">
+                        <span className="detail-label">Data Type:</span>
+                        <span className="detail-value">
+                            {feature.original_dtype !== feature.processed_dtype ? (
+                                <>
+                                    <span className="old-value">{feature.original_dtype}</span>
+                                    <span className="arrow">→</span>
+                                    <span className="new-value">{feature.processed_dtype}</span>
+                                </>
+                            ) : (
+                                feature.processed_dtype
+                            )}
+                        </span>
+                    </div>
+                    
+                    <div className="detail-row">
+                        <span className="detail-label">Missing Values:</span>
+                        <span className="detail-value">
+                            {feature.original_missing > 0 ? (
+                                <>
+                                    <span className="old-value">{feature.original_missing}</span>
+                                    <span className="arrow">→</span>
+                                    <span className="new-value success">{feature.processed_missing}</span>
+                                </>
+                            ) : (
+                                <span className="success">{feature.processed_missing}</span>
+                            )}
+                        </span>
+                    </div>
 
-                        {columnChanges.map((column, index) => (
-                            <div key={column.column} className={`changes-row ${column.has_changes ? 'has-changes' : ''} ${selectedColumns.has(column.column) ? 'selected' : ''}`}>
-                                <div className="column-number">
-                                    {index + 1}
-                                </div>
-                                <div className="checkbox-column">
-                                    <label className="column-checkbox">
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedColumns.has(column.column)}
-                                            onChange={() => handleColumnSelect(column.column)}
-                                        />
-                                        <span className="checkmark"></span>
-                                    </label>
-                                </div>
-                                <div className="column-info">
-                                    <span className="column-name">{column.column}</span>
-                                    {column.has_changes && <span className="change-indicator">●</span>}
-                                </div>
-
-                                <div className="type-info">
-                                    <span className={`type-badge ${column.original_dtype !== column.processed_dtype ? 'changed' : ''}`}>
-                                        {column.processed_dtype}
-                                    </span>
-                                    {column.original_dtype !== column.processed_dtype && (
-                                        <span className="type-change">→ {column.processed_dtype}</span>
-                                    )}
-                                </div>
-
-                                <div className="missing-info">
-                                    <div className="missing-comparison">
-                                        <span className="before">{column.original_missing}</span>
-                                        {column.original_missing !== column.processed_missing && (
-                                            <span className="arrow">→</span>
-                                        )}
-                                        <span className="after">{column.processed_missing}</span>
-                                    </div>
-                                    {column.original_missing > column.processed_missing && (
-                                        <span className="improvement">Improved</span>
-                                    )}
-                                </div>
-
-                                <div className="changes-info">
-                                    {column.changes.length > 0 ? (
-                                        <div className="changes-list">
-                                            {column.changes.map((change, idx) => (
-                                                <span key={idx} className="change-tag">{change}</span>
-                                            ))}
-                                        </div>
+                    {(feature.type === 'continuous' || (feature.type === 'discrete' && feature.variance !== undefined)) && (
+                        <>
+                            <div className="detail-row">
+                                <span className="detail-label">Variance:</span>
+                                <span className="detail-value">
+                                    {feature.variance === 0 || (typeof feature.variance === 'number' && Math.abs(feature.variance) < 1e-10) ? (
+                                        <span className="old-value" style={{ color: '#ef4444' }}>0 (Zero Variance)</span>
                                     ) : (
-                                        <span className="no-changes">No changes applied</span>
+                                        <span className="success">{typeof feature.variance === 'number' ? feature.variance.toFixed(6) : 'N/A'}</span>
                                     )}
-                                </div>
+                                </span>
                             </div>
-                        ))}
+                            {feature.coefficient_of_variation !== undefined && feature.coefficient_of_variation !== null && (
+                                <div className="detail-row">
+                                    <span className="detail-label">Coefficient of Variation:</span>
+                                    <span className="detail-value">
+                                        <span className={hasLowVariance ? 'old-value' : 'success'} style={hasLowVariance ? { color: '#eab308' } : {}}>
+                                            {feature.coefficient_of_variation.toFixed(2)}%
+                                        </span>
+                                    </span>
+                                </div>
+                            )}
+                        </>
+                    )}
+
+                    {feature.type === 'continuous' && feature.repeat_rate !== undefined && feature.repeat_rate !== null && (
+                        <div className="detail-row">
+                            <span className="detail-label">Repeat Rate:</span>
+                            <span className="detail-value">
+                                <span className={hasHighRepeatRate ? 'old-value' : 'success'} style={hasHighRepeatRate ? { color: '#eab308' } : {}}>
+                                    {feature.repeat_rate.toFixed(2)}%
+                                </span>
+                            </span>
+                        </div>
+                    )}
+
+                    {/* Show statistics for selected features */}
+                    {feature.selected && feature.processed_stats && (
+                        <div className="detail-row">
+                            <span className="detail-label">Statistics:</span>
+                            <div className="stats-grid">
+                                {feature.processed_stats.mean !== undefined && (
+                                    <div className="stat-item-small">
+                                        <span className="stat-label-small">Mean:</span>
+                                        <span className="stat-value-small">{feature.processed_stats.mean.toFixed(4)}</span>
+                                    </div>
+                                )}
+                                {feature.processed_stats.median !== undefined && (
+                                    <div className="stat-item-small">
+                                        <span className="stat-label-small">Median:</span>
+                                        <span className="stat-value-small">{feature.processed_stats.median.toFixed(4)}</span>
+                                    </div>
+                                )}
+                                {feature.processed_stats.std !== undefined && (
+                                    <div className="stat-item-small">
+                                        <span className="stat-label-small">Std Dev:</span>
+                                        <span className="stat-value-small">{feature.processed_stats.std.toFixed(4)}</span>
+                                    </div>
+                                )}
+                                {feature.processed_stats.min !== undefined && (
+                                    <div className="stat-item-small">
+                                        <span className="stat-label-small">Min:</span>
+                                        <span className="stat-value-small">{feature.processed_stats.min.toFixed(4)}</span>
+                                    </div>
+                                )}
+                                {feature.processed_stats.max !== undefined && (
+                                    <div className="stat-item-small">
+                                        <span className="stat-label-small">Max:</span>
+                                        <span className="stat-value-small">{feature.processed_stats.max.toFixed(4)}</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {feature.changes_applied.length > 0 && (
+                        <div className="detail-row">
+                            <span className="detail-label">Preprocessing Applied:</span>
+                            <div className="changes-list">
+                                {feature.changes_applied.map((change, idx) => (
+                                    <span key={idx} className="change-badge">{change}</span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    return (
+        <div className="preprocessing-container">
+            <div className="preprocessing-layout">
+                <div className="stats-panel">
+                    <h3>Dataset Stats</h3>
+                    {datasetStats && (
+                        <>
+                            <div className="stat-item">
+                                <span className="stat-label">Rows</span>
+                                <span className="stat-value">{datasetStats.total_rows.toLocaleString()}</span>
+                            </div>
+                            <div className="stat-item">
+                                <span className="stat-label">Features</span>
+                                <span className="stat-value">{datasetStats.total_features}</span>
+                            </div>
+                            <div className="stat-item">
+                                <span className="stat-label">Discrete</span>
+                                <span className="stat-value">{datasetStats.discrete_features}</span>
+                            </div>
+                            <div className="stat-item">
+                                <span className="stat-label">Continuous</span>
+                                <span className="stat-value">{datasetStats.continuous_features}</span>
+                            </div>
+                            <div className="stat-item">
+                                <span className="stat-label">Missing</span>
+                                <span className="stat-value">{datasetStats.missing_values}</span>
+                            </div>
+                            <div className="stat-item">
+                                <span className="stat-label">Quality</span>
+                                <span className="stat-value">{datasetStats.quality_score}/100</span>
+                            </div>
+                        </>
+                    )}
+
+                    <h3>Selection Summary</h3>
+                    <div className="stat-item">
+                        <span className="stat-label">Total Features</span>
+                        <span className="stat-value">{features.length}</span>
+                    </div>
+                    <div className="stat-item">
+                        <span className="stat-label">Selected</span>
+                        <span className="stat-value highlight">{selectedCount}</span>
+                    </div>
+                    <div className="stat-item">
+                        <span className="stat-label">Dropped</span>
+                        <span className="stat-value" style={{ color: '#ef4444' }}>{droppedCount}</span>
+                    </div>
+                    <div className="stat-item">
+                        <span className="stat-label">Quality Passed</span>
+                        <span className="stat-value success">{qualityPassCount}</span>
                     </div>
                 </div>
-            )}
 
-            {/* Action Buttons */}
-            <div className="action-buttons">
-                <button
-                    className="btn-secondary"
-                    onClick={() => Promise.all([loadQualityMetrics(), loadPreprocessingSteps(), loadColumnChanges()])}
-                    disabled={isLoading}
-                >
-                    🔄 Refresh Data
-                </button>
-                <button
-                    className="btn-primary"
-                    onClick={applyPreprocessing}
-                    disabled={isLoading || !datasetId}
-                >
-                    {isLoading ? '⏳ Processing...' : '⚡ Apply Preprocessing'}
-                </button>
+                <div className="features-panel">
+                    <div className="features-sections-container">
+                        {/* Selected Features Section */}
+                        <div className="features-section">
+                            <div className="section-header">
+                                <h3>Selected Features ({selectedCount})</h3>
+                            </div>
+                            <div className="features-container">
+                                {selectedFeatures.length === 0 && !isLoading && (
+                                    <div className="empty-state">
+                                        <span className="empty-icon">📭</span>
+                                        <p>No selected features</p>
+                                    </div>
+                                )}
+                                {selectedFeatures.map((feature, index) => {
+                                    return renderFeatureCard(feature, index, true);
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Dropped Features Section */}
+                        <div className="features-section">
+                            <div className="section-header">
+                                <h3>Dropped Features ({droppedCount})</h3>
+                            </div>
+                            <div className="features-container">
+                                {droppedFeatures.length === 0 && !isLoading && (
+                                    <div className="empty-state">
+                                        <span className="empty-icon">📭</span>
+                                        <p>No dropped features</p>
+                                    </div>
+                                )}
+                                {droppedFeatures.map((feature, index) => {
+                                    return renderFeatureCard(feature, index + selectedFeatures.length, false);
+                                })}
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
-            {/* Loading Overlay */}
             {isLoading && (
                 <div className="loading-overlay">
                     <div className="loading-spinner"></div>
-                    <p>Applying preprocessing transformations...</p>
+                    <p>Loading preprocessing data...</p>
                 </div>
             )}
         </div>

@@ -530,7 +530,7 @@ function App() {
                       <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
                     </svg>
                   </div>
-                  <div className="process-step-label">Feature Selection</div>
+                  <div className="process-step-label">Classification</div>
                 </div>
                 <div className="process-arrow">→</div>
                 <div className="process-step" style={{ animationDelay: '0.8s' }}>

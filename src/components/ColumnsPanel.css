@@ -5,8 +5,9 @@
   width: 100%;
   max-width: 100%;
   margin-top: 20px;
-  min-height: 500px;
-  height: auto;
+  max-height: calc(100vh - 250px); /* Constrain to viewport height */
+  min-height: calc(100vh - 300px); /* Always stretch to viewport height */
+  height: 100%;
   box-sizing: border-box;
   padding: 0;
 }
@@ -18,9 +19,10 @@
   padding: 16px;
   display: flex;
   flex-direction: column;
-  min-height: 400px;
-  height: auto;
-  overflow: hidden;
+  max-height: calc(100vh - 300px); /* Constrain to viewport height */
+  min-height: calc(100vh - 350px); /* Always stretch to viewport height */
+  height: 100%;
+  overflow: visible; /* Allow buttons to be visible */
   min-width: 0;
   box-sizing: border-box;
 }
@@ -46,8 +48,8 @@
   gap: 8px;
   padding-right: 6px;
   flex-grow: 1;
-  min-height: 300px;
-  max-height: 600px;
+  min-height: 0; /* Allow flex to control height */
+  max-height: none; /* Remove max-height constraint, let flex handle it */
 }
 
 .column-list::-webkit-scrollbar {
@@ -134,6 +136,7 @@
   border: none;
   border-radius: 4px;
   cursor: pointer;
+  flex-shrink: 0; /* Prevent button from shrinking */
 }
 
 .assign-button:hover {
@@ -143,10 +146,18 @@
 @media (max-width: 900px) {
   .columns-layout {
     grid-template-columns: 1fr;
-    height: auto;
+    max-height: calc(100vh - 250px);
+    min-height: calc(100vh - 300px);
+    height: 100%;
   }
   .column-panel {
-    height: auto;
+    max-height: calc(100vh - 300px);
+    min-height: calc(100vh - 350px);
+    height: 100%;
+    overflow: visible;
+  }
+  .column-list {
     min-height: 0;
+    max-height: none;
   }
 }

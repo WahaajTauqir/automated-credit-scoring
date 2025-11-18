@@ -1188,6 +1188,9 @@ def preprocessing_column_changes():
             treat_negative_one_as_missing=treat_negative_one_as_missing
         )
         
+        # Get outlier information from preprocessing report
+        outlier_info = preprocessing_report.get('details', {}).get('outliers', {})
+        
         # Generate column-level change analysis
         column_changes = []
         
@@ -1225,21 +1228,54 @@ def preprocessing_column_changes():
                 if original_unique != processed_unique and 'object' in original_dtype:
                     changes.append(f"Encoded from {original_unique} categories to numerical")
                 
+                # Outlier removal information
+                if col in outlier_info:
+                    outlier_data = outlier_info[col]
+                    outliers_count = outlier_data.get('outliers_detected', 0)
+                    outliers_pct = outlier_data.get('outliers_percentage', 0)
+                    method = outlier_data.get('method', 'iqr')
+                    if outliers_count > 0:
+                        changes.append(f"Outliers handled: {outliers_count} ({outliers_pct:.1f}%) capped using {method.upper()} method")
+                
+                # Calculate repeat rate (for continuous columns)
+                repeat_rate = None
+                if pd.api.types.is_numeric_dtype(processed_series):
+                    # Calculate the percentage of the most frequent value
+                    value_counts = processed_series.value_counts()
+                    if len(value_counts) > 0:
+                        most_frequent_count = value_counts.iloc[0]
+                        total_non_null = processed_series.notna().sum()
+                        if total_non_null > 0:
+                            repeat_rate = (most_frequent_count / total_non_null) * 100
+                
                 # Statistical changes for numerical columns
+                variance = None
+                processed_stats = None
+                original_stats = None
+                coefficient_of_variation = None
                 if pd.api.types.is_numeric_dtype(processed_series):
                     original_stats = {
                         'min': float(original_series.min()) if not original_series.empty else None,
                         'max': float(original_series.max()) if not original_series.empty else None,
                         'mean': float(original_series.mean()) if not original_series.empty else None,
-                        'std': float(original_series.std()) if not original_series.empty else None
+                        'std': float(original_series.std()) if not original_series.empty else None,
+                        'median': float(original_series.median()) if not original_series.empty else None
                     }
                     
                     processed_stats = {
                         'min': float(processed_series.min()) if not processed_series.empty else None,
                         'max': float(processed_series.max()) if not processed_series.empty else None,
                         'mean': float(processed_series.mean()) if not processed_series.empty else None,
-                        'std': float(processed_series.std()) if not processed_series.empty else None
+                        'std': float(processed_series.std()) if not processed_series.empty else None,
+                        'median': float(processed_series.median()) if not processed_series.empty else None
                     }
+                    
+                    # Calculate variance
+                    variance = float(processed_series.var()) if not processed_series.empty else 0.0
+                    
+                    # Calculate coefficient of variation (CV = std/mean * 100)
+                    if processed_stats['mean'] is not None and processed_stats['mean'] != 0 and processed_stats['std'] is not None:
+                        coefficient_of_variation = abs((processed_stats['std'] / processed_stats['mean']) * 100)
                     
                     # Check for significant statistical changes (e.g., due to outlier treatment)
                     stat_changes = []
@@ -1253,6 +1289,9 @@ def preprocessing_column_changes():
                     
                     if stat_changes:
                         changes.extend(stat_changes)
+                else:
+                    # For non-numeric columns, variance is 0 or N/A
+                    variance = 0.0
                 
                 column_changes.append({
                     'column': col,
@@ -1262,6 +1301,11 @@ def preprocessing_column_changes():
                     'original_missing': int(original_missing),
                     'processed_missing': int(processed_missing),
                     'negative_one_count': int((original_series == -1).sum()) if treat_negative_one_as_missing and pd.api.types.is_numeric_dtype(original_series) else 0,
+                    'variance': variance,
+                    'coefficient_of_variation': coefficient_of_variation,
+                    'repeat_rate': repeat_rate,
+                    'processed_stats': processed_stats,
+                    'original_stats': original_stats,
                     'has_changes': len(changes) > 0
                 })
             else:
@@ -1271,6 +1315,11 @@ def preprocessing_column_changes():
                 missing_ratio = missing_count / len(original_series)
                 negative_one_count = (original_series == -1).sum() if pd.api.types.is_numeric_dtype(original_series) else 0
                 
+                # Calculate variance for removed columns too (for reference)
+                variance = 0.0
+                if pd.api.types.is_numeric_dtype(original_series):
+                    variance = float(original_series.var()) if not original_series.empty else 0.0
+                
                 column_changes.append({
                     'column': col,
                     'changes': [f"Column removed: {missing_ratio:.1%} missing values"],
@@ -1279,6 +1328,7 @@ def preprocessing_column_changes():
                     'original_missing': int(missing_count),
                     'processed_missing': 0,
                     'negative_one_count': int(negative_one_count),
+                    'variance': variance,
                     'has_changes': True,
                     'removed': True
                 })
@@ -1929,15 +1979,74 @@ def coarse_bin_continuous(df, var, target, bins=10):
         if target not in df.columns:
             raise ValueError(f"Target column '{target}' not found")
         
-        # Perform qcut to get bin edges and assign labels
-        _, bin_edges = pd.qcut(df[var], q=bins, retbins=True, labels=False, duplicates='drop')
-        n_bins = len(bin_edges) - 1
+        # Check if column has a dominant repeated value (>50% of values are the same)
+        # This handles sparse columns (mostly zeros) or any column with a dominant value
+        total_count = df[var].notna().sum()
+        if total_count > 0:
+            value_counts = df[var].value_counts()
+            most_frequent_value = value_counts.index[0]
+            most_frequent_count = value_counts.iloc[0]
+            dominant_percentage = (most_frequent_count / total_count * 100)
+            has_dominant_value = dominant_percentage > 50
+        else:
+            has_dominant_value = False
+            most_frequent_value = None
         
-        if n_bins <= 0:
-            raise ValueError(f"No valid bins could be created for '{var}'.")
-        
-        bin_labels = [f'Bin_{i}' for i in range(1, n_bins + 1)]
-        df[f'{var}_binned'] = pd.cut(df[var], bins=bin_edges, labels=bin_labels, include_lowest=True, right=True)
+        if has_dominant_value:
+            # For columns with a dominant value, separate that value from others
+            # Create a bin for the dominant value, then bin remaining values separately
+            df = df.copy()
+            df[f'{var}_binned'] = None
+            
+            # Separate dominant value and other values
+            dominant_mask = (df[var] == most_frequent_value)
+            other_mask = (df[var] != most_frequent_value) & df[var].notna()
+            
+            # Bin other (non-dominant) values
+            other_data = df.loc[other_mask, var]
+            if len(other_data) > 0:
+                # Use fewer bins for other values to avoid over-binning
+                other_bins = min(bins, max(3, len(other_data.unique())))
+                try:
+                    _, bin_edges = pd.qcut(other_data, q=other_bins, retbins=True, labels=False, duplicates='drop')
+                    n_other_bins = len(bin_edges) - 1
+                    
+                    if n_other_bins > 0:
+                        other_bin_labels = [f'Bin_{i}' for i in range(2, n_other_bins + 2)]  # Start from Bin_2
+                        df.loc[other_mask, f'{var}_binned'] = pd.cut(
+                            other_data, 
+                            bins=bin_edges, 
+                            labels=other_bin_labels, 
+                            include_lowest=True, 
+                            right=True
+                        )
+                    else:
+                        # If qcut fails, create a single bin for all other values
+                        df.loc[other_mask, f'{var}_binned'] = 'Bin_2'
+                except (ValueError, Exception):
+                    # If qcut fails, create a single bin for all other values
+                    df.loc[other_mask, f'{var}_binned'] = 'Bin_2'
+            else:
+                # All values are the dominant value
+                n_other_bins = 0
+            
+            # Assign dominant value to Bin_1
+            df.loc[dominant_mask, f'{var}_binned'] = 'Bin_1'
+            
+            # Handle any remaining NaN values
+            df.loc[df[f'{var}_binned'].isna(), f'{var}_binned'] = 'Bin_1'
+            
+        else:
+            # Standard binning for non-sparse columns
+            # Perform qcut to get bin edges and assign labels
+            _, bin_edges = pd.qcut(df[var], q=bins, retbins=True, labels=False, duplicates='drop')
+            n_bins = len(bin_edges) - 1
+            
+            if n_bins <= 0:
+                raise ValueError(f"No valid bins could be created for '{var}'.")
+            
+            bin_labels = [f'Bin_{i}' for i in range(1, n_bins + 1)]
+            df[f'{var}_binned'] = pd.cut(df[var], bins=bin_edges, labels=bin_labels, include_lowest=True, right=True)
         
         # Compute actual min and max for each bin based on data
         tab = pd.crosstab(df[f'{var}_binned'], df[target])
@@ -3811,9 +3920,11 @@ def calculate_woe_iv(df, variable, target, bin_merges=None, var_type=None):
         b = int(row["Bad"])
         total_in_bin = int(row["Total"])
 
-        # Calculate percentages from ACTUAL BINNED TOTALS
-        dist_good_pct = (g / total_good * 100.0) if total_good > 0 else 0.0
-        dist_bad_pct = (b / total_bad * 100.0) if total_bad > 0 else 0.0
+        # Calculate proportions (0-1) and percentages (0-100) for display
+        dist_good = (g / total_good) if total_good > 0 else 0.0
+        dist_bad = (b / total_bad) if total_bad > 0 else 0.0
+        dist_good_pct = dist_good * 100.0
+        dist_bad_pct = dist_bad * 100.0
 
         # Verify bin percentages
         bin_good_rate = (g / total_in_bin * 100) if total_in_bin > 0 else 0
@@ -3828,15 +3939,17 @@ def calculate_woe_iv(df, variable, target, bin_merges=None, var_type=None):
         iv_val = 0.0
 
         # Exact formula: ROUND(LN(L5/M5) * 100, 1) with no smoothing
-        if dist_good_pct > 0.0 and dist_bad_pct > 0.0:
+        # Use proportions (0-1) for IV calculation, percentages for WOE display
+        if dist_good > 0.0 and dist_bad > 0.0:
             try:
-                ratio = dist_good_pct / dist_bad_pct
+                ratio = dist_good / dist_bad
                 ln_ratio = math.log(ratio)
                 if math.isfinite(ln_ratio):
                     # WOE = ROUND(LN(L5/M5) * 100, 1)
                     woe_val = round(ln_ratio * 100.0, 1)
                 
-                    iv_val = (dist_good_pct - dist_bad_pct) * ln_ratio 
+                    # IV = (dist_good - dist_bad) * ln_ratio (using proportions, not percentages)
+                    iv_val = (dist_good - dist_bad) * ln_ratio 
                 else:
                     woe_val = 0.0
                     iv_val = 0.0
@@ -3844,13 +3957,13 @@ def calculate_woe_iv(df, variable, target, bin_merges=None, var_type=None):
                 woe_val = 0.0
                 iv_val = 0.0
         else:
-            # No smoothing - return 0 if either percentage is zero
+            # No smoothing - return 0 if either proportion is zero
             woe_val = 0.0
             iv_val = 0.0
 
-        # Accumulate total IV
+        # Accumulate total IV (already in correct scale, no division needed)
         if math.isfinite(iv_val):
-            iv_total += float(iv_val)/100 # since iv_val is in percentage terms
+            iv_total += float(iv_val)
 
         bin_label = str(row["final_bin"])
         range_info = bin_ranges.get(bin_label, (None, None) if var_type == "continuous" else [])
@@ -4601,6 +4714,44 @@ def update_feature_final_selected():
         return jsonify({"success": True})
     except Exception as e:
         print(f"[update_feature_final_selected] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/update-feature-selection', methods=['POST'])
+def update_feature_selection():
+    """
+    Update feature's selected status from preprocessing details page.
+    """
+    try:
+        data = request.get_json()
+        feature_name = data.get('feature_name')
+        dataset_id = data.get('dataset_id')
+        is_selected = data.get('selected', False)
+        
+        if not feature_name or not dataset_id:
+            return jsonify({"error": "Missing feature_name or dataset_id"}), 400
+        
+        # Ensure dataset_id is an integer
+        try:
+            dataset_id = int(dataset_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Get feature, create if it doesn't exist
+        feature = get_feature_by_name(dataset_id, feature_name)
+        if not feature:
+            # Feature doesn't exist, create it with default type 'continuous'
+            # The type will be updated later when classification is done
+            feature_id = create_feature(dataset_id, feature_name, 'continuous', selected=is_selected)
+            feature = get_feature(feature_id)
+        else:
+            # Update selected status
+            update_feature(feature['id'], selected=is_selected)
+        
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"[update_feature_selection] ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
