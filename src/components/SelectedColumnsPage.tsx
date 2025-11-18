@@ -2235,35 +2235,38 @@ const SelectedColumnsPage = () => {
   }, [recordId]);
 
   // Load selected columns from database when on Data Preprocessing step
-  // Also check if preprocess_selection is saved
+  // Check preprocess_selection flag - if true, load from DB; if false, no polling needed
   useEffect(() => {
     const loadPreprocessingSelectedColumns = async () => {
       if (currentStep === 1 && recordId) {
         try {
-          const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`, {
+          // First check preprocess_selection status
+          const recordResponse = await fetch(`http://localhost:5000/api/record/${recordId}`, {
             method: 'GET',
             headers: { 'Content-Type': 'application/json' }
           });
+          
+          let shouldLoadFromDb = false;
+          if (recordResponse.ok) {
+            const recordData = await recordResponse.json();
+            shouldLoadFromDb = recordData.preprocess_selection === true;
+            setPreprocessSelectionSaved(shouldLoadFromDb);
+          }
+          
+          // Only load features if preprocess_selection is true
+          // If false, calculations will determine selections, no need to poll
+          if (shouldLoadFromDb) {
+            const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`, {
+              method: 'GET',
+              headers: { 'Content-Type': 'application/json' }
+            });
 
-          if (featuresResp.ok) {
-            const featuresData = await featuresResp.json();
-            const selectedFeatureNames = featuresData
-              .filter((f: any) => f.selected === true)
-              .map((f: any) => f.name);
-            setPreprocessingSelectedColumns(selectedFeatureNames);
-            
-            // Also check if preprocess_selection is saved
-            try {
-              const recordResponse = await fetch(`http://localhost:5000/api/record/${recordId}`, {
-                method: 'GET',
-                headers: { 'Content-Type': 'application/json' }
-              });
-              if (recordResponse.ok) {
-                const recordData = await recordResponse.json();
-                setPreprocessSelectionSaved(recordData.preprocess_selection === true);
-              }
-            } catch (err) {
-              console.error('Error checking preprocess_selection:', err);
+            if (featuresResp.ok) {
+              const featuresData = await featuresResp.json();
+              const selectedFeatureNames = featuresData
+                .filter((f: any) => f.selected === true)
+                .map((f: any) => f.name);
+              setPreprocessingSelectedColumns(selectedFeatureNames);
             }
           }
         } catch (error) {
@@ -2272,16 +2275,9 @@ const SelectedColumnsPage = () => {
       }
     };
 
+    // Only load once when step changes or recordId changes
+    // No polling - use preprocess_selection flag to determine if DB load is needed
     loadPreprocessingSelectedColumns();
-    // Poll every 2 seconds when on step 1 to update selected columns
-    let interval: NodeJS.Timeout | null = null;
-    if (currentStep === 1 && recordId) {
-      interval = setInterval(loadPreprocessingSelectedColumns, 2000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
   }, [currentStep, recordId]);
   // Load model_ready checkboxes when moving to Classification section (step 0)
   useEffect(() => {
