@@ -181,6 +181,7 @@ const SelectedColumnsPage = () => {
   const isLoadingAutoBinning = useRef(false);
   const [loadingColumns] = useState<Set<string>>(new Set());
   const [isLoadingCoarseBins, setIsLoadingCoarseBins] = useState(false);
+  const [isLoadingAllAutoMonotonic, setIsLoadingAllAutoMonotonic] = useState(false);
   const updateLocalWoeState = useCallback(
     (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
       if (!payload) {
@@ -1523,6 +1524,49 @@ const SelectedColumnsPage = () => {
   };
 
 
+  const runAllAutoMonotonicFineBinning = async () => {
+    if (!targetVariable) {
+      showNotification('Please select a target variable first');
+      return;
+    }
+
+    const columnsToProcess = selectedColumns.filter(col => col !== targetVariable);
+    
+    if (columnsToProcess.length === 0) {
+      showNotification('No columns to process');
+      return;
+    }
+
+    // Set loading state to hide feature boxes and show loading circle
+    setIsLoadingAllAutoMonotonic(true);
+    
+    let successCount = 0;
+    let errorCount = 0;
+    
+    try {
+      for (const col of columnsToProcess) {
+        try {
+          const success = await runAutoMonotonicBinning(col, { silent: true });
+          if (success) {
+            successCount++;
+          } else {
+            errorCount++;
+          }
+        } catch (err) {
+          console.error(`Error processing ${col}:`, err);
+          errorCount++;
+        }
+      }
+      
+      showNotification(
+        `All Auto Monotonic Fine Binning completed: ${successCount} successful, ${errorCount} errors`
+      );
+    } finally {
+      // Reset loading state to show updated feature boxes
+      setIsLoadingAllAutoMonotonic(false);
+    }
+  };
+
   const fetchAllAutoBinningData = async () => {
     // Prevent concurrent loads
     if (isLoadingAutoBinning.current) return;
@@ -2332,11 +2376,29 @@ const SelectedColumnsPage = () => {
                     Manual Binning
                   </button>
                 </div>
+                {binningMode === 'auto' && (
+                  <div className="all-auto-monotonic-container">
+                    <button
+                      className="all-auto-monotonic-btn"
+                      onClick={runAllAutoMonotonicFineBinning}
+                      aria-label="Run auto-monotonic fine binning for all columns"
+                      title="Automatically merge bins to achieve monotonic WOE trend for all columns"
+                    >
+                      <span className="btn-icon">⚡</span>
+                      All Auto Monotonic Fine binning
+                    </button>
+                  </div>
+                )}
               </div>
             )}
             {currentStep === 2 && binningMode === 'auto' && (
               <div className="auto-binning-container">
-                {isLoadingCoarseBins || selectedColumns.some(col => {
+                {isLoadingAllAutoMonotonic ? (
+                  <div className="fine-binning-loading">
+                    <div className="fine-binning-spinner"></div>
+                    <p>Applying auto monotonic fine binning to all features...</p>
+                  </div>
+                ) : isLoadingCoarseBins || selectedColumns.some(col => {
                   if (col === targetVariable) return false;
                   return !Array.isArray(coarseBinResults[col]) || coarseBinResults[col].length === 0;
                 }) ? (
