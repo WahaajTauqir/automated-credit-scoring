@@ -92,7 +92,7 @@ const ColumnSelectionPage = ({
           <>
             <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginTop: '24px', marginBottom: '16px' }}>
               <button
-                className="full-auto-monotonic-btn"
+                className="progress-action-btn"
                 onClick={async () => {
                   // Classify ALL columns using backend AI endpoint (not just current page)
                   try {

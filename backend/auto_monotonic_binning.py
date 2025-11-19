@@ -130,6 +130,71 @@ def is_monotonic(arr: np.ndarray, increasing: bool = True) -> bool:
         return all(arr[i] >= arr[i+1] for i in range(len(arr)-1))
 
 
+def monotonic_quality_score(woe: np.ndarray, increasing: bool) -> float:
+    """
+    Calculate a quality score for monotonic trends.
+    Higher score = better monotonic trend.
+    
+    Measures:
+    - Average step size (how much WOE changes between adjacent bins)
+    - Penalizes flat segments (bins with same or very similar WOE)
+    - Rewards consistent directional changes
+    
+    Parameters:
+    -----------
+    woe : np.ndarray
+        WOE values to evaluate
+    increasing : bool
+        Whether the trend should be increasing or decreasing
+        
+    Returns:
+    --------
+    float
+        Quality score (higher is better)
+    """
+    if len(woe) <= 1:
+        return 0.0
+    
+    # Calculate step sizes (differences between adjacent bins)
+    if increasing:
+        steps = np.diff(woe)  # Should be >= 0 for increasing
+    else:
+        steps = -np.diff(woe)  # Should be >= 0 for decreasing
+    
+    # Count flat segments (steps that are very close to zero)
+    flat_threshold = 0.001  # Consider steps smaller than this as "flat"
+    flat_count = np.sum(np.abs(steps) < flat_threshold)
+    flat_ratio = flat_count / len(steps) if len(steps) > 0 else 0.0
+    
+    # Calculate average step size (excluding flat segments)
+    non_flat_steps = steps[np.abs(steps) >= flat_threshold]
+    avg_step_size = np.mean(non_flat_steps) if len(non_flat_steps) > 0 else 0.0
+    
+    # Calculate consistency (coefficient of variation of step sizes)
+    # Lower variation = more consistent trend
+    if len(non_flat_steps) > 1 and np.mean(non_flat_steps) > 0:
+        step_std = np.std(non_flat_steps)
+        step_mean = np.mean(non_flat_steps)
+        consistency = 1.0 / (1.0 + step_std / step_mean)  # Normalized consistency score
+    else:
+        consistency = 0.0
+    
+    # Quality score combines:
+    # - Average step size (normalized, higher is better)
+    # - Penalty for flat segments (lower flat_ratio is better)
+    # - Consistency bonus (more consistent steps are better)
+    # Normalize step size to 0-1 range (assuming typical WOE range is -5 to 5)
+    normalized_step_size = min(avg_step_size / 2.0, 1.0) if avg_step_size > 0 else 0.0
+    
+    quality_score = (
+        normalized_step_size * 0.5 +  # 50% weight on step size
+        (1.0 - flat_ratio) * 0.3 +     # 30% weight on avoiding flat segments
+        consistency * 0.2              # 20% weight on consistency
+    )
+    
+    return quality_score
+
+
 def greedy_merge_bins_woe(
     good: np.ndarray, 
     bad: np.ndarray, 
@@ -289,9 +354,11 @@ def exhaustive_merge_bins_woe(
     (2^(n-1) possibilities for n bins) and selects the optimal solution.
     
     Selection criteria (in priority order):
-    1. If prioritize_iv=True: Highest IV (Information Value)
-    2. If prioritize_iv=False: Maximum bins (fewer merges)
-    3. Tiebreaker: Lower WOE variance
+    1. Monotonicity (must be monotonic - only monotonic solutions are considered)
+    2. Monotonic quality (prefer solutions with better monotonic trends - fewer flat segments, larger step sizes)
+    3. Maximize bins (prefer more bins, even if it means slightly lower IV)
+    4. IV (when bin counts are equal, prefer higher Information Value)
+    5. Tiebreaker: Lower WOE variance
     
     For discrete variables: A true exhaustive search would require exploring all 
     possible set partitions (Bell number B_n), which is computationally infeasible.
@@ -314,8 +381,8 @@ def exhaustive_merge_bins_woe(
     max_bins : Optional[int]
         Maximum number of bins to keep (will stop when reached)
     prioritize_iv : bool
-        If True, prioritize solutions with higher IV.
-        If False, prioritize solutions with more bins (traditional approach).
+        Legacy parameter (kept for backward compatibility).
+        Note: The algorithm now always prioritizes bins first, then IV when bin counts are equal.
         
     Returns:
     --------
@@ -346,6 +413,7 @@ def exhaustive_merge_bins_woe(
     )
     best_num_bins = len(best_good)
     best_iv = compute_iv(best_good, best_bad)
+    best_monotonic_quality = monotonic_quality_score(best_woe, increasing)
     
     # If already has few bins or meets target, return greedy solution
     if max_bins and best_num_bins <= max_bins:
@@ -371,10 +439,7 @@ def exhaustive_merge_bins_woe(
         print(f"Falling back to greedy algorithm.")
         return best_good, best_bad, best_labels, best_woe, best_merge_map
     
-    if prioritize_iv:
-        print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins (prioritizing IV)...")
-    else:
-        print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins (prioritizing bin count)...")
+    print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins (prioritizing: bins > IV > variance)...")
     
     for combination_idx in range(total_combinations):
         # Convert combination index to binary representation
@@ -428,22 +493,40 @@ def exhaustive_merge_bins_woe(
         
         if is_monotonic(test_woe, increasing):
             # Found a valid monotonic solution - check if it's better
+            # Priority order (all monotonic solutions are considered):
+            # 1. Monotonicity (already enforced by the if condition above)
+            # 2. Monotonic quality (prefer solutions with better monotonic trends)
+            # 3. Maximize bins (prefer more bins, even if IV is slightly lower)
+            # 4. IV (when bin counts are equal, prefer higher IV)
+            # 5. WOE variance (final tiebreaker)
+            
             test_iv = compute_iv(test_good, test_bad)
             test_num_bins = len(test_good)
+            test_monotonic_quality = monotonic_quality_score(test_woe, increasing)
             
-            if prioritize_iv:
-                # Prioritize higher IV, then more bins, then lower WOE variance
-                is_better = (
-                    test_iv > best_iv or
-                    (test_iv == best_iv and test_num_bins > best_num_bins) or
-                    (test_iv == best_iv and test_num_bins == best_num_bins and np.std(test_woe) < np.std(best_woe))
-                )
+            # Priority 2: Compare monotonic quality first (prefer better trends)
+            # Only consider solutions with reasonable quality (threshold to avoid very poor trends)
+            min_quality_threshold = 0.1  # Minimum acceptable quality
+            if test_monotonic_quality < min_quality_threshold and best_monotonic_quality >= min_quality_threshold:
+                is_better = False
+            elif test_monotonic_quality >= min_quality_threshold and best_monotonic_quality < min_quality_threshold:
+                is_better = True
+            elif test_monotonic_quality != best_monotonic_quality:
+                # Both pass threshold, prefer higher quality
+                is_better = test_monotonic_quality > best_monotonic_quality
             else:
-                # Traditional approach: prioritize more bins, then lower WOE variance
-                is_better = (
-                    test_num_bins > best_num_bins or
-                    (test_num_bins == best_num_bins and np.std(test_woe) < np.std(best_woe))
-                )
+                # Same monotonic quality, compare by number of bins
+                if test_num_bins != best_num_bins:
+                    # Priority 3: More bins is better (willing to trade some IV for more bins)
+                    is_better = test_num_bins > best_num_bins
+                else:
+                    # Same number of bins, compare by IV
+                    if test_iv != best_iv:
+                        # Priority 4: Higher IV is better
+                        is_better = test_iv > best_iv
+                    else:
+                        # Priority 5: Lower WOE variance as tiebreaker
+                        is_better = np.std(test_woe) < np.std(best_woe)
             
             if is_better:
                 best_good = test_good.copy()
@@ -453,11 +536,9 @@ def exhaustive_merge_bins_woe(
                 best_merge_map = copy.deepcopy(test_merge_map)
                 best_num_bins = test_num_bins
                 best_iv = test_iv
+                best_monotonic_quality = test_monotonic_quality
     
-    if prioritize_iv:
-        print(f"Best solution found: {best_num_bins} bins with IV = {best_iv:.4f}")
-    else:
-        print(f"Best solution found: {best_num_bins} bins")
+    print(f"Best solution found: {best_num_bins} bins with IV = {best_iv:.4f}, monotonic quality = {best_monotonic_quality:.4f}")
     
     return best_good, best_bad, best_labels, best_woe, best_merge_map
 

@@ -180,8 +180,7 @@ const SelectedColumnsPage = () => {
   const [binningMode, setBinningMode] = useState<'manual' | 'auto'>('manual');
   const isLoadingAutoBinning = useRef(false);
   const [loadingColumns] = useState<Set<string>>(new Set());
-  const [fullAutoMonotonicLoading, setFullAutoMonotonicLoading] = useState(false);
-  const FULL_AUTO_CONCURRENCY = 4;
+  const [isLoadingCoarseBins, setIsLoadingCoarseBins] = useState(false);
   const updateLocalWoeState = useCallback(
     (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
       if (!payload) {
@@ -1523,125 +1522,6 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  const runFullAutoMonotonicBinning = async () => {
-    if (fullAutoMonotonicLoading) return;
-    if (!targetVariable) {
-      showNotification('Select a target variable before running Full Auto Monotonic Binning.');
-      return;
-    }
-    const eligibleColumns = Array.from(
-      new Set(
-        (selectedColumns || []).filter((col) =>
-          (discreteColumns || []).includes(col) || (continuousColumns || []).includes(col)
-        )
-      )
-    ).filter((col) => col && col !== targetVariable);
-
-    if (eligibleColumns.length === 0) {
-      showNotification('No discrete or continuous features are available for Full Auto Monotonic Binning.');
-      return;
-    }
-
-    setFullAutoMonotonicLoading(true);
-
-    const failedColumns: { column: string; reason: string }[] = [];
-    const cachedColumns: string[] = [];
-    let processed = 0;
-
-    const processColumn = async (col: string) => {
-      const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-
-      const hasFine = Array.isArray(fineBinResults[col]) && fineBinResults[col].length > 0;
-      const hasWoe = Array.isArray(woeIvResults[col]?.stats) && woeIvResults[col]?.stats.length > 0;
-      if (hasFine && hasWoe) {
-        cachedColumns.push(col);
-        return;
-      }
-      if (hasFine && !hasWoe) {
-        const mergesForCol = binMergeHistory[col] && Object.keys(binMergeHistory[col] || {}).length > 0
-          ? binMergeHistory[col]
-          : undefined;
-        await fetchWoeIv(col, mergesForCol, false);
-        cachedColumns.push(col);
-        return;
-      }
-
-      try {
-        const { hydrated } = await loadSavedFineBins(col, varType);
-        if (hydrated) {
-          cachedColumns.push(col);
-          return;
-        }
-
-        const errors: string[] = [];
-        const success = await runAutoMonotonicBinning(col, {
-          silent: true,
-          onError: (message) => errors.push(message),
-        });
-
-        if (!success) {
-          const fallback = await runFineBinPassThrough(col, varType);
-          if (fallback) {
-            cachedColumns.push(col);
-          } else {
-            failedColumns.push({ column: col, reason: errors[0] || 'Auto-binning failed' });
-          }
-        }
-      } catch (err) {
-        console.error(`Full auto monotonic error for ${col}:`, err);
-        failedColumns.push({ column: col, reason: err instanceof Error ? err.message : String(err) });
-      }
-    };
-
-    const queue = [...eligibleColumns];
-    const workerCount = Math.min(FULL_AUTO_CONCURRENCY, Math.max(1, queue.length));
-    const workers = Array.from({ length: workerCount }).map(async () => {
-      while (queue.length > 0) {
-        const next = queue.shift();
-        if (!next) break;
-        await processColumn(next);
-        processed += 1;
-      }
-    });
-
-    await Promise.all(workers);
-
-    // Refresh WOE/IV for all successfully processed columns to ensure UI is up-to-date
-    const successfullyProcessed = eligibleColumns.filter(
-      (col) => !failedColumns.some((f) => f.column === col)
-    );
-    
-    // Refresh WOE/IV for all processed columns
-    const refreshPromises = successfullyProcessed.map(async (col) => {
-      try {
-        const mergesForCol = binMergeHistory[col] && Object.keys(binMergeHistory[col] || {}).length > 0
-          ? binMergeHistory[col]
-          : undefined;
-        await fetchWoeIv(col, mergesForCol, false);
-      } catch (err) {
-        console.error(`Failed to refresh WOE/IV for ${col}:`, err);
-      }
-    });
-    
-    await Promise.all(refreshPromises);
-
-    if (failedColumns.length === 0) {
-      const cachedNote = cachedColumns.length > 0
-        ? ` Reused cached bins for ${cachedColumns.length} ${cachedColumns.length === 1 ? 'feature' : 'features'}.`
-        : '';
-      showNotification(`Full Auto Monotonic Binning finished for all requested features.${cachedNote}`);
-    } else {
-      const failurePreview = failedColumns.slice(0, 3).map(({ column }) => column).join(', ');
-      showNotification(
-        `Full Auto Monotonic finished with ${failedColumns.length} failure(s). ${failurePreview}${failedColumns.length > 3 ? ', ...' : ''
-        }. Check console for details.`
-      );
-    }
-
-    setTimeout(() => {
-      setFullAutoMonotonicLoading(false);
-    }, 750);
-  };
 
   const fetchAllAutoBinningData = async () => {
     // Prevent concurrent loads
@@ -1700,8 +1580,67 @@ const SelectedColumnsPage = () => {
 
   const handleSwitchToAutoBinning = async () => {
     setBinningMode('auto');
-    // Simply ensure WOE/IV data is loaded
-    await fetchAllAutoBinningData();
+    setIsLoadingCoarseBins(true);
+    
+    try {
+      if (!targetVariable) {
+        setIsLoadingCoarseBins(false);
+        return;
+      }
+
+      // Get columns that need coarse bins calculated
+      const columnsNeedingCoarseBins = selectedColumns.filter(col => {
+        const hasCoarseBins = Array.isArray(coarseBinResults[col]) && coarseBinResults[col].length > 0;
+        return !hasCoarseBins && col !== targetVariable;
+      });
+
+      if (columnsNeedingCoarseBins.length > 0) {
+        // Fetch coarse bins for all columns that need them
+        const discreteCols = columnsNeedingCoarseBins.filter(col => 
+          (discreteColumns || []).includes(col)
+        );
+        const continuousCols = columnsNeedingCoarseBins.filter(col => 
+          (continuousColumns || []).includes(col)
+        );
+
+        if (discreteCols.length > 0 || continuousCols.length > 0) {
+          const res = await fetch('http://localhost:5000/api/univariate-analysis', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              discrete: discreteCols,
+              continuous: continuousCols,
+              target: targetVariable,
+              record_id: recordId,
+            }),
+          });
+
+          const data = await res.json();
+          
+          // Update coarse bin results for all columns
+          const updatedCoarse: Record<string, NormalizedBin[]> = { ...coarseBinResults };
+          const updatedUnivariate: Record<string, any> = { ...univariateResults };
+          
+          columnsNeedingCoarseBins.forEach((col) => {
+            const coarseStats = normalizeBinArray(data[col]?.stats || data[col] || []);
+            if (coarseStats.length > 0) {
+              updatedCoarse[col] = coarseStats;
+              updatedUnivariate[col] = { ...(data[col] || {}), stats: coarseStats };
+            }
+          });
+
+          setCoarseBinResults(updatedCoarse);
+          setUnivariateResults(updatedUnivariate);
+        }
+      }
+
+      // Now fetch WOE/IV data for all columns
+      await fetchAllAutoBinningData();
+    } catch (err) {
+      console.error('Error loading coarse bins for auto mode:', err);
+    } finally {
+      setIsLoadingCoarseBins(false);
+    }
   };
 
   type PersistStateOverrides = {
@@ -2269,7 +2208,7 @@ const SelectedColumnsPage = () => {
               <div className="column-selection-step" style={{ width: '100%' }}>
                 <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginTop: '24px', marginBottom: '16px' }}>
                   <button
-                    className="full-auto-monotonic-btn"
+                    className="progress-action-btn"
                     onClick={async () => {
                       try {
                         const colsToClassify = columns;
@@ -2383,34 +2322,31 @@ const SelectedColumnsPage = () => {
                   <button
                     className={`mode-toggle-btn ${binningMode === 'auto' ? 'active' : ''}`}
                     onClick={handleSwitchToAutoBinning}
-                    disabled={fullAutoMonotonicLoading}
                   >
                     Auto Binning
                   </button>
                   <button
                     className={`mode-toggle-btn ${binningMode === 'manual' ? 'active' : ''}`}
                     onClick={() => setBinningMode('manual')}
-                    disabled={fullAutoMonotonicLoading}
                   >
                     Manual Binning
                   </button>
                 </div>
-                {binningMode === 'auto' && (
-                  <button
-                    className={`full-auto-monotonic-btn ${fullAutoMonotonicLoading ? 'loading' : ''}`}
-                    onClick={runFullAutoMonotonicBinning}
-                    disabled={fullAutoMonotonicLoading}
-                  >
-                    <span className="btn-icon">⚡</span>
-                    <span className="btn-text">Full Auto Monotonic</span>
-                  </button>
-                )}
               </div>
             )}
             {currentStep === 2 && binningMode === 'auto' && (
               <div className="auto-binning-container">
-                <div className="auto-binning-grid">
-                  {selectedColumns.map((col) => {
+                {isLoadingCoarseBins || selectedColumns.some(col => {
+                  if (col === targetVariable) return false;
+                  return !Array.isArray(coarseBinResults[col]) || coarseBinResults[col].length === 0;
+                }) ? (
+                  <div className="coarse-bins-loading">
+                    <div className="coarse-bins-spinner"></div>
+                    <p>Calculating coarse bins...</p>
+                  </div>
+                ) : (
+                  <div className="auto-binning-grid">
+                    {selectedColumns.map((col) => {
                     const woeData = woeIvResults[col];
                     const isLoading = loadingColumns.has(col);
 
@@ -2513,7 +2449,8 @@ const SelectedColumnsPage = () => {
                       </div>
                     );
                   })}
-                </div>
+                  </div>
+                )}
               </div>
             )}
             {currentStep === 2 && binningMode === 'manual' && activeColumn && (() => {

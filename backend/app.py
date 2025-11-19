@@ -6754,7 +6754,7 @@ def get_finebin_details(record_id, column_name):
 def get_finebin_cache(record_id: int, column_name: str):
     """
     Retrieve persisted fine binning stats + merges without recalculating algorithms.
-    Used to hydrate manual binning UI and the new Full Auto Monotonic mode.
+    Used to hydrate manual binning UI.
     """
     print(f"\n[API] /api/finebin-cache/{record_id}/{column_name} (GET) called")
     try:
