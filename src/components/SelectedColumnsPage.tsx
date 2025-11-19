@@ -180,17 +180,7 @@ const SelectedColumnsPage = () => {
   const [binningMode, setBinningMode] = useState<'manual' | 'auto'>('manual');
   const isLoadingAutoBinning = useRef(false);
   const [loadingColumns] = useState<Set<string>>(new Set());
-  const [autoBinningModeLoading, setAutoBinningModeLoading] = useState(false);
-  const [autoBinningModeProgress, setAutoBinningModeProgress] = useState<string>('');
-  const [autoBinningModePercentage, setAutoBinningModePercentage] = useState<number>(0);
   const [fullAutoMonotonicLoading, setFullAutoMonotonicLoading] = useState(false);
-  const [fullAutoMonotonicProgress, setFullAutoMonotonicProgress] = useState('');
-  const [coarseBinningLoading, setCoarseBinningLoading] = useState(false);
-  const [coarseBinningProgress, setCoarseBinningProgress] = useState<string>('');
-  const [coarseBinningPercentage, setCoarseBinningPercentage] = useState<number>(0);
-  const [coarseBinningCurrentFeature, setCoarseBinningCurrentFeature] = useState<string>('');
-  const [fullAutoMonotonicPercentage, setFullAutoMonotonicPercentage] = useState(0);
-  const [fullAutoMonotonicCurrent, setFullAutoMonotonicCurrent] = useState('');
   const FULL_AUTO_CONCURRENCY = 4;
   const updateLocalWoeState = useCallback(
     (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
@@ -1088,55 +1078,30 @@ const SelectedColumnsPage = () => {
     }
     setActiveColumn(col);
     
-    // Show loading overlay
-    setCoarseBinningLoading(true);
-    setCoarseBinningCurrentFeature(col);
-    setCoarseBinningProgress('Initializing...');
-    setCoarseBinningPercentage(0);
-    
     try {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-      const featureTypeLabel = varType === 'discrete' ? 'discrete' : 'continuous';
-
-      setCoarseBinningProgress(`Loading ${col} (${featureTypeLabel})...`);
-      setCoarseBinningPercentage(10);
 
       // First, try to load saved fine bins from database
-      setCoarseBinningProgress('Checking for saved bins...');
-      setCoarseBinningPercentage(20);
       const { merges, hydrated } = await loadSavedFineBins(col, varType);
 
       if (hydrated) {
-        setCoarseBinningPercentage(100);
-        setCoarseBinningProgress('Loaded from cache!');
         await new Promise(resolve => setTimeout(resolve, 300));
-        setCoarseBinningLoading(false);
         return;
       }
 
       if (merges && Object.keys(merges).length > 0) {
         // Data exists in database, bins were loaded by loadSavedFineBins
-        setCoarseBinningProgress('Loading saved bins...');
-        setCoarseBinningPercentage(40);
         const mergePayload = merges;
 
         // Fetch WOE/IV using existing bins
-        setCoarseBinningProgress('Calculating WOE/IV...');
-        setCoarseBinningPercentage(60);
         const updatedWoe = await fetchWoeIv(col, mergePayload, false);
 
         if (updatedWoe) {
           setWoeReadyColumns((prev) => new Set(prev).add(col));
         }
-        setCoarseBinningPercentage(100);
-        setCoarseBinningProgress('Complete!');
         await new Promise(resolve => setTimeout(resolve, 300));
-        setCoarseBinningLoading(false);
       } else {
         // No saved data - calculate from scratch and store
-        setCoarseBinningProgress(`Calculating ${featureTypeLabel} bins...`);
-        setCoarseBinningPercentage(30);
-        
         const res = await fetch('http://localhost:5000/api/univariate-analysis', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1148,18 +1113,12 @@ const SelectedColumnsPage = () => {
           }),
         });
         
-        setCoarseBinningProgress('Processing binning results...');
-        setCoarseBinningPercentage(60);
-        
         const data = await res.json();
         const coarseStats = normalizeBinArray(data[col]?.stats || data[col] || []);
         setUnivariateResults((prev) => ({ ...prev, [col]: { ...(data[col] || {}), stats: coarseStats } }));
         setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
         setFineBinResults((prev) => ({ ...prev, [col]: coarseStats }));
 
-        setCoarseBinningProgress('Calculating bin metrics...');
-        setCoarseBinningPercentage(80);
-        
         // Precompute bin scoring metrics for the initial fine/coarse bins
         try {
           await calculateAllBinMetrics(col, coarseStats);
@@ -1170,9 +1129,6 @@ const SelectedColumnsPage = () => {
         setBinMergeHistory((prev) => ({ ...prev, [col]: prev[col] || {} }));
         setSelectedFineBins((prev) => ({ ...prev, [col]: [] }));
 
-        setCoarseBinningProgress('Calculating WOE/IV...');
-        setCoarseBinningPercentage(90);
-        
         // Calculate and store WOE/IV
         const updatedWoe = await fetchWoeIv(col, undefined, false);
 
@@ -1180,17 +1136,11 @@ const SelectedColumnsPage = () => {
           setWoeReadyColumns((prev) => new Set(prev).add(col));
         }
         
-        setCoarseBinningPercentage(100);
-        setCoarseBinningProgress('Complete!');
         await new Promise(resolve => setTimeout(resolve, 300));
-        setCoarseBinningLoading(false);
       }
     } catch (err) {
       console.error('Error in handleColumnClick:', err);
-      setCoarseBinningProgress('Error occurred!');
-      setCoarseBinningPercentage(0);
       await new Promise(resolve => setTimeout(resolve, 1000));
-      setCoarseBinningLoading(false);
       alert('Error fetching coarse bin results');
     }
   };
@@ -1574,7 +1524,7 @@ const SelectedColumnsPage = () => {
   };
 
   const runFullAutoMonotonicBinning = async () => {
-    if (fullAutoMonotonicLoading || autoBinningModeLoading) return;
+    if (fullAutoMonotonicLoading) return;
     if (!targetVariable) {
       showNotification('Select a target variable before running Full Auto Monotonic Binning.');
       return;
@@ -1593,9 +1543,6 @@ const SelectedColumnsPage = () => {
     }
 
     setFullAutoMonotonicLoading(true);
-    setFullAutoMonotonicProgress('Initializing full auto monotonic binning...');
-    setFullAutoMonotonicPercentage(0);
-    setFullAutoMonotonicCurrent('');
 
     const failedColumns: { column: string; reason: string }[] = [];
     const cachedColumns: string[] = [];
@@ -1603,8 +1550,6 @@ const SelectedColumnsPage = () => {
 
     const processColumn = async (col: string) => {
       const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-      setFullAutoMonotonicCurrent(col);
-      setFullAutoMonotonicProgress(`Processing ${col}...`);
 
       const hasFine = Array.isArray(fineBinResults[col]) && fineBinResults[col].length > 0;
       const hasWoe = Array.isArray(woeIvResults[col]?.stats) && woeIvResults[col]?.stats.length > 0;
@@ -1656,7 +1601,6 @@ const SelectedColumnsPage = () => {
         if (!next) break;
         await processColumn(next);
         processed += 1;
-        setFullAutoMonotonicPercentage(Math.round((processed / eligibleColumns.length) * 100));
       }
     });
 
@@ -1666,8 +1610,6 @@ const SelectedColumnsPage = () => {
     const successfullyProcessed = eligibleColumns.filter(
       (col) => !failedColumns.some((f) => f.column === col)
     );
-    
-    setFullAutoMonotonicProgress('Refreshing WOE/IV data...');
     
     // Refresh WOE/IV for all processed columns
     const refreshPromises = successfullyProcessed.map(async (col) => {
@@ -1682,13 +1624,6 @@ const SelectedColumnsPage = () => {
     });
     
     await Promise.all(refreshPromises);
-
-    setFullAutoMonotonicProgress(
-      failedColumns.length === 0
-        ? 'Full Auto Monotonic Binning complete!'
-        : `Completed with warnings for ${failedColumns.length} feature(s).`
-    );
-    setFullAutoMonotonicPercentage(100);
 
     if (failedColumns.length === 0) {
       const cachedNote = cachedColumns.length > 0
@@ -1705,37 +1640,7 @@ const SelectedColumnsPage = () => {
 
     setTimeout(() => {
       setFullAutoMonotonicLoading(false);
-      setFullAutoMonotonicProgress('');
-      setFullAutoMonotonicPercentage(0);
-      setFullAutoMonotonicCurrent('');
     }, 750);
-  };
-
-  const hydrateFromCache = async (col: string) => {
-    const cachedBins = fineBinResults[col] && fineBinResults[col].length > 0
-      ? fineBinResults[col]
-      : (coarseBinResults[col] && coarseBinResults[col].length > 0 ? coarseBinResults[col] : []);
-    const cachedMerges = binMergeHistory[col];
-
-    if (!cachedBins || cachedBins.length === 0) {
-      return false;
-    }
-
-    try {
-      await calculateAllBinMetrics(col, cachedBins);
-    } catch (e) {
-
-    }
-
-    if (cachedMerges && Object.keys(cachedMerges).length > 0 && recordId) {
-      const woeData = await fetchWoeIv(col, cachedMerges, false);
-      if (woeData && woeData[col]) {
-        setWoeReadyColumns((prev) => new Set(prev).add(col));
-      }
-      return true;
-    }
-
-    return false;
   };
 
   const fetchAllAutoBinningData = async () => {
@@ -1743,108 +1648,42 @@ const SelectedColumnsPage = () => {
     if (isLoadingAutoBinning.current) return;
     isLoadingAutoBinning.current = true;
 
-    // Show loading animation
-    setAutoBinningModeLoading(true);
-    setAutoBinningModeProgress('Initializing...');
-    setAutoBinningModePercentage(0);
-
     try {
       if (!targetVariable) {
-        setAutoBinningModeProgress('Select a target variable first.');
+        isLoadingAutoBinning.current = false;
         return;
       }
 
-      // Count total columns to process
+      // Simply ensure WOE/IV data is loaded for all selected columns
       const columnsToProcess = selectedColumns.filter(col => {
         const existing = woeIvResults[col];
         return !existing || !Array.isArray(existing.stats) || existing.stats.length === 0;
       });
-      const totalColumns = columnsToProcess.length;
-      let processedCount = 0;
 
-      if (totalColumns === 0) {
-        setAutoBinningModeProgress('All features already loaded!');
-        setAutoBinningModePercentage(100);
-        await new Promise(resolve => setTimeout(resolve, 200));
+      if (columnsToProcess.length === 0) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        isLoadingAutoBinning.current = false;
         return;
       }
 
-      setAutoBinningModeProgress(`Processing ${totalColumns} features...`);
-      setAutoBinningModePercentage(5);
-
-      const batchSize = 3;
-      for (let i = 0; i < columnsToProcess.length; i += batchSize) {
-        const batch = columnsToProcess.slice(i, i + batchSize);
-
-        await Promise.all(batch.map(async (col) => {
-          const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
-
-          try {
-            // First try to hydrate from cached fine/coarse results (already in memory)
-            const hydrated = await hydrateFromCache(col);
-            if (hydrated) {
-              return;
-            }
-
-            const res = await fetch('http://localhost:5000/api/univariate-analysis', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                discrete: varType === 'discrete' ? [col] : [],
-                continuous: varType === 'continuous' ? [col] : [],
-                target: targetVariable,
-                record_id: recordId,
-              }),
-            });
-            if (!res.ok) {
-              console.error(`Failed univariate analysis for ${col}:`, await res.text());
-              return;
-            }
-            const data = await res.json();
-            const coarseStats = normalizeBinArray(data[col]?.stats || data[col] || []);
-
-            if (coarseStats.length === 0) {
-              return;
-            }
-
-            setUnivariateResults((prev) => ({ ...prev, [col]: { ...(data[col] || {}), stats: coarseStats } }));
-            setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
-            setFineBinResults((prev) => ({ ...prev, [col]: coarseStats }));
-
-            try {
-              await calculateAllBinMetrics(col, coarseStats);
-            } catch (e) {
-
-            }
-
-            const woeData = await fetchWoeIv(col, undefined, false);
-            if (woeData && woeData[col]) {
-              setWoeReadyColumns((prev) => new Set(prev).add(col));
-            }
-
-            processedCount++;
-            const percentComplete = Math.round(((processedCount) / totalColumns) * 95) + 5;
-            // Update progress only every batch or at completion
-            if (processedCount % batchSize === 0 || processedCount === totalColumns) {
-              setAutoBinningModePercentage(percentComplete);
-              setAutoBinningModeProgress(`Processed ${processedCount} of ${totalColumns} features...`);
-            }
-          } catch (e) {
-            console.error(`Error processing ${col}:`, e);
-            processedCount++;
+      // Fetch WOE/IV for all missing columns
+      // Process columns sequentially
+      for (let i = 0; i < columnsToProcess.length; i++) {
+        const col = columnsToProcess[i];
+        try {
+          const woeData = await fetchWoeIv(col, undefined, false);
+          if (woeData && woeData[col]) {
+            setWoeReadyColumns((prev) => new Set(prev).add(col));
           }
-        }));
+        } catch (e) {
+          console.error(`Error fetching WOE/IV for ${col}:`, e);
+        }
       }
 
-      setAutoBinningModePercentage(100);
-      setAutoBinningModeProgress('Complete! All features loaded.');
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 500));
 
     } finally {
       isLoadingAutoBinning.current = false;
-      setAutoBinningModeLoading(false);
-      setAutoBinningModeProgress('');
-      setAutoBinningModePercentage(0);
     }
   };
 
@@ -1861,7 +1700,7 @@ const SelectedColumnsPage = () => {
 
   const handleSwitchToAutoBinning = async () => {
     setBinningMode('auto');
-    // Trigger loading animation and data fetch
+    // Simply ensure WOE/IV data is loaded
     await fetchAllAutoBinningData();
   };
 
@@ -2544,14 +2383,14 @@ const SelectedColumnsPage = () => {
                   <button
                     className={`mode-toggle-btn ${binningMode === 'auto' ? 'active' : ''}`}
                     onClick={handleSwitchToAutoBinning}
-                    disabled={autoBinningModeLoading || fullAutoMonotonicLoading}
+                    disabled={fullAutoMonotonicLoading}
                   >
                     Auto Binning
                   </button>
                   <button
                     className={`mode-toggle-btn ${binningMode === 'manual' ? 'active' : ''}`}
                     onClick={() => setBinningMode('manual')}
-                    disabled={autoBinningModeLoading || fullAutoMonotonicLoading}
+                    disabled={fullAutoMonotonicLoading}
                   >
                     Manual Binning
                   </button>
@@ -2592,6 +2431,9 @@ const SelectedColumnsPage = () => {
                       })
                       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
+                    const isContinuous = (continuousColumns || []).includes(col);
+                    const varTypeTag = isContinuous ? 'continuous' : 'discrete';
+
                     return (
                       <div key={col} className="auto-binning-card">
                         <div className="auto-binning-card-header">
@@ -2606,6 +2448,9 @@ const SelectedColumnsPage = () => {
                             aria-label={`Select ${col} for modeling`}
                           />
                           <h4>{col}</h4>
+                          <span className={`var-type-tag ${varTypeTag}`}>
+                            {varTypeTag}
+                          </span>
                         </div>
 
                         <div className="auto-binning-chart">
@@ -3723,86 +3568,6 @@ const SelectedColumnsPage = () => {
         </div >
         {/* Footer navigation removed per request: Next and Save moved beside progress bar */}
 
-        {/* Auto Binning Mode Loading Overlay */}
-        {autoBinningModeLoading && (
-          <div className="auto-binning-loading-overlay">
-            <div className="auto-binning-loading-modal">
-              <div className="loading-animation">
-                <div className="pulse-ring"></div>
-                <div className="pulse-ring-delay"></div>
-                <div className="loading-icon">📊</div>
-              </div>
-              <h3 className="loading-title">Loading Auto Binning</h3>
-              <p className="loading-progress">{autoBinningModeProgress}</p>
-              <div className="progress-bar-container">
-                <div
-                  className="progress-bar-fill"
-                  style={{ width: `${autoBinningModePercentage}%` }}
-                ></div>
-              </div>
-              <p className="loading-subtitle">
-                {autoBinningModePercentage > 0 && autoBinningModePercentage < 100
-                  ? 'Processing features...'
-                  : 'Please wait while we load all features...'}
-              </p>
-            </div>
-          </div>
-        )}
-        {fullAutoMonotonicLoading && (
-          <div className="full-auto-overlay">
-            <div className="full-auto-modal">
-              <div className="full-auto-animation">
-                <span className="full-auto-icon">⚡</span>
-              </div>
-              <h3 className="loading-title">Full Auto Monotonic</h3>
-              <p className="loading-progress">
-                {fullAutoMonotonicProgress}
-                {fullAutoMonotonicCurrent ? ` • ${fullAutoMonotonicCurrent}` : ''}
-              </p>
-              <div className="progress-bar-container full-auto">
-                <div
-                  className="progress-bar-fill full-auto"
-                  style={{ width: `${fullAutoMonotonicPercentage}%` }}
-                ></div>
-              </div>
-              <p className="loading-subtitle">
-                {fullAutoMonotonicPercentage < 100
-                  ? 'Applying monotonic binning across all features...'
-                  : 'All features processed.'}
-              </p>
-            </div>
-          </div>
-        )}
-        {/* Coarse Binning Loading Overlay */}
-        {coarseBinningLoading && (
-          <div className="auto-binning-loading-overlay">
-            <div className="auto-binning-loading-modal">
-              <div className="loading-animation">
-                <div className="pulse-ring"></div>
-                <div className="pulse-ring-delay"></div>
-                <div className="loading-icon">📊</div>
-              </div>
-              <h3 className="loading-title">Calculating Coarse Bins</h3>
-              <p className="loading-progress">
-                {coarseBinningProgress}
-                {coarseBinningCurrentFeature ? ` • ${coarseBinningCurrentFeature}` : ''}
-              </p>
-              <div className="progress-bar-container">
-                <div
-                  className="progress-bar-fill"
-                  style={{ width: `${coarseBinningPercentage}%` }}
-                ></div>
-              </div>
-              <p className="loading-subtitle">
-                {coarseBinningPercentage > 0 && coarseBinningPercentage < 100
-                  ? 'Processing binning calculations...'
-                  : coarseBinningPercentage === 100
-                  ? 'Binning complete!'
-                  : 'Please wait while we calculate bins...'}
-              </p>
-            </div>
-          </div>
-        )}
       </div >
     </div >
   );

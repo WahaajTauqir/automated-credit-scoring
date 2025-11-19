@@ -1612,35 +1612,40 @@ select:focus {
 
 .auto-binning-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-  gap: var(--spacing-sm);
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: var(--spacing-md);
   max-height: 70vh;
   overflow-y: auto;
   padding-right: var(--spacing-xs);
+  align-items: start;
 }
 
 .auto-binning-card {
   background: linear-gradient(145deg, var(--bg-tertiary), var(--bg-secondary));
   border: 1px solid var(--border-primary);
-  border-radius: var(--radius-large);
-  padding: var(--spacing-md);
-  transition: all var(--duration-normal) var(--transition-smooth);
-  box-shadow: var(--shadow-medium);
+  border-radius: 12px;
+  padding: 14px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 
 .auto-binning-card:hover {
   border-color: var(--fg-accent-green);
-  box-shadow: var(--shadow-modern);
-  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15), 0 2px 6px rgba(0, 0, 0, 0.1);
+  transform: translateY(-3px);
 }
 
 .auto-binning-card-header {
   display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
-  margin-bottom: var(--spacing-md);
-  padding-bottom: var(--spacing-sm);
+  gap: 12px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border-secondary);
+  min-height: 36px;
 }
 
 .fancy-checkbox {
@@ -1668,10 +1673,43 @@ select:focus {
   font-size: 1rem;
   font-weight: 600;
   color: var(--fg-primary);
+  flex: 1;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.var-type-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-left: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.var-type-tag.continuous {
+  background: linear-gradient(135deg, rgba(255, 165, 0, 0.2), rgba(255, 140, 0, 0.15));
+  color: #ff8c00;
+  border: 1.5px solid rgba(255, 165, 0, 0.4);
+}
+
+.var-type-tag.discrete {
+  background: linear-gradient(135deg, rgba(255, 255, 0, 0.2), rgba(255, 235, 59, 0.15));
+  color: #ffd700;
+  border: 1.5px solid rgba(255, 255, 0, 0.4);
 }
 
 .auto-binning-chart {
-  margin-bottom: var(--spacing-md);
+  margin-bottom: 10px;
   background: var(--bg-primary);
   border-radius: var(--radius-small);
   padding: var(--spacing-sm);
@@ -1679,6 +1717,13 @@ select:focus {
   display: flex;
   flex-direction: column;
   align-items: center;
+  width: 100%;
+}
+
+.auto-binning-chart .recharts-responsive-container {
+  margin: 26px 0 0 -44px;
+  transform: scale(1.1);
+  transform-origin: center center;
 }
 
 .chart-label {
@@ -1727,22 +1772,24 @@ select:focus {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: var(--spacing-sm);
-  padding-top: var(--spacing-sm);
+  gap: 16px;
+  padding-top: 10px;
+  margin-top: auto;
   border-top: 1px solid var(--border-secondary);
 }
 
 .iv-display {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 4px;
+  min-width: 0;
 }
 
 .iv-label {
   font-size: 11px;
   color: var(--fg-tertiary);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.8px;
   font-weight: 600;
 }
 
@@ -1775,27 +1822,30 @@ select:focus {
 }
 
 .configure-manually-btn {
-  padding: 0.5rem 1rem;
-  border: 1px solid var(--fg-accent-green);
-  border-radius: var(--radius-small);
+  padding: 8px 16px;
+  border: 1.5px solid var(--fg-accent-green);
+  border-radius: 6px;
   background: transparent;
   color: var(--fg-accent-green);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: all var(--duration-fast) var(--transition-smooth);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   white-space: nowrap;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
 }
 
 .configure-manually-btn:hover {
   background: var(--fg-accent-green);
   color: var(--fg-primary);
-  box-shadow: var(--shadow-glow);
+  box-shadow: 0 2px 8px rgba(46, 160, 67, 0.3);
   transform: translateY(-1px);
 }
 
 .configure-manually-btn:active {
   transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(46, 160, 67, 0.2);
 }
 
 /* Responsive adjustments for auto binning */

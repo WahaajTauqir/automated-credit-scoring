@@ -4438,36 +4438,38 @@ def woe_iv_api():
         results = {}
 
         # Create coarse bins for variables that are new
+        # CRITICAL FIX: Use the type parameter from request instead of heuristics
         for var in variables:
             var_series = df[var]
-            is_likely_id = any(k in var.lower() for k in ['id', 'key', 'code', 'no', 'num'])
-            unique_cnt = var_series.nunique(dropna=True)
-
+            
+            # Determine variable type: first check types_map, then global_type, then fall back to heuristics
+            var_type_for_binning = types_map.get(var) or global_type
+            if not var_type_for_binning:
+                # Fall back to heuristics only if type not provided
+                is_likely_id = any(k in var.lower() for k in ['id', 'key', 'code', 'no', 'num'])
+                unique_cnt = var_series.nunique(dropna=True)
+                if pd.api.types.is_numeric_dtype(var_series):
+                    var_type_for_binning = 'discrete' if (is_likely_id or unique_cnt <= 50) else 'continuous'
+                else:
+                    var_type_for_binning = 'discrete'
+            
             # Use fresh data copy for each variable
             temp_df = df.copy()
             
-            if pd.api.types.is_numeric_dtype(var_series):
-                if is_likely_id or unique_cnt <= 50:
-                    try:
-                        _, temp_df[f"{var}_binned"], _ = coarse_bin_discrete(temp_df, var, target)
-                        print(f"WOE/IV DEBUG: Created discrete bins for {var} (numeric with {unique_cnt} unique values)")
-                    except Exception as e:
-                        print(f"WOE/IV DEBUG: Failed to create discrete bins for {var}: {e}")
-                        continue
+            # Use the determined type to call the correct binning function
+            try:
+                if var_type_for_binning == 'continuous':
+                    _, temp_df[f"{var}_binned"] = coarse_bin_continuous(temp_df, var, target)
+                    print(f"WOE/IV DEBUG: Created continuous bins for {var} (type: {var_type_for_binning})")
                 else:
-                    try:
-                        _, temp_df[f"{var}_binned"] = coarse_bin_continuous(temp_df, var, target)
-                        print(f"WOE/IV DEBUG: Created continuous bins for {var} (numeric with {unique_cnt} unique values)")
-                    except Exception as e:
-                        print(f"WOE/IV DEBUG: Failed to create continuous bins for {var}: {e}")
-                        continue
-            else:
-                try:
+                    # Default to discrete for discrete type or non-numeric
                     _, temp_df[f"{var}_binned"], _ = coarse_bin_discrete(temp_df, var, target)
-                    print(f"WOE/IV DEBUG: Created discrete bins for {var} (non-numeric)")
-                except Exception as e:
-                    print(f"WOE/IV DEBUG: Failed to create discrete bins for {var}: {e}")
-                    continue
+                    print(f"WOE/IV DEBUG: Created discrete bins for {var} (type: {var_type_for_binning})")
+            except Exception as e:
+                print(f"WOE/IV DEBUG: Failed to create bins for {var} (type: {var_type_for_binning}): {e}")
+                import traceback
+                traceback.print_exc()
+                continue
             
             # Copy only the binned column back to main dataframe
             df[f"{var}_binned"] = temp_df[f"{var}_binned"]
