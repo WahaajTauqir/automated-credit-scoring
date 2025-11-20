@@ -28,6 +28,9 @@ from io import BytesIO
 from decimal import Decimal
 from typing import Optional, Dict, Any, Tuple, List
 
+# Import XGBoost raw training module
+from xgboost_raw_training import train_xgboost_on_raw_features, apply_xgboost_scorecard
+
 # Import ONLY new database layer functions - NO MORE db_old imports!
 from db import (
     get_db_connection, init_db, ensure_final_selected_column, ensure_model_ready_column, ensure_dataset_identifier_column, sync_model_ready_to_final_selected,
@@ -6457,9 +6460,89 @@ def random_forest_analysis():
         traceback.print_exc()
         return jsonify({"error": f"Failed to perform Random Forest analysis: {str(e)}"}), 500
 
-# ----------- XGBoost Analysis -----------
+# ----------- XGBoost Analysis (FIXED - Uses RAW Features) -----------
 @app.route('/api/xgboost', methods=['POST'])
 def xgboost_analysis():
+    """
+    Perform XGBoost analysis on selected variables.
+    NOW TRAINS ON RAW FEATURES, NOT WOE-TRANSFORMED!
+    Expects payload: { selected_variables: [list], target: string }
+    Returns: model metrics, feature importance, ROC data, etc.
+    """
+    try:
+        import xgboost as xgb
+    except ImportError:
+        return jsonify({"error": "XGBoost not installed. Please install with: pip install xgboost"}), 500
+    
+    try:
+        data = request.get_json()
+        selected_variables = data.get('selected_variables', [])
+        target = data.get('target')
+        dataset_id = (
+            data.get('record_id')
+            or data.get('dataset_id')
+            or data.get('recordId')
+            or data.get('datasetId')
+        )
+        
+        if dataset_id:
+            try:
+                dataset_id = int(dataset_id)
+            except (ValueError, TypeError):
+                return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+
+        if not selected_variables or not target:
+            return jsonify({"error": "Missing selected_variables or target"}), 400
+        if not dataset_id:
+            return jsonify({"error": "Missing dataset_id/record_id"}), 400
+
+        # Load CSV
+        try:
+            csv_path = get_csv_path(dataset_id)
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
+
+        if target not in df.columns:
+            return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
+        
+        # Verify selected variables exist
+        missing_vars = [v for v in selected_variables if v not in df.columns]
+        if missing_vars:
+            return jsonify({"error": f"Variables not found in dataset: {missing_vars}"}), 400
+
+        # KEY FIX: Train on RAW features using the new module
+        print(f"\n[XGBoost API] Training on {len(selected_variables)} RAW features (not WOE)")
+        result = train_xgboost_on_raw_features(df, selected_variables, target)
+        
+        # Save model artifact
+        try:
+            print(f"[MODEL ARTIFACT] Saving XGBoost artifact for dataset {dataset_id}")
+            artifact_payload = result['artifact_payload']
+            artifact_metadata = save_model_artifact(dataset_id, 'xgboost', artifact_payload)
+            if artifact_metadata:
+                result['artifact'] = artifact_metadata
+                print(f"[MODEL ARTIFACT] Successfully saved XGBoost artifact: {artifact_metadata}")
+            else:
+                print(f"[MODEL ARTIFACT] save_model_artifact returned None for dataset {dataset_id}")
+        except Exception as artifact_err:
+            print(f"[MODEL ARTIFACT] Failed to persist XGBoost model: {artifact_err}")
+            import traceback
+            traceback.print_exc()
+        
+        # Remove artifact_payload from response (it contains binary data)
+        if 'artifact_payload' in result:
+            del result['artifact_payload']
+        
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"XGBOOST ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to perform XGBoost analysis: {str(e)}"}), 500
+        
+# Helper function for WOE mapping (used by Logistic Regression and Random Forest)
     """
     Perform XGBoost analysis on selected variables.
     Expects payload: { selected_variables: [list], target: string, woe_transformed_data: {} }
@@ -7872,102 +7955,85 @@ def apply_scorecard():
             scores = _probability_to_score(prob_bad, DEFAULT_SCORECARD_CONFIG).astype(float).tolist()
                 
         elif model_type in ['random_forest', 'xgboost']:
-            if X_tree.empty:
-                return jsonify({"error": "No WOE-transformed features available for tree-based scoring"}), 400
-            # For tree-based models, reuse the trained model when possible
+            # KEY FIX: For XGBoost, use the trained model on RAW features
             try:
                 y_pred_proba_bad = None
                 artifact_used = False
                 
-                if (
-                    model_type == 'xgboost'
-                    and artifact_payload
-                    and artifact_model_type == 'xgboost'
-                    and artifact_payload.get('model_bytes')
-                ):
-                    import xgboost as xgb
-                    artifact_feature_cols = artifact_payload.get('feature_columns') or tree_feature_names
-                    missing_cols = [col for col in (artifact_feature_cols or []) if col not in filtered_df.columns]
-                    if missing_cols:
-                        print(f"[apply_scorecard] Warning: Missing artifact feature columns: {missing_cols}")
-                    elif artifact_feature_cols:
+                # Try to load persisted model artifact
+                artifact_data, artifact_label = load_model_artifact(dataset_id, model_type)
+                
+                if model_type == 'xgboost' and artifact_data and artifact_data.get('model_bytes'):
+                    print(f"[apply_scorecard] Loading XGBoost model from artifact")
+                    
+                    # Check if model uses raw features (new) or WOE features (old)
+                    uses_raw_features = artifact_data.get('uses_raw_features', False)
+                    
+                    if uses_raw_features:
+                        # NEW: Model trained on RAW features
+                        print(f"[apply_scorecard] Applying XGBoost trained on RAW features")
                         try:
-                            booster = xgb.Booster()
-                            booster.load_model(bytearray(artifact_payload['model_bytes']))
-                            dmatrix = xgb.DMatrix(
-                                filtered_df[artifact_feature_cols].values,
-                                feature_names=artifact_feature_cols
-                            )
-                            y_pred_proba_bad = booster.predict(dmatrix)
+                            scoring_result = apply_xgboost_scorecard(df, target, artifact_data)
+                            y_pred_proba_bad = scoring_result['probabilities']
+                            y = scoring_result['target']
+                            row_ids = scoring_result['row_ids']
                             artifact_used = True
-                            print("[apply_scorecard] Used persisted XGBoost booster for scorecard testing.")
-                        except Exception as load_err:
-                            print(f"[apply_scorecard] Warning: Failed to load XGBoost artifact: {load_err}")
-                            y_pred_proba_bad = None
+                            print(f"[apply_scorecard] Successfully applied XGBoost on raw features")
+                        except Exception as raw_err:
+                            print(f"[apply_scorecard] Failed to apply XGBoost on raw features: {raw_err}")
+                            import traceback
+                            traceback.print_exc()
+                            return jsonify({"error": f"Failed to apply XGBoost model: {str(raw_err)}"}), 500
+                    else:
+                        # OLD: Model trained on WOE features (backward compatibility)
+                        print(f"[apply_scorecard] Using old WOE-based XGBoost model")
+                        if not X_tree.empty:
+                            import pickle
+                            try:
+                                xgb_model = pickle.loads(artifact_data['model_bytes'])
+                                y_pred_proba_bad = xgb_model.predict_proba(X_tree)[:, 1]
+                                artifact_used = True
+                                print(f"[apply_scorecard] Successfully applied old WOE-based XGBoost model")
+                            except Exception as old_err:
+                                print(f"[apply_scorecard] Failed to use old WOE model: {old_err}")
+                                return jsonify({"error": "Old XGBoost model failed. Please retrain with current version."}), 400
+                        else:
+                            return jsonify({"error": "No WOE-transformed features available for old XGBoost model"}), 400
+                
+                elif model_type == 'random_forest':
+                    # Random Forest still uses WOE features
+                    if X_tree.empty:
+                        return jsonify({"error": "No WOE-transformed features available for Random Forest"}), 400
+                    
+                    from sklearn.ensemble import RandomForestClassifier
+                    stats = (model_results or {}).get('model_stats', {}) if model_results else {}
+                    rf_model = RandomForestClassifier(
+                        n_estimators=stats.get('n_estimators', 100),
+                        max_depth=stats.get('max_depth', 10),
+                        min_samples_split=5,
+                        min_samples_leaf=2,
+                        random_state=42,
+                        n_jobs=-1
+                    )
+                    rf_model.fit(X_tree, y)
+                    y_pred_proba_bad = rf_model.predict_proba(X_tree)[:, 1]
+                    print(f"[apply_scorecard] Trained and applied Random Forest model")
                 
                 if y_pred_proba_bad is None:
-                    if model_type == 'random_forest':
-                        from sklearn.ensemble import RandomForestClassifier
-                        stats = (model_results or {}).get('model_stats', {}) if model_results else {}
-                        rf_model = RandomForestClassifier(
-                            n_estimators=stats.get('n_estimators', 100),
-                            max_depth=stats.get('max_depth', 10),
-                            min_samples_split=5,
-                            min_samples_leaf=2,
-                            random_state=42,
-                            n_jobs=-1
-                        )
-                        rf_model.fit(X_tree, y)
-                        y_pred_proba_bad = rf_model.predict_proba(X_tree)[:, 1]
-                    else:  # xgboost fallback (no artifact available)
-                        import xgboost as xgb
-                        artifact_params = artifact_payload.get('xgb_params', {}) if artifact_payload else {}
-                        stats = (model_results or {}).get('model_stats', {}) if model_results else {}
-                        xgb_model = xgb.XGBClassifier(
-                            n_estimators=stats.get('n_estimators', 100),
-                            max_depth=artifact_params.get('max_depth', stats.get('max_depth', 6)),
-                            learning_rate=artifact_params.get('learning_rate', stats.get('learning_rate', 0.1)),
-                            subsample=artifact_params.get('subsample', 1.0),
-                            colsample_bytree=artifact_params.get('colsample_bytree', 1.0),
-                            scale_pos_weight=artifact_params.get('scale_pos_weight', 1.0),
-                            objective=artifact_params.get('objective', 'binary:logistic'),
-                            eval_metric='logloss',
-                            random_state=42,
-                            use_label_encoder=False
-                        )
-                        xgb_model.fit(X_tree, y)
-                        y_pred_proba_bad = xgb_model.predict_proba(X_tree)[:, 1]
+                    return jsonify({"error": f"{model_type} model could not generate predictions"}), 400
                 
+                # Convert probabilities to credit scores
                 scores_array = _probability_to_score(y_pred_proba_bad, DEFAULT_SCORECARD_CONFIG)
                 scores = scores_array.astype(float).tolist()
                 
-                print(f"DEBUG: Tree model scoring - Bad probabilities range: {np.min(y_pred_proba_bad):.4f} to {np.max(y_pred_proba_bad):.4f}")
-                print(f"DEBUG: Tree model scoring - Scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
+                print(f"[apply_scorecard] {model_type} scoring - Bad probabilities range: {np.min(y_pred_proba_bad):.4f} to {np.max(y_pred_proba_bad):.4f}")
+                print(f"[apply_scorecard] {model_type} scoring - Scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
                 
             except Exception as model_err:
-                print(f"DEBUG: Tree model scoring failed: {model_err}")
-                # Fallback: use feature importance-based scoring with proper direction
-                if model_results and 'feature_importance' in model_results:
-                    coefficients = {}
-                    for feature_info in model_results['feature_importance']:
-                        var_name = feature_info.get('variable')
-                        importance = feature_info.get('importance', 0)
-                        coefficients[var_name] = importance * 100  # Scale factor
-                    
-                    # FIXED: Simple additive scoring with proper direction
-                    raw_scores = []
-                    for idx in range(len(X_logistic)):
-                        score = 600  # Base score
-                        for var in selected_variables:
-                            beta = coefficients.get(var, 0)
-                            woe = X_logistic.iloc[idx][var] if var in X_logistic.columns else 0
-                            # FIX: Use negative relationship for risk factors
-                            score -= beta * woe
-                        raw_scores.append(score)
-                    scores_array = np.clip(np.asarray(raw_scores, dtype=float), DEFAULT_SCORECARD_CONFIG['min_score'], DEFAULT_SCORECARD_CONFIG['max_score'])
-                    scores = scores_array.astype(float).tolist()
-                else:
-                    return jsonify({"error": f"Failed to calculate scores for {model_type}: {str(model_err)}"}), 500
+                print(f"[apply_scorecard] {model_type} model scoring failed: {model_err}")
+                import traceback
+                traceback.print_exc()
+                return jsonify({"error": f"Failed to calculate scores for {model_type}: {str(model_err)}"}), 500
         else:
             return jsonify({"error": f"Unsupported model type or missing model results: {model_type}"}), 400
 
