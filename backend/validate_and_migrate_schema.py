@@ -33,7 +33,11 @@ def get_required_columns():
         'records': [
             'id', 'name', 'file_path', 'total_features', 'discrete_features',
             'continuous_features', 'target_variable', 'created_at', 'updated_at',
-            'identifier', 'preprocess_selection'
+            'identifier', 'preprocess_selection',
+            # Train/Test Split columns
+            'train_test_split_seed', 'train_test_split_size', 'train_test_split_method',
+            'train_size', 'test_size', 'train_bad_count', 'test_bad_count',
+            'split_created_at', 'data_hash'
         ],
         'features': [
             'id', 'dataset_id', 'name', 'type', 'selected', 'model_ready',
@@ -229,6 +233,16 @@ def apply_migrations():
             'records.updated_at': 'TIMESTAMP DEFAULT NOW()',
             'records.identifier': 'TEXT',
             'records.preprocess_selection': 'BOOLEAN DEFAULT FALSE',
+            # Train/Test Split columns
+            'records.train_test_split_seed': 'INTEGER',
+            'records.train_test_split_size': 'NUMERIC(5, 3)',
+            'records.train_test_split_method': 'VARCHAR(50)',
+            'records.train_size': 'INTEGER',
+            'records.test_size': 'INTEGER',
+            'records.train_bad_count': 'INTEGER',
+            'records.test_bad_count': 'INTEGER',
+            'records.split_created_at': 'TIMESTAMP',
+            'records.data_hash': 'VARCHAR(64)',
             
             # features table
             'features.id': 'SERIAL PRIMARY KEY',  # This should already exist
@@ -317,11 +331,21 @@ def apply_migrations():
                             elif 'INT' in col_def:
                                 simple_def = 'INT DEFAULT 0' if 'DEFAULT 0' in col_def else 'INT'
                             elif 'NUMERIC' in col_def:
-                                simple_def = col_def.split('DEFAULT')[0].strip() if 'DEFAULT' in col_def else col_def.split('NOT NULL')[0].strip()
+                                # Preserve NUMERIC(5, 3) format, remove constraints
+                                if 'DEFAULT' in col_def:
+                                    simple_def = col_def.split('DEFAULT')[0].strip()
+                                elif 'NOT NULL' in col_def:
+                                    simple_def = col_def.split('NOT NULL')[0].strip()
+                                else:
+                                    simple_def = col_def.strip()  # Keep as-is if no constraints
                             elif 'TIMESTAMP' in col_def:
                                 simple_def = 'TIMESTAMP DEFAULT NOW()'
                             elif 'VARCHAR' in col_def:
-                                simple_def = col_def.split('NOT NULL')[0].strip()
+                                # Preserve VARCHAR(50) format, remove constraints
+                                if 'NOT NULL' in col_def:
+                                    simple_def = col_def.split('NOT NULL')[0].strip()
+                                else:
+                                    simple_def = col_def.strip()  # Keep as-is if no constraints
                             else:
                                 simple_def = col_def.split('NOT NULL')[0].split('DEFAULT')[0].strip()
                         else:

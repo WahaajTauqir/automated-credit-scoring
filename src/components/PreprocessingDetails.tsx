@@ -115,41 +115,101 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                 })
             });
 
-            if (metricsResponse.ok && changesResponse.ok) {
-                const metricsData = await metricsResponse.json();
-                const changesData = await changesResponse.json();
+            // Check for HTTP errors
+            if (!metricsResponse.ok) {
+                const errorData = await metricsResponse.json().catch(() => ({ error: 'Unknown error' }));
+                console.error('Metrics API error:', errorData);
+                alert(`Failed to load quality metrics: ${errorData.error || 'Unknown error'}`);
+                setIsLoading(false);
+                return;
+            }
 
-                // Get total rows for calculating missing percentage
-                let totalRows = 1;
-                if (metricsData.success) {
-                    const metrics = metricsData.quality_metrics;
-                    totalRows = metrics.basic_info.num_rows || 1;
-                    setDatasetStats({
-                        total_rows: metrics.basic_info.num_rows,
-                        total_features: metrics.basic_info.num_columns,
-                        discrete_features: metrics.dtype_analysis.categorical_columns.length,
-                        continuous_features: metrics.dtype_analysis.numeric_columns.length,
-                        missing_values: metrics.missing_analysis.total_missing,
-                        duplicates_removed: metrics.duplicate_analysis.exact_duplicates,
-                        quality_score: metrics.quality_score
-                    });
-                } else if (changesData.summary?.original_shape?.[0]) {
-                    totalRows = changesData.summary.original_shape[0];
-                }
+            if (!changesResponse.ok) {
+                const errorData = await changesResponse.json().catch(() => ({ error: 'Unknown error' }));
+                console.error('Column changes API error:', errorData);
+                alert(`Failed to load column changes: ${errorData.error || 'Unknown error'}`);
+                setIsLoading(false);
+                return;
+            }
 
-                if (changesData.success) {
+            const metricsData = await metricsResponse.json();
+            const changesData = await changesResponse.json();
+            
+            // Debug logging
+            console.log('\n[PREPROCESSING UI] ========================================');
+            console.log('[PREPROCESSING UI] API Responses received');
+            console.log('[PREPROCESSING UI] Metrics response:', metricsData);
+            console.log('[PREPROCESSING UI] Changes response keys:', Object.keys(changesData));
+            console.log('[PREPROCESSING UI] Changes success:', changesData.success);
+            console.log('[PREPROCESSING UI] Column changes count:', changesData.column_changes?.length || 0);
+            console.log('[PREPROCESSING UI] Column changes type:', typeof changesData.column_changes);
+            console.log('[PREPROCESSING UI] Is array?', Array.isArray(changesData.column_changes));
+            if (changesData.column_changes && changesData.column_changes.length > 0) {
+                console.log('[PREPROCESSING UI] First column change:', changesData.column_changes[0]);
+                console.log('[PREPROCESSING UI] Column names:', changesData.column_changes.map((c: any) => c.column).slice(0, 10));
+            }
+            console.log('[PREPROCESSING UI] Full changesData:', JSON.stringify(changesData, null, 2).substring(0, 1000));
+            console.log('[PREPROCESSING UI] ========================================\n');
+            
+            // Check if responses have errors in the data
+            if (!metricsData.success || !changesData.success) {
+                console.error('Preprocessing API errors:', {
+                    metrics: metricsData.error || 'Unknown error',
+                    changes: changesData.error || 'Unknown error',
+                    metricsData,
+                    changesData
+                });
+                alert(`Preprocessing error: ${changesData.error || metricsData.error || 'Unknown error'}`);
+                setIsLoading(false);
+                return;
+            }
+
+            // Get total rows for calculating missing percentage
+            let totalRows = 1;
+            if (metricsData.success) {
+                const metrics = metricsData.quality_metrics;
+                totalRows = metrics.basic_info.num_rows || 1;
+                setDatasetStats({
+                    total_rows: metrics.basic_info.num_rows,
+                    total_features: metrics.basic_info.num_columns,
+                    discrete_features: metrics.dtype_analysis.categorical_columns.length,
+                    continuous_features: metrics.dtype_analysis.numeric_columns.length,
+                    missing_values: metrics.missing_analysis.total_missing,
+                    duplicates_removed: metrics.duplicate_analysis.exact_duplicates,
+                    quality_score: metrics.quality_score
+                });
+            } else if (changesData.summary?.original_shape?.[0]) {
+                totalRows = changesData.summary.original_shape[0];
+            }
+
+            // Check if we have column_changes data
+            if (!changesData.column_changes || !Array.isArray(changesData.column_changes)) {
+                console.error('[PREPROCESSING] No column_changes found in response:', changesData);
+                console.error('[PREPROCESSING] Full changesData:', JSON.stringify(changesData, null, 2));
+                alert('No column data received from preprocessing API. Please check the backend logs.');
+                setIsLoading(false);
+                return;
+            }
+
+            console.log('[PREPROCESSING] Column changes array length:', changesData.column_changes.length);
+            console.log('[PREPROCESSING] Column changes sample:', changesData.column_changes.slice(0, 2));
+            console.log('[PREPROCESSING] changesData.success:', changesData.success);
+
+            // Process features if we have column_changes data, even if success is false (to show what we have)
+            if (changesData.column_changes.length > 0) {
+                console.log('[PREPROCESSING] Processing', changesData.column_changes.length, 'column changes');
                     
-                    // Create a map of feature names to their data from database (selected status and type)
-                    const featuresMap = new Map(
-                        featuresFromDb.map((f: any) => [f.name, { 
-                            selected: f.selected, 
-                            type: f.type, // 'discrete' or 'continuous' from database
-                            exists: true 
-                        }])
-                    );
+                // Create a map of feature names to their data from database (selected status and type)
+                const featuresMap = new Map(
+                    featuresFromDb.map((f: any) => [f.name, { 
+                        selected: f.selected, 
+                        type: f.type, // 'discrete' or 'continuous' from database
+                        exists: true 
+                    }])
+                );
 
-                    // Include ALL columns (including removed ones) so they can be unchecked
-                    const featuresList: FeaturePreprocessingDetail[] = changesData.column_changes
+                // Include ALL columns (including removed ones) so they can be unchecked
+                const featuresList: FeaturePreprocessingDetail[] = changesData.column_changes
                         .map((col: any) => {
                             // Get variance (default to 0 if not provided)
                             const variance = col.variance !== undefined ? col.variance : 0;
@@ -197,6 +257,16 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                             
                             const dbFeature = featuresMap.get(col.column);
                             
+                            // Debug logging for feature processing
+                            if (col.column === changesData.column_changes[0]?.column || !dbFeature) {
+                                console.log(`[PREPROCESSING UI] Processing feature: ${col.column}`);
+                                console.log(`[PREPROCESSING UI]   DB feature exists:`, !!dbFeature);
+                                console.log(`[PREPROCESSING UI]   DB selected:`, dbFeature?.selected);
+                                console.log(`[PREPROCESSING UI]   DB type:`, dbFeature?.type);
+                                console.log(`[PREPROCESSING UI]   Is removed:`, isRemoved);
+                                console.log(`[PREPROCESSING UI]   Is fit for binning:`, isFitForBinning);
+                            }
+                            
                             // Determine feature type: use database type if available, otherwise infer from processed_dtype
                             let featureType: 'discrete' | 'continuous';
                             if (dbFeature?.type) {
@@ -238,6 +308,7 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                     // Also create feature with selected=false if it doesn't exist
                                     if (dbFeature?.exists) {
                                         if (dbFeature.selected) {
+                                            console.log(`[PREPROCESSING UI] Auto-unselecting removed/high missing/zero variance feature: ${col.column}`);
                                             fetch('http://localhost:5000/api/update-feature-selection', {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
@@ -246,10 +317,14 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                                     feature_name: col.column,
                                                     selected: false
                                                 })
-                                            }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                            })
+                                            .then(res => res.json())
+                                            .then(data => console.log(`[PREPROCESSING UI] Auto-unselect response for ${col.column}:`, data))
+                                            .catch(err => console.error(`[PREPROCESSING UI] Error auto-saving feature selection for ${col.column}:`, err));
                                         }
                                     } else {
                                         // Create feature with selected=false for removed/high missing/zero variance features
+                                        console.log(`[PREPROCESSING UI] Creating feature with selected=false: ${col.column}`);
                                         fetch('http://localhost:5000/api/update-feature-selection', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
@@ -258,7 +333,10 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                                 feature_name: col.column,
                                                 selected: false
                                             })
-                                        }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                        })
+                                        .then(res => res.json())
+                                        .then(data => console.log(`[PREPROCESSING UI] Create feature response for ${col.column}:`, data))
+                                        .catch(err => console.error(`[PREPROCESSING UI] Error creating feature ${col.column}:`, err));
                                     }
                                 } else if (hasLowVariance || hasHighRepeatRate) {
                                     // Low variance or high repeat rate features - automatically uncheck but allow user to select
@@ -282,6 +360,7 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                     if (dbFeature?.exists) {
                                         // Only update if it's currently false (to avoid unnecessary updates)
                                         if (!dbFeature.selected) {
+                                            console.log(`[PREPROCESSING UI] Auto-selecting quality-passed feature: ${col.column}`);
                                             fetch('http://localhost:5000/api/update-feature-selection', {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
@@ -290,10 +369,14 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                                     feature_name: col.column,
                                                     selected: true
                                                 })
-                                            }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                            })
+                                            .then(res => res.json())
+                                            .then(data => console.log(`[PREPROCESSING UI] Auto-select response for ${col.column}:`, data))
+                                            .catch(err => console.error(`[PREPROCESSING UI] Error auto-saving feature selection for ${col.column}:`, err));
                                         }
                                     } else {
                                         // Feature doesn't exist in DB, create it with selected=true
+                                        console.log(`[PREPROCESSING UI] Creating feature with selected=true: ${col.column}`);
                                         fetch('http://localhost:5000/api/update-feature-selection', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
@@ -302,7 +385,10 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                                 feature_name: col.column,
                                                 selected: true
                                             })
-                                        }).catch(err => console.error('Error auto-saving feature selection:', err));
+                                        })
+                                        .then(res => res.json())
+                                        .then(data => console.log(`[PREPROCESSING UI] Create feature response for ${col.column}:`, data))
+                                        .catch(err => console.error(`[PREPROCESSING UI] Error creating feature ${col.column}:`, err));
                                     }
                                 } else {
                                     // Feature doesn't pass quality checks, use DB value or false
@@ -352,7 +438,28 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                     }
                     
                     // Include ALL features (including removed ones) except target variable
+                    console.log('[PREPROCESSING UI] ========================================');
+                    console.log('[PREPROCESSING UI] Setting features in UI state');
+                    console.log('[PREPROCESSING UI] Total features:', filteredFeaturesList.length);
+                    console.log('[PREPROCESSING UI] Selected features:', filteredFeaturesList.filter(f => f.selected).length);
+                    console.log('[PREPROCESSING UI] Dropped features:', filteredFeaturesList.filter(f => !f.selected).length);
+                    console.log('[PREPROCESSING UI] Features with selected=true:', filteredFeaturesList.filter(f => f.selected).map(f => f.name));
+                    console.log('[PREPROCESSING UI] Features sample (first 5):', filteredFeaturesList.slice(0, 5).map(f => ({
+                        name: f.name,
+                        selected: f.selected,
+                        type: f.type,
+                        passes_quality: f.passes_quality_check
+                    })));
+                    console.log('[PREPROCESSING UI] ========================================');
+                    
+                    if (filteredFeaturesList.length === 0) {
+                        console.warn('[PREPROCESSING UI] ⚠️ No features after filtering. All features may have been filtered out.');
+                        console.warn('[PREPROCESSING UI] Target variable:', targetVariable);
+                        console.warn('[PREPROCESSING UI] Original features list length:', featuresList.length);
+                    }
+                    
                     setFeatures(filteredFeaturesList);
+                    console.log('[PREPROCESSING UI] ✅ Features state updated in React');
                     
                     // After all calculations are complete, automatically set preprocess_selection to true if it's false
                     if (!preprocessSelectionSavedLocal) {
@@ -373,6 +480,22 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                             console.error('Error auto-saving preprocess_selection:', error);
                         }
                     }
+            } else {
+                // No column_changes data
+                console.error('[PREPROCESSING] No column_changes data available');
+                console.error('[PREPROCESSING] changesData.success:', changesData.success);
+                console.error('[PREPROCESSING] column_changes.length:', changesData.column_changes?.length);
+                console.error('[PREPROCESSING] Full changesData:', JSON.stringify(changesData, null, 2));
+                
+                // Set empty features array to show "No features loaded" message
+                setFeatures([]);
+                
+                if (!changesData.success) {
+                    alert(`Failed to load preprocessing data: ${changesData.error || 'Unknown error'}`);
+                } else if (changesData.column_changes && changesData.column_changes.length === 0) {
+                    alert('No columns found in the dataset. Please check your data file.');
+                } else {
+                    alert('No column data available. Please check the backend logs.');
                 }
             }
         } catch (error) {
@@ -384,20 +507,36 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
 
     // Toggle feature selection
     const handleFeatureToggle = async (featureName: string) => {
+        console.log('[PREPROCESSING UI] ========================================');
+        console.log('[PREPROCESSING UI] Toggling feature:', featureName);
+        
         // Find the current feature to get its current selected state
         const currentFeature = features.find(f => f.name === featureName);
-        if (!currentFeature) return;
+        if (!currentFeature) {
+            console.error('[PREPROCESSING UI] Feature not found:', featureName);
+            return;
+        }
         
+        const oldSelectedState = currentFeature.selected;
         const newSelectedState = !currentFeature.selected;
+        
+        console.log('[PREPROCESSING UI] Current state:', oldSelectedState, '→ New state:', newSelectedState);
         
         // Update local state immediately for responsiveness
         setFeatures(prev => prev.map(f => 
             f.name === featureName ? { ...f, selected: newSelectedState } : f
         ));
+        console.log('[PREPROCESSING UI] ✅ Local state updated');
 
         // Update database
         try {
-            await fetch('http://localhost:5000/api/update-feature-selection', {
+            console.log('[PREPROCESSING UI] Sending update to backend:', {
+                dataset_id: datasetId,
+                feature_name: featureName,
+                selected: newSelectedState
+            });
+            
+            const response = await fetch('http://localhost:5000/api/update-feature-selection', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -406,12 +545,24 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                     selected: newSelectedState
                 })
             });
+            
+            const responseData = await response.json();
+            console.log('[PREPROCESSING UI] Backend response:', response.status, responseData);
+            
+            if (!response.ok || !responseData.success) {
+                throw new Error(responseData.error || 'Failed to update feature selection');
+            }
+            
+            console.log('[PREPROCESSING UI] ✅ Feature selection saved to database');
+            console.log('[PREPROCESSING UI] ========================================');
         } catch (error) {
-            console.error('Error updating feature selection:', error);
+            console.error('[PREPROCESSING UI] ❌ Error updating feature selection:', error);
             // Revert on error
             setFeatures(prev => prev.map(f => 
-                f.name === featureName ? { ...f, selected: !newSelectedState } : f
+                f.name === featureName ? { ...f, selected: oldSelectedState } : f
             ));
+            console.log('[PREPROCESSING UI] ⚠️ Reverted local state due to error');
+            alert(`Failed to save feature selection: ${error}`);
         }
     };
 
@@ -427,6 +578,44 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
     const selectedCount = selectedFeatures.length;
     const droppedCount = droppedFeatures.length;
     const qualityPassCount = features.filter(f => f.passes_quality_check).length;
+    
+    // Debug logging when features change
+    useEffect(() => {
+        console.log('[PREPROCESSING UI] ========================================');
+        console.log('[PREPROCESSING UI] Features state updated');
+        console.log('[PREPROCESSING UI] Total features:', features.length);
+        console.log('[PREPROCESSING UI] Selected:', selectedCount);
+        console.log('[PREPROCESSING UI] Dropped:', droppedCount);
+        console.log('[PREPROCESSING UI] Quality passed:', qualityPassCount);
+        if (features.length > 0) {
+            console.log('[PREPROCESSING UI] Selected feature names:', selectedFeatures.map(f => f.name));
+            console.log('[PREPROCESSING UI] First 3 features details:', features.slice(0, 3).map(f => ({
+                name: f.name,
+                selected: f.selected,
+                type: f.type
+            })));
+        }
+        console.log('[PREPROCESSING UI] ========================================');
+    }, [features, selectedCount, droppedCount, qualityPassCount, selectedFeatures]);
+    
+    // Debug logging when features change
+    useEffect(() => {
+        console.log('[PREPROCESSING UI] ========================================');
+        console.log('[PREPROCESSING UI] Features state updated');
+        console.log('[PREPROCESSING UI] Total features:', features.length);
+        console.log('[PREPROCESSING UI] Selected:', selectedCount);
+        console.log('[PREPROCESSING UI] Dropped:', droppedCount);
+        console.log('[PREPROCESSING UI] Quality passed:', qualityPassCount);
+        if (features.length > 0) {
+            console.log('[PREPROCESSING UI] Selected feature names:', selectedFeatures.map(f => f.name));
+            console.log('[PREPROCESSING UI] First 3 features details:', features.slice(0, 3).map(f => ({
+                name: f.name,
+                selected: f.selected,
+                type: f.type
+            })));
+        }
+        console.log('[PREPROCESSING UI] ========================================');
+    }, [features, selectedCount, droppedCount, qualityPassCount]);
 
     // Helper function to render feature card
     const renderFeatureCard = (feature: FeaturePreprocessingDetail, index: number, isSelected: boolean) => {
@@ -437,7 +626,7 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
         // Low variance and high repeat rate features are selectable (not disabled), but zero variance, high missing, and removed are disabled
         const shouldDisable = hasZeroVariance || hasHighMissing || feature.isRemoved;
         const disableReason = hasZeroVariance ? "This feature has zero variance and cannot be selected" 
-                              : hasHighMissing ? `This feature has ${feature.missingPercentage.toFixed(1)}% missing values (>95%) and cannot be selected`
+                              : hasHighMissing && feature.missingPercentage !== undefined ? `This feature has ${feature.missingPercentage.toFixed(1)}% missing values (>95%) and cannot be selected`
                               : feature.isRemoved ? "This feature was removed during preprocessing"
                               : "";
         return (
@@ -466,17 +655,17 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                 Zero Variance
                             </div>
                         )}
-                        {hasHighMissing && !hasZeroVariance && (
+                        {hasHighMissing && !hasZeroVariance && feature.missingPercentage !== undefined && (
                             <div className="quality-badge" style={{ backgroundColor: '#f59e0b', color: 'white', marginLeft: '8px' }}>
                                 High Missing ({feature.missingPercentage.toFixed(1)}%)
                             </div>
                         )}
-                        {hasLowVariance && !hasZeroVariance && !hasHighMissing && (
+                        {hasLowVariance && !hasZeroVariance && !hasHighMissing && feature.coefficient_of_variation !== undefined && (
                             <div className="quality-badge" style={{ backgroundColor: '#eab308', color: 'white', marginLeft: '8px' }}>
                                 Low Variance (CV: {feature.coefficient_of_variation.toFixed(2)}%)
                             </div>
                         )}
-                        {hasHighRepeatRate && !hasZeroVariance && !hasHighMissing && !hasLowVariance && (
+                        {hasHighRepeatRate && !hasZeroVariance && !hasHighMissing && !hasLowVariance && feature.repeat_rate !== undefined && (
                             <div className="quality-badge" style={{ backgroundColor: '#eab308', color: 'white', marginLeft: '8px' }}>
                                 High Repeat Rate ({feature.repeat_rate.toFixed(1)}%)
                             </div>
@@ -605,6 +794,11 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
         );
     };
 
+    // Debug: Log render state
+    console.log('[PREPROCESSING UI] Rendering component');
+    console.log('[PREPROCESSING UI] Current features count:', features.length);
+    console.log('[PREPROCESSING UI] isLoading:', isLoading);
+    
     return (
         <div className="preprocessing-container">
             <div className="preprocessing-layout">
@@ -666,7 +860,16 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                 <h3>Selected Features ({selectedCount})</h3>
                             </div>
                             <div className="features-container">
-                                {selectedFeatures.length === 0 && !isLoading && (
+                                {features.length === 0 && !isLoading && (
+                                    <div className="empty-state">
+                                        <span className="empty-icon">📭</span>
+                                        <p>No features loaded</p>
+                                        <p style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
+                                            Check browser console for errors
+                                        </p>
+                                    </div>
+                                )}
+                                {features.length > 0 && selectedFeatures.length === 0 && !isLoading && (
                                     <div className="empty-state">
                                         <span className="empty-icon">📭</span>
                                         <p>No selected features</p>
@@ -684,7 +887,13 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                 <h3>Dropped Features ({droppedCount})</h3>
                             </div>
                             <div className="features-container">
-                                {droppedFeatures.length === 0 && !isLoading && (
+                                {features.length === 0 && !isLoading && (
+                                    <div className="empty-state">
+                                        <span className="empty-icon">📭</span>
+                                        <p>No features loaded</p>
+                                    </div>
+                                )}
+                                {features.length > 0 && droppedFeatures.length === 0 && !isLoading && (
                                     <div className="empty-state">
                                         <span className="empty-icon">📭</span>
                                         <p>No dropped features</p>

@@ -61,9 +61,10 @@ PY
 echo ""
 echo "Step 1: Validating current database schema..."
 echo "-------------------------------------------"
-echo "Note: This will automatically remove:"
-echo "      - created_at columns from features, binning_steps, bins, merged_bins, and binning_totals tables"
-echo "      - derived columns (good_bad_ratio, bad_rate, freq_percent, odds, index_value, odds_index, dist_good, dist_bad) from bins table"
+echo "Note: This will automatically:"
+echo "      - Remove created_at columns from features, binning_steps, bins, merged_bins, and binning_totals tables"
+echo "      - Remove derived columns (good_bad_ratio, bad_rate, freq_percent, odds, index_value, odds_index, dist_good, dist_bad) from bins table"
+echo "      - Add train/test split columns to records table (if missing)"
 echo ""
 $PYTHON_CMD validate_and_migrate_schema.py
 

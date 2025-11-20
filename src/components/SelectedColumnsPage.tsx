@@ -617,10 +617,12 @@ const SelectedColumnsPage = () => {
   }, [targetVariable]);
 
   // Persist target variable to backend when user selects it
+  // Then automatically create train/test split
   useEffect(() => {
-    if (!targetVariable) return;
+    if (!targetVariable || !recordId) return;
     (async () => {
       try {
+        // Step 1: Persist target variable
         await fetch('http://localhost:5000/api/upsert-single-record', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -633,11 +635,41 @@ const SelectedColumnsPage = () => {
             record_id: recordId
           })
         });
+
+        // Step 2: Automatically create train/test split (80/20 stratified)
+        console.log('[TTS] Creating train/test split after target variable selection...');
+        const ttsResponse = await fetch('http://localhost:5000/api/train-test-split', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataset_id: recordId,
+            test_size: 0.2  // 20% test, 80% train
+          })
+        });
+
+        if (ttsResponse.ok) {
+          const ttsData = await ttsResponse.json();
+          if (ttsData.success) {
+            console.log('[TTS] ✅ Train/test split created successfully:', ttsData.split_info);
+            if (!ttsData.is_existing) {
+              console.log(`[TTS] Split: ${ttsData.split_info.train_size} train, ${ttsData.split_info.test_size_count} test`);
+              // Optionally show a notification to the user
+              // You can add a toast notification here if you have a notification system
+            } else {
+              console.log('[TTS] Using existing train/test split');
+            }
+          } else {
+            console.warn('[TTS] ⚠️ Train/test split creation returned success=false:', ttsData);
+          }
+        } else {
+          const errorData = await ttsResponse.json();
+          console.error('[TTS] ❌ Failed to create train/test split:', errorData.error || 'Unknown error');
+        }
       } catch (err) {
-        console.error('Failed to persist target variable:', err);
+        console.error('Failed to persist target variable or create TTS:', err);
       }
     })();
-  }, [targetVariable]);
+  }, [targetVariable, recordId]);
 
   // Utility functions
 

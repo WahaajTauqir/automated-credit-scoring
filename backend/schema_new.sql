@@ -25,7 +25,16 @@ CREATE TABLE records (
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
     identifier TEXT,
-    preprocess_selection BOOLEAN DEFAULT FALSE
+    preprocess_selection BOOLEAN DEFAULT FALSE,
+    train_test_split_seed INTEGER,
+    train_test_split_size NUMERIC(5, 3),
+    train_test_split_method VARCHAR(50),
+    train_size INTEGER,
+    test_size INTEGER,
+    train_bad_count INTEGER,
+    test_bad_count INTEGER,
+    split_created_at TIMESTAMP,
+    data_hash VARCHAR(64)
 );
 
 COMMENT ON TABLE records IS 'Stores information about each credit scoring dataset/run';
@@ -37,6 +46,15 @@ COMMENT ON COLUMN records.continuous_features IS 'Number of continuous/numeric f
 COMMENT ON COLUMN records.target_variable IS 'Name of the target/dependent variable';
 COMMENT ON COLUMN records.identifier IS 'Human readable identifier or artifact reference';
 COMMENT ON COLUMN records.preprocess_selection IS 'Whether preprocessing selection has been saved (true) or needs calculation (false)';
+COMMENT ON COLUMN records.train_test_split_seed IS 'Random seed used for train/test split (for reproducibility)';
+COMMENT ON COLUMN records.train_test_split_size IS 'Proportion of data allocated to test set (e.g., 0.200 for 20%)';
+COMMENT ON COLUMN records.train_test_split_method IS 'Method used for split (stratified, random, time_based)';
+COMMENT ON COLUMN records.train_size IS 'Number of rows in training set';
+COMMENT ON COLUMN records.test_size IS 'Number of rows in test set';
+COMMENT ON COLUMN records.train_bad_count IS 'Number of bad cases (target=1) in training set';
+COMMENT ON COLUMN records.test_bad_count IS 'Number of bad cases (target=1) in test set';
+COMMENT ON COLUMN records.split_created_at IS 'Timestamp when train/test split was created';
+COMMENT ON COLUMN records.data_hash IS 'Hash of data to detect changes requiring new split';
 
 -- =====================================================
 -- 2. FEATURES TABLE

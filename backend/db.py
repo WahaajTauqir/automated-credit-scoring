@@ -1322,3 +1322,223 @@ def delete_all_binning_for_feature(feature_id: int) -> bool:
     conn.close()
     
     return True
+
+
+# =====================================================
+# TRAIN/TEST SPLIT OPERATIONS
+# =====================================================
+
+def save_train_test_split_metadata(dataset_id: int, split_info: Dict) -> bool:
+    """
+    Save train/test split metadata to database.
+    
+    Parameters:
+    -----------
+    dataset_id : int
+        Dataset ID
+    split_info : dict
+        Split metadata dictionary containing:
+        - seed: int
+        - test_size: float (proportion)
+        - method: str
+        - train_size: int
+        - test_size_count: int (count of test rows)
+        - train_bad: int
+        - test_bad: int
+        - data_hash: str
+        
+    Returns:
+    --------
+    bool : Success status
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # First, verify the record exists
+        cur.execute("SELECT id FROM records WHERE id = %s", (dataset_id,))
+        if not cur.fetchone():
+            print(f"[DB] ERROR: Dataset {dataset_id} not found in records table")
+            return False
+        
+        # Check if columns exist (if not, they'll be added by migration)
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'records' 
+            AND column_name = 'train_test_split_seed'
+        """)
+        if not cur.fetchone():
+            print(f"[DB] ERROR: Train/test split columns do not exist in records table!")
+            print(f"[DB] Please run: python3 validate_and_migrate_schema.py")
+            return False
+        
+        # Prepare values
+        test_size_count = split_info.get('test_size_count', split_info.get('test_size', 0))
+        
+        print(f"[DB] Saving train/test split for dataset {dataset_id}:")
+        print(f"  Seed: {split_info['seed']}")
+        print(f"  Test size (proportion): {split_info['test_size']}")
+        print(f"  Test size (count): {test_size_count}")
+        print(f"  Train size: {split_info['train_size']}")
+        print(f"  Train bad: {split_info['train_bad']}")
+        print(f"  Test bad: {split_info['test_bad']}")
+        
+        cur.execute("""
+            UPDATE records
+            SET train_test_split_seed = %s,
+                train_test_split_size = %s,
+                train_test_split_method = %s,
+                train_size = %s,
+                test_size = %s,
+                train_bad_count = %s,
+                test_bad_count = %s,
+                split_created_at = NOW(),
+                data_hash = %s
+            WHERE id = %s
+        """, (
+            split_info['seed'],
+            split_info['test_size'],  # Proportion (0.2 for 20%)
+            split_info['method'],
+            split_info['train_size'],
+            test_size_count,  # Count of test rows
+            split_info['train_bad'],
+            split_info['test_bad'],
+            split_info.get('data_hash'),
+            dataset_id
+        ))
+        
+        # Verify the update worked
+        rows_updated = cur.rowcount
+        if rows_updated == 0:
+            print(f"[DB] WARNING: UPDATE affected 0 rows. Dataset {dataset_id} may not exist.")
+            conn.rollback()
+            return False
+        
+        conn.commit()
+        print(f"[DB] ✅ Successfully saved train/test split metadata for dataset {dataset_id} ({rows_updated} row updated)")
+        
+        # Verify the save worked
+        cur.execute("""
+            SELECT train_test_split_seed, train_size, test_size 
+            FROM records 
+            WHERE id = %s
+        """, (dataset_id,))
+        verify_row = cur.fetchone()
+        if verify_row and verify_row[0] is not None:
+            print(f"[DB] ✅ Verified: Saved seed={verify_row[0]}, train={verify_row[1]}, test={verify_row[2]}")
+        else:
+            print(f"[DB] ⚠️  WARNING: Verification query returned None - data may not have been saved")
+        
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] ❌ Error saving train/test split: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_train_test_split_info(dataset_id: int) -> Optional[Dict]:
+    """
+    Get train/test split metadata for a dataset.
+    
+    Parameters:
+    -----------
+    dataset_id : int
+        Dataset ID
+        
+    Returns:
+    --------
+    dict or None : Split metadata if exists
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            SELECT train_test_split_seed,
+                   train_test_split_size,
+                   train_test_split_method,
+                   train_size,
+                   test_size,
+                   train_bad_count,
+                   test_bad_count,
+                   split_created_at,
+                   data_hash
+            FROM records
+            WHERE id = %s
+        """, (dataset_id,))
+        
+        row = cur.fetchone()
+        
+        if not row or row[0] is None:
+            # No split exists
+            return None
+        
+        return {
+            'seed': row[0],
+            'test_size': float(row[1]) if row[1] else None,  # Proportion (0.2 for 20%)
+            'method': row[2],
+            'train_size': row[3],
+            'test_size_count': row[4],  # Count of test rows
+            'train_bad': row[5],
+            'test_bad': row[6],
+            'split_created_at': row[7],
+            'data_hash': row[8],
+            # Calculate rates for convenience
+            'train_bad_rate': row[5] / row[3] if row[3] and row[5] else None,
+            'test_bad_rate': row[6] / row[4] if row[4] and row[6] else None
+        }
+    except Exception as e:
+        print(f"[DB] Error retrieving train/test split info: {e}")
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def clear_train_test_split(dataset_id: int) -> bool:
+    """
+    Clear train/test split metadata for a dataset.
+    
+    Parameters:
+    -----------
+    dataset_id : int
+        Dataset ID
+        
+    Returns:
+    --------
+    bool : Success status
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+            UPDATE records
+            SET train_test_split_seed = NULL,
+                train_test_split_size = NULL,
+                train_test_split_method = NULL,
+                train_size = NULL,
+                test_size = NULL,
+                train_bad_count = NULL,
+                test_bad_count = NULL,
+                split_created_at = NULL,
+                data_hash = NULL
+            WHERE id = %s
+        """, (dataset_id,))
+        
+        conn.commit()
+        print(f"[DB] Cleared train/test split for dataset {dataset_id}")
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Error clearing train/test split: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()

@@ -85,9 +85,10 @@ Write-Host ""
 
 Write-Host "`nStep 1: Validating current database schema..."
 Write-Host "-------------------------------------------"
-Write-Host "Note: This will automatically remove:"
-Write-Host "      - created_at columns from features, binning_steps, bins, merged_bins, and binning_totals tables"
-Write-Host "      - derived columns (good_bad_ratio, bad_rate, freq_percent, odds, index_value, odds_index, dist_good, dist_bad) from bins table"
+Write-Host "Note: This will automatically:"
+Write-Host "      - Remove created_at columns from features, binning_steps, bins, merged_bins, and binning_totals tables"
+Write-Host "      - Remove derived columns (good_bad_ratio, bad_rate, freq_percent, odds, index_value, odds_index, dist_good, dist_bad) from bins table"
+Write-Host "      - Add train/test split columns to records table (if missing)"
 Write-Host ""
 & $pythonCmd .\validate_and_migrate_schema.py
 $VALIDATION_RESULT = $LASTEXITCODE

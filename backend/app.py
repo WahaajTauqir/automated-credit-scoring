@@ -52,11 +52,14 @@ from db import (
     create_binning_totals, get_binning_totals, get_all_binning_totals_by_dataset,
     # Helper functions
     get_complete_binning_results, get_dataset_with_all_results,
-    delete_all_binning_for_feature
+    delete_all_binning_for_feature,
+    # Train/Test Split operations
+    save_train_test_split_metadata, get_train_test_split_info, clear_train_test_split
 )
 import traceback
 import logging
 from auto_monotonic_binning import auto_monotonic_binning, compute_woe, compute_iv
+from data_loader import get_data_for_stage, get_csv_path, get_train_test_data
 import ast
 
 # Optional: load environment variables from a .env file if present
@@ -838,6 +841,10 @@ def handle_missing_values(df, discrete_cols, continuous_cols, missing_threshold=
     Returns:
         Cleaned DataFrame and removal report
     """
+    print(f"[HANDLE_MISSING] Starting with {len(df)} rows, {len(df.columns)} columns")
+    print(f"[HANDLE_MISSING] Missing threshold: {missing_threshold:.1%}")
+    print(f"[HANDLE_MISSING] Treat -1 as missing: {treat_negative_one_as_missing}")
+    
     df_clean = df.copy()
     removal_report = {
         'columns_removed': [],
@@ -880,16 +887,25 @@ def handle_missing_values(df, discrete_cols, continuous_cols, missing_threshold=
             })
     
     # Remove high-missing columns
+    if columns_to_remove:
+        print(f"[HANDLE_MISSING] Removing {len(columns_to_remove)} columns with >{missing_threshold:.1%} missing:")
+        for col_info in removal_report['columns_removed']:
+            print(f"  - {col_info['column']}: {col_info['missing_ratio']:.1%} missing ({col_info['missing_count']} rows)")
+    
     df_clean = df_clean.drop(columns=columns_to_remove)
     
     # Update column lists after removal
     discrete_cols = [col for col in discrete_cols if col in df_clean.columns]
     continuous_cols = [col for col in continuous_cols if col in df_clean.columns]
     
+    print(f"[HANDLE_MISSING] After column removal: {len(df_clean.columns)} columns remain "
+          f"({len(discrete_cols)} discrete, {len(continuous_cols)} continuous)")
+    
     # For discrete columns: mode imputation
     for col in discrete_cols:
         if col in df_clean.columns and df_clean[col].isna().any():
             missing_count = df_clean[col].isna().sum()
+            total_rows = len(df_clean)
             
             if df_clean[col].dtype == 'object':
                 # For categorical, use 'Missing' category
@@ -910,11 +926,15 @@ def handle_missing_values(df, discrete_cols, continuous_cols, missing_threshold=
                 'missing_count': int(missing_count),
                 'method': method
             }
+            
+            print(f"[HANDLE_MISSING] Discrete column '{col}': Filled {missing_count} missing values "
+                  f"({missing_count/total_rows*100:.2f}%) using {method}")
     
     # For continuous columns: median imputation
     for col in continuous_cols:
         if col in df_clean.columns and df_clean[col].isna().any():
             missing_count = df_clean[col].isna().sum()
+            total_rows = len(df_clean)
             
             if pd.api.types.is_numeric_dtype(df_clean[col]):
                 median_val = df_clean[col].median()
@@ -936,7 +956,11 @@ def handle_missing_values(df, discrete_cols, continuous_cols, missing_threshold=
                 'missing_count': int(missing_count),
                 'method': method
             }
+            
+            print(f"[HANDLE_MISSING] Continuous column '{col}': Filled {missing_count} missing values "
+                  f"({missing_count/total_rows*100:.2f}%) using {method}")
     
+    print(f"[HANDLE_MISSING] Completed: {len(df_clean)} rows, {len(df_clean.columns)} columns")
     return df_clean, removal_report
 
 
@@ -945,9 +969,17 @@ def remove_duplicates(df):
     Remove duplicate rows from dataset.
     """
     initial_count = len(df)
+    print(f"[REMOVE_DUPLICATES] Starting with {initial_count} rows, {len(df.columns)} columns")
+    
     df_deduped = df.drop_duplicates()
     final_count = len(df_deduped)
     duplicates_removed = initial_count - final_count
+    
+    if duplicates_removed > 0:
+        print(f"[REMOVE_DUPLICATES] Removed {duplicates_removed} duplicate rows "
+              f"({initial_count} → {final_count} rows, {duplicates_removed/initial_count*100:.2f}% reduction)")
+    else:
+        print(f"[REMOVE_DUPLICATES] No duplicates found ({final_count} rows)")
     
     return df_deduped, duplicates_removed
 
@@ -956,6 +988,10 @@ def handle_outliers(df, continuous_cols, method='iqr', threshold=3.0):
     Handle outliers in continuous columns.
     Methods: 'iqr', 'zscore', 'winsorize'
     """
+    print(f"[HANDLE_OUTLIERS] Starting with {len(df)} rows")
+    print(f"[HANDLE_OUTLIERS] Method: {method}, Threshold: {threshold}")
+    print(f"[HANDLE_OUTLIERS] Processing {len(continuous_cols)} continuous columns")
+    
     df_clean = df.copy()
     outlier_info = {}
     
@@ -999,6 +1035,13 @@ def handle_outliers(df, continuous_cols, method='iqr', threshold=3.0):
             'outliers_detected': int(outliers_count),
             'outliers_percentage': round((outliers_count / len(original_data)) * 100, 2) if len(original_data) > 0 else 0
         }
+        
+        if outliers_count > 0:
+            print(f"[HANDLE_OUTLIERS] Column '{col}': Detected {outliers_count} outliers "
+                  f"({outliers_count/len(original_data)*100:.2f}%) - Capped using {method}")
+    
+    total_outliers = sum(info.get('outliers_detected', 0) for info in outlier_info.values())
+    print(f"[HANDLE_OUTLIERS] Completed: Handled {total_outliers} total outliers across {len(outlier_info)} columns")
     
     return df_clean, outlier_info
 
@@ -1007,6 +1050,11 @@ def encode_categorical_variables(df, discrete_cols, target_col=None):
     Encode categorical variables using label encoding.
     Skip target variable if provided.
     """
+    print(f"[ENCODE_CATEGORICAL] Starting with {len(df)} rows")
+    print(f"[ENCODE_CATEGORICAL] Processing {len(discrete_cols)} discrete columns")
+    if target_col:
+        print(f"[ENCODE_CATEGORICAL] Skipping target column: {target_col}")
+    
     df_encoded = df.copy()
     encoding_info = {}
     label_encoders = {}
@@ -1033,8 +1081,39 @@ def encode_categorical_variables(df, discrete_cols, target_col=None):
                 'encoded_values': list(range(len(le.classes_))),
                 'mapping': dict(zip(le.classes_, range(len(le.classes_))))
             }
+            
+            print(f"[ENCODE_CATEGORICAL] Column '{col}': Encoded {len(le.classes_)} categories "
+                  f"({len(le.classes_)} unique values)")
     
+    print(f"[ENCODE_CATEGORICAL] Completed: Encoded {len(encoding_info)} columns")
     return df_encoded, encoding_info, label_encoders
+
+def _debug_print_column_row_counts(df, stage_name, show_details=True):
+    """
+    Helper function to print debug information about row counts per column.
+    
+    Args:
+        df: DataFrame to analyze
+        stage_name: Name of the preprocessing stage
+        show_details: If True, show per-column details
+    """
+    total_rows = len(df)
+    print(f"\n{'='*80}")
+    print(f"[PREPROCESSING DEBUG] {stage_name}")
+    print(f"{'='*80}")
+    print(f"Total Rows: {total_rows}")
+    print(f"Total Columns: {len(df.columns)}")
+    
+    if show_details:
+        print(f"\nRow Counts Per Column:")
+        print(f"{'Column Name':<30} {'Non-Null Rows':<20} {'Null Rows':<20} {'Null %':<15}")
+        print(f"{'-'*85}")
+        for col in df.columns:
+            non_null = df[col].notna().sum()
+            null = df[col].isna().sum()
+            null_pct = (null / total_rows * 100) if total_rows > 0 else 0
+            print(f"{col:<30} {non_null:<20} {null:<20} {null_pct:.2f}%")
+    print(f"{'='*80}\n")
 
 def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_threshold=0.5, treat_negative_one_as_missing=True):
     """
@@ -1071,6 +1150,9 @@ def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_th
     
     df_processed = df.copy()
     
+    # Debug: Initial state
+    _debug_print_column_row_counts(df_processed, "INITIAL STATE (Before Preprocessing)")
+    
     # Step 1: Detect column types
     if preprocessing_steps.get('detect_types', True):
         column_types = detect_column_types(df_processed)
@@ -1078,6 +1160,7 @@ def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_th
         continuous_cols = column_types['continuous']
         preprocessing_report['column_types'] = column_types
         preprocessing_report['steps_applied'].append('type_detection')
+        print(f"[PREPROCESSING] Type Detection: {len(discrete_cols)} discrete, {len(continuous_cols)} continuous columns")
     else:
         # Use all columns as continuous if not detected
         discrete_cols = []
@@ -1085,6 +1168,8 @@ def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_th
     
     # Step 2: Handle missing values
     if preprocessing_steps.get('handle_missing', True):
+        _debug_print_column_row_counts(df_processed, "BEFORE Missing Value Handling")
+        
         missing_before = df_processed.isna().sum().sum()
         negative_one_before = 0
         if treat_negative_one_as_missing:
@@ -1113,29 +1198,57 @@ def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_th
         # Update column lists after missing value handling
         discrete_cols = [col for col in discrete_cols if col in df_processed.columns]
         continuous_cols = [col for col in continuous_cols if col in df_processed.columns]
+        
+        _debug_print_column_row_counts(df_processed, "AFTER Missing Value Handling")
+        print(f"[PREPROCESSING] Missing Values: Removed {len(missing_report['columns_removed'])} columns, "
+              f"Treated missing in {len(missing_report['missing_treated'])} columns")
     
     # Step 3: Remove duplicates
     if preprocessing_steps.get('remove_duplicates', True):
+        _debug_print_column_row_counts(df_processed, "BEFORE Duplicate Removal")
+        
+        rows_before = len(df_processed)
         df_processed, duplicates_removed = remove_duplicates(df_processed)
+        rows_after = len(df_processed)
+        
         preprocessing_report['details']['duplicates'] = {
             'removed': int(duplicates_removed)
         }
         preprocessing_report['steps_applied'].append('duplicate_removal')
+        
+        _debug_print_column_row_counts(df_processed, "AFTER Duplicate Removal")
+        print(f"[PREPROCESSING] Duplicates: Removed {duplicates_removed} duplicate rows "
+              f"({rows_before} → {rows_after} rows)")
     
     # Step 4: Handle outliers (only for continuous columns)
     if preprocessing_steps.get('handle_outliers', True) and continuous_cols:
+        _debug_print_column_row_counts(df_processed, "BEFORE Outlier Handling")
+        
         df_processed, outlier_info = handle_outliers(df_processed, continuous_cols, method='iqr')
         preprocessing_report['details']['outliers'] = outlier_info
         preprocessing_report['steps_applied'].append('outlier_handling')
+        
+        _debug_print_column_row_counts(df_processed, "AFTER Outlier Handling")
+        total_outliers = sum(info.get('outliers_detected', 0) for info in outlier_info.values())
+        print(f"[PREPROCESSING] Outliers: Handled outliers in {len(outlier_info)} columns "
+              f"({total_outliers} total outliers detected)")
     
     # Step 5: Encode categorical variables
     if preprocessing_steps.get('encode_categorical', True) and discrete_cols:
+        _debug_print_column_row_counts(df_processed, "BEFORE Categorical Encoding")
+        
         df_processed, encoding_info, label_encoders = encode_categorical_variables(
             df_processed, discrete_cols, target_col
         )
         preprocessing_report['details']['encoding'] = encoding_info
         preprocessing_report['label_encoders'] = label_encoders
         preprocessing_report['steps_applied'].append('categorical_encoding')
+        
+        _debug_print_column_row_counts(df_processed, "AFTER Categorical Encoding")
+        print(f"[PREPROCESSING] Encoding: Encoded {len(encoding_info)} categorical columns")
+    
+    # Debug: Final state
+    _debug_print_column_row_counts(df_processed, "FINAL STATE (After All Preprocessing)")
     
     preprocessing_report['final_shape'] = df_processed.shape
     preprocessing_report['processed_columns'] = {
@@ -1187,10 +1300,29 @@ def preprocessing_steps_detailed():
                 artifact_payload = None
                 artifact_model_type = None
 
+        # Load TRAIN dataset explicitly for preprocessing
         try:
-            csv_path = get_csv_path(dataset_id)
-            df = pd.read_csv(csv_path)
+            train_df, test_df, split_exists = get_train_test_data(dataset_id)
+            
+            if split_exists:
+                # Use train set if split exists
+                df = train_df
+                print(f"[PREPROCESSING-STEPS-DETAILED] Using TRAIN set: {len(df)} rows, {len(df.columns)} columns")
+            else:
+                # Fallback to full dataset if no split exists
+                csv_path = get_csv_path(dataset_id)
+                df = pd.read_csv(csv_path)
+                print(f"[PREPROCESSING-STEPS-DETAILED] No split exists, using FULL dataset: {len(df)} rows, {len(df.columns)} columns")
+            
+            if df is None or df.empty:
+                return jsonify({"error": "Dataset is empty or could not be loaded"}), 400
+            if len(df.columns) == 0:
+                return jsonify({"error": "Dataset has no columns"}), 400
+                
         except Exception as e:
+            print(f"[PREPROCESSING-STEPS-DETAILED] Error loading dataset: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
         
         # Initialize results container
@@ -1454,12 +1586,40 @@ def preprocessing_column_changes():
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id"}), 400
         
-        # Load dataset
+        # Load TRAIN dataset explicitly for preprocessing
         try:
-            csv_path = get_csv_path(dataset_id)
-            df_original = pd.read_csv(csv_path)
+            print(f"\n[PREPROCESSING-COLUMN-CHANGES] ========================================")
+            print(f"[PREPROCESSING-COLUMN-CHANGES] Loading dataset {dataset_id}")
+            train_df, test_df, split_exists = get_train_test_data(dataset_id)
+            print(f"[PREPROCESSING-COLUMN-CHANGES] Split exists: {split_exists}")
+            
+            if split_exists:
+                # Use train set if split exists
+                df_original = train_df
+                print(f"[PREPROCESSING-COLUMN-CHANGES] ✅ Using TRAIN set: {len(df_original)} rows, {len(df_original.columns)} columns")
+                print(f"[PREPROCESSING-COLUMN-CHANGES] Train DataFrame columns: {list(df_original.columns)[:10]}")
+                print(f"[PREPROCESSING-COLUMN-CHANGES] Train DataFrame shape: {df_original.shape}")
+                print(f"[PREPROCESSING-COLUMN-CHANGES] Train DataFrame head:\n{df_original.head(2)}")
+            else:
+                # Fallback to full dataset if no split exists
+                csv_path = get_csv_path(dataset_id)
+                df_original = pd.read_csv(csv_path)
+                print(f"[PREPROCESSING-COLUMN-CHANGES] ⚠️ No split exists, using FULL dataset: {len(df_original)} rows, {len(df_original.columns)} columns")
+                print(f"[PREPROCESSING-COLUMN-CHANGES] Full DataFrame columns: {list(df_original.columns)[:10]}")
+            
+            if df_original is None or df_original.empty:
+                print(f"[PREPROCESSING-COLUMN-CHANGES] ❌ ERROR: Dataset is empty!")
+                return jsonify({"error": "Dataset is empty or could not be loaded", "success": False}), 400
+            if len(df_original.columns) == 0:
+                print(f"[PREPROCESSING-COLUMN-CHANGES] ❌ ERROR: Dataset has no columns!")
+                return jsonify({"error": "Dataset has no columns", "success": False}), 400
+            print(f"[PREPROCESSING-COLUMN-CHANGES] ========================================\n")
+                
         except Exception as e:
-            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
+            print(f"[PREPROCESSING-COLUMN-CHANGES] ❌ ERROR loading dataset: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": f"Failed to load dataset: {str(e)}", "success": False}), 400
         
         # Apply preprocessing with new parameters
         df_processed, preprocessing_report = preprocess_dataset(
@@ -1474,6 +1634,19 @@ def preprocessing_column_changes():
         
         # Generate column-level change analysis
         column_changes = []
+        
+        print(f"[PREPROCESSING-COLUMN-CHANGES] Original columns: {len(df_original.columns)}")
+        print(f"[PREPROCESSING-COLUMN-CHANGES] Processed columns: {len(df_processed.columns)}")
+        print(f"[PREPROCESSING-COLUMN-CHANGES] Original shape: {df_original.shape}")
+        print(f"[PREPROCESSING-COLUMN-CHANGES] Processed shape: {df_processed.shape}")
+        
+        if len(df_original.columns) == 0:
+            print(f"[PREPROCESSING-COLUMN-CHANGES] ERROR: Original DataFrame has no columns!")
+            return jsonify({
+                "success": False,
+                "error": "Original dataset has no columns",
+                "column_changes": []
+            }), 400
         
         for col in df_original.columns:
             if col in df_processed.columns:
@@ -1618,7 +1791,20 @@ def preprocessing_column_changes():
         original_sample = df_original.head(10).to_dict('records')
         processed_sample = df_processed.head(10).to_dict('records')
         
-        return jsonify({
+        print(f"\n[PREPROCESSING-COLUMN-CHANGES] ========================================")
+        print(f"[PREPROCESSING-COLUMN-CHANGES] Generated {len(column_changes)} column changes")
+        print(f"[PREPROCESSING-COLUMN-CHANGES] First 5 columns: {[c['column'] for c in column_changes[:5]]}")
+        print(f"[PREPROCESSING-COLUMN-CHANGES] Sample column change: {column_changes[0] if column_changes else 'N/A'}")
+        
+        if len(column_changes) == 0:
+            print(f"[PREPROCESSING-COLUMN-CHANGES] ❌ WARNING: No column changes generated!")
+            return jsonify({
+                "success": False,
+                "error": "No column changes generated. Dataset may be empty.",
+                "column_changes": []
+            }), 400
+        
+        response_data = {
             "success": True,
             "column_changes": column_changes,
             "preview": {
@@ -1632,9 +1818,20 @@ def preprocessing_column_changes():
                 "columns_removed": len([c for c in column_changes if c.get('removed', False)]),
                 "total_columns": len(column_changes)
             }
-        })
+        }
+        
+        print(f"[PREPROCESSING-COLUMN-CHANGES] ✅ Response prepared:")
+        print(f"  - success: {response_data['success']}")
+        print(f"  - column_changes count: {len(response_data['column_changes'])}")
+        print(f"  - summary: {response_data['summary']}")
+        print(f"[PREPROCESSING-COLUMN-CHANGES] ========================================\n")
+        
+        return jsonify(response_data)
         
     except Exception as e:
+        print(f"[PREPROCESSING-COLUMN-CHANGES] ❌ ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": f"Column changes analysis failed: {str(e)}"}), 500
 
 @app.route('/api/preprocessing-step-preview', methods=['POST'])
@@ -1761,12 +1958,30 @@ def dataset_quality_metrics():
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id"}), 400
         
-        # Load dataset
+        # Load TRAIN dataset explicitly for preprocessing
         try:
-            csv_path = get_csv_path(dataset_id)
-            df = pd.read_csv(csv_path)
+            train_df, test_df, split_exists = get_train_test_data(dataset_id)
+            
+            if split_exists:
+                # Use train set if split exists
+                df = train_df
+                print(f"[DATASET-QUALITY-METRICS] Using TRAIN set: {len(df)} rows, {len(df.columns)} columns")
+            else:
+                # Fallback to full dataset if no split exists
+                csv_path = get_csv_path(dataset_id)
+                df = pd.read_csv(csv_path)
+                print(f"[DATASET-QUALITY-METRICS] No split exists, using FULL dataset: {len(df)} rows, {len(df.columns)} columns")
+            
+            if df is None or df.empty:
+                return jsonify({"error": "Dataset is empty or could not be loaded", "success": False}), 400
+            if len(df.columns) == 0:
+                return jsonify({"error": "Dataset has no columns", "success": False}), 400
+                
         except Exception as e:
-            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
+            print(f"[DATASET-QUALITY-METRICS] Error loading dataset: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": f"Failed to load dataset: {str(e)}", "success": False}), 400
         
         # Basic information
         basic_info = {
@@ -1913,11 +2128,29 @@ def preprocess_dataset_api():
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id"}), 400
         
-        # Load dataset
+        # Load TRAIN dataset explicitly for preprocessing
         try:
-            csv_path = get_csv_path(dataset_id)
-            df = pd.read_csv(csv_path)
+            train_df, test_df, split_exists = get_train_test_data(dataset_id)
+            
+            if split_exists:
+                # Use train set if split exists
+                df = train_df
+                print(f"[PREPROCESS-DATASET] Using TRAIN set: {len(df)} rows, {len(df.columns)} columns")
+            else:
+                # Fallback to full dataset if no split exists
+                csv_path = get_csv_path(dataset_id)
+                df = pd.read_csv(csv_path)
+                print(f"[PREPROCESS-DATASET] No split exists, using FULL dataset: {len(df)} rows, {len(df.columns)} columns")
+            
+            if df is None or df.empty:
+                return jsonify({"error": "Dataset is empty or could not be loaded"}), 400
+            if len(df.columns) == 0:
+                return jsonify({"error": "Dataset has no columns"}), 400
+                
         except Exception as e:
+            print(f"[PREPROCESS-DATASET] Error loading dataset: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
         
         # Apply preprocessing
@@ -2251,6 +2484,142 @@ def target_distribution():
         return jsonify(counts)
     except Exception as e:
         return jsonify({"error": f"Failed to compute target distribution: {str(e)}"}), 500
+
+
+# ----------- Train/Test Split -----------
+@app.route('/api/train-test-split', methods=['POST'])
+def create_train_test_split():
+    """
+    Create or get train/test split for a dataset.
+    
+    This endpoint creates a stratified 80/20 train/test split AFTER variable classification
+    and BEFORE any preprocessing, binning, or model training to prevent data leakage.
+    
+    Request body:
+    {
+        "dataset_id": int,
+        "test_size": float (optional, default 0.2),
+        "force_recalculate": bool (optional, default false)
+    }
+    
+    Returns:
+    {
+        "success": bool,
+        "split_info": {...},
+        "is_existing": bool
+    }
+    """
+    try:
+        from train_test_split import get_or_create_train_test_split
+        
+        data = request.get_json()
+        dataset_id = data.get('dataset_id')
+        test_size = data.get('test_size', 0.2)  # Default 20% test
+        force_recalculate = data.get('force_recalculate', False)
+        
+        if not dataset_id:
+            return jsonify({"error": "dataset_id is required"}), 400
+        
+        try:
+            dataset_id = int(dataset_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Get dataset info
+        dataset = get_dataset(dataset_id)
+        if not dataset:
+            return jsonify({"error": f"Dataset {dataset_id} not found"}), 404
+        
+        target = dataset.get('target_variable')
+        if not target:
+            return jsonify({"error": "Target variable not set. Please classify variables first."}), 400
+        
+        # Load dataset
+        try:
+            csv_path = get_csv_path(dataset_id)
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 500
+        
+        if target not in df.columns:
+            return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
+        
+        # Create or get train/test split
+        print(f"\n[API] Creating/getting train/test split for dataset {dataset_id}")
+        train_df, test_df, split_info = get_or_create_train_test_split(
+            df, target, dataset_id, test_size, 
+            random_state=42,
+            force_recalculate=force_recalculate
+        )
+        
+        # Check if this was an existing split
+        is_existing = not force_recalculate and split_info.get('split_created_at') is not None
+        
+        # Convert all values in split_info to native Python types for JSON serialization
+        # This ensures numpy/pandas types (like numpy.bool_) are converted to native Python types
+        split_info_serializable = {
+            'seed': int(split_info['seed']),
+            'test_size': float(split_info.get('test_size', 0.2)),  # Proportion (0.2 for 20%)
+            'method': str(split_info['method']),
+            'train_size': int(split_info['train_size']),
+            'test_size_count': int(split_info.get('test_size_count', 0)),  # Count of test rows
+            'train_bad_count': int(split_info['train_bad']),
+            'test_bad_count': int(split_info['test_bad']),
+            'train_bad_rate': float(split_info.get('train_bad_rate', 0.0)) if split_info.get('train_bad_rate') is not None else None,
+            'test_bad_rate': float(split_info.get('test_bad_rate', 0.0)) if split_info.get('test_bad_rate') is not None else None,
+            'stratification_success': bool(split_info.get('stratification_success', True)),
+            'split_created_at': split_info.get('split_created_at').isoformat() if split_info.get('split_created_at') else None
+        }
+        
+        return jsonify({
+            'success': True,
+            'split_info': split_info_serializable,
+            'is_existing': bool(is_existing),
+            'message': 'Using existing train/test split' if is_existing else 'Created new train/test split'
+        })
+        
+    except Exception as e:
+        print(f"[API] Train/test split error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to create train/test split: {str(e)}"}), 500
+
+
+@app.route('/api/train-test-split/<int:dataset_id>', methods=['GET'])
+def get_train_test_split_info_api(dataset_id):
+    """
+    Get train/test split information for a dataset.
+    
+    Returns split metadata if it exists, or null if no split has been created.
+    """
+    try:
+        split_info = get_train_test_split_info(dataset_id)
+        
+        if not split_info:
+            return jsonify({
+                'exists': False,
+                'split_info': None
+            })
+        
+        return jsonify({
+            'exists': True,
+            'split_info': {
+                'seed': split_info['seed'],
+                'test_size': split_info['test_size'],  # Proportion (0.2 for 20%)
+                'method': split_info['method'],
+                'train_size': split_info['train_size'],
+                'test_size_count': split_info.get('test_size_count', split_info.get('test_size', 0)),  # Count of test rows
+                'train_bad_count': split_info['train_bad'],
+                'test_bad_count': split_info['test_bad'],
+                'train_bad_rate': split_info.get('train_bad_rate'),
+                'test_bad_rate': split_info['test_bad_rate'],
+                'split_created_at': split_info.get('split_created_at').isoformat() if split_info.get('split_created_at') else None
+            }
+        })
+    except Exception as e:
+        print(f"[API] Error getting split info: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 
 # ----------- Coarse Binning: Continuous -----------
 def coarse_bin_continuous(df, var, target, bins=10):
@@ -3070,6 +3439,8 @@ def auto_monotonic_binning_api():
     Automatically merge bins to achieve monotonic WOE (Weight of Evidence).
     Uses deterministic algorithms to find the best bin merging strategy.
     
+    IMPORTANT: Uses TRAIN SET ONLY if train/test split exists to prevent data leakage!
+    
     Expects JSON payload:
     {
         "variable": "column_name",
@@ -3083,6 +3454,8 @@ def auto_monotonic_binning_api():
     }
     """
     try:
+        from data_loader import get_data_for_stage, check_split_required
+        
         req = request.get_json()
         print("Auto-binning request:", req)
         
@@ -3108,18 +3481,33 @@ def auto_monotonic_binning_api():
             or req.get('recordId')
             or req.get('datasetId')
         )
-        # Load data
+        
+        # CRITICAL: Check if train/test split exists
+        if dataset_id:
+            split_exists = check_split_required(dataset_id)
+            if not split_exists:
+                print(f"[auto_monotonic_binning] ⚠️ WARNING: No train/test split exists for dataset {dataset_id}")
+                print(f"[auto_monotonic_binning] ⚠️ Creating binning on full dataset - this should be done after TTS!")
+        
+        # Load data using data_loader to get TRAIN set if split exists
         try:
-            csv_path = get_csv_path(dataset_id)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
-        try:
-            df = pd.read_csv(csv_path)
+            if dataset_id:
+                df = get_data_for_stage(dataset_id, 'binning')  # Returns TRAIN set if split exists
+                print(f"[auto_monotonic_binning] Loaded dataset: {len(df)} rows (train set if TTS exists)")
+            else:
+                csv_path = get_csv_path(dataset_id)
+                df = pd.read_csv(csv_path)
+                print(f"[auto_monotonic_binning] Loaded full dataset: {len(df)} rows")
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         except Exception as e:
-            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
-        df[target] = df[target].fillna(0).astype(int)
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
+        
+        # Convert target to binary 0/1
+        try:
+            df[target] = df[target].fillna(0).astype(int)
+        except Exception as e:
+            return jsonify({"error": f"Failed to convert target to numeric: {str(e)}"}), 400
         
         # First perform coarse binning to get initial bins
         if var_type == 'continuous':
@@ -3492,9 +3880,13 @@ def cross_tab_api():
 def univariate_analysis():
     """
     Performs univariate analysis (coarse binning) for a list of variables.
+    
+    IMPORTANT: Uses TRAIN SET ONLY if train/test split exists to prevent data leakage!
     """
     print("\n[API] /api/univariate-analysis (POST) called")
     try:
+        from data_loader import get_data_for_stage, check_split_required
+        
         req = request.get_json()
         print(f"[univariate_analysis] discrete={len(req.get('discrete', []))}, continuous={len(req.get('continuous', []))}, target={req.get('target')}")
         discrete_cols = req.get('discrete', [])
@@ -3505,17 +3897,26 @@ def univariate_analysis():
         if not target:
             return jsonify({"error": "Missing required field: target"}), 400
         
-        try:
-            csv_path = get_csv_path(record_id)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
+        # CRITICAL: Check if train/test split exists
+        if record_id:
+            split_exists = check_split_required(record_id)
+            if not split_exists:
+                print(f"[univariate_analysis] ⚠️ WARNING: No train/test split exists for dataset {record_id}")
+                print(f"[univariate_analysis] ⚠️ Creating binning on full dataset - this should be done after TTS!")
         
+        # Load data using data_loader to get TRAIN set if split exists
         try:
-            df = pd.read_csv(csv_path)
+            if record_id:
+                df = get_data_for_stage(record_id, 'binning')  # Returns TRAIN set if split exists
+                print(f"[univariate_analysis] Loaded dataset: {len(df)} rows (train set if TTS exists)")
+            else:
+                csv_path = get_csv_path(record_id)
+                df = pd.read_csv(csv_path)
+                print(f"[univariate_analysis] Loaded full dataset: {len(df)} rows")
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         except Exception as e:
-            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
         
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
@@ -5213,6 +5614,10 @@ def upsert_single_record():
             continuous_features=continuous_count
         )
         
+        # NOTE: Train/test split is created automatically by frontend when target variable is selected
+        # This happens via the /api/train-test-split endpoint called from frontend
+        # We do NOT create it here to avoid duplicate creation
+        
         return jsonify({"success": True, "id": dataset_id})
     except Exception as e:
         print(f"[upsert_single_record] ERROR: {str(e)}")
@@ -5472,34 +5877,52 @@ def update_feature_selection():
         dataset_id = data.get('dataset_id')
         is_selected = data.get('selected', False)
         
+        print(f"\n[UPDATE-FEATURE-SELECTION] ========================================")
+        print(f"[UPDATE-FEATURE-SELECTION] Request received:")
+        print(f"  Feature name: {feature_name}")
+        print(f"  Dataset ID: {dataset_id}")
+        print(f"  Selected: {is_selected}")
+        
         if not feature_name or not dataset_id:
+            print(f"[UPDATE-FEATURE-SELECTION] ❌ Missing feature_name or dataset_id")
             return jsonify({"error": "Missing feature_name or dataset_id"}), 400
         
         # Ensure dataset_id is an integer
         try:
             dataset_id = int(dataset_id)
         except (ValueError, TypeError):
+            print(f"[UPDATE-FEATURE-SELECTION] ❌ Invalid dataset_id: {dataset_id}")
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
         
         # Check if this is the target variable - always set to False
         dataset = get_dataset(dataset_id)
         if dataset and dataset.get('target_variable') == feature_name:
+            print(f"[UPDATE-FEATURE-SELECTION] ⚠️ Target variable detected, forcing selected=False")
             is_selected = False  # Force target variable to always be False
         
         # Get feature, create if it doesn't exist
         feature = get_feature_by_name(dataset_id, feature_name)
         if not feature:
+            print(f"[UPDATE-FEATURE-SELECTION] Feature doesn't exist, creating new feature")
             # Feature doesn't exist, create it with default type 'continuous'
             # The type will be updated later when classification is done
             feature_id = create_feature(dataset_id, feature_name, 'continuous', selected=is_selected)
             feature = get_feature(feature_id)
+            print(f"[UPDATE-FEATURE-SELECTION] ✅ Created feature with ID {feature_id}, selected={is_selected}")
         else:
+            print(f"[UPDATE-FEATURE-SELECTION] Feature exists (ID: {feature['id']}), current selected={feature.get('selected')}")
             # Update selected status (will be False if target variable)
             update_feature(feature['id'], selected=is_selected)
+            print(f"[UPDATE-FEATURE-SELECTION] ✅ Updated feature {feature['id']} to selected={is_selected}")
+            
+            # Verify the update
+            updated_feature = get_feature(feature['id'])
+            print(f"[UPDATE-FEATURE-SELECTION] Verification: selected={updated_feature.get('selected')}")
         
+        print(f"[UPDATE-FEATURE-SELECTION] ========================================\n")
         return jsonify({"success": True})
     except Exception as e:
-        print(f"[update_feature_selection] ERROR: {str(e)}")
+        print(f"[UPDATE-FEATURE-SELECTION] ❌ ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -7350,24 +7773,26 @@ def generate_scorecard():
         if not isinstance(woe_transformed_data, dict):
             return jsonify({"error": "woe_transformed_data must be a dictionary"}), 400
 
-        # Load dataset
+        # Load dataset - use TRAIN set for scorecard generation (to match model training)
         try:
-            csv_path = get_csv_path(dataset_id)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
-        try:
-            df = pd.read_csv(csv_path)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
+            df = get_data_for_stage(dataset_id, 'training')
+            print(f"[GENERATE-SCORECARD] Loaded TRAIN dataset: {len(df)} rows, {len(df.columns)} columns")
+            if df.empty:
+                return jsonify({"error": "Train dataset is empty"}), 400
+            if len(df.columns) == 0:
+                return jsonify({"error": "Train dataset has no columns"}), 400
         except Exception as e:
-            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
+            print(f"[GENERATE-SCORECARD] Error loading dataset: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
 
         # Validate columns
         if target not in df.columns:
-            return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
+            return jsonify({"error": f"Target column '{target}' not found in dataset. Available columns: {list(df.columns)[:10]}"}), 400
         missing_vars = [var for var in selected_variables if var not in df.columns]
         if missing_vars:
-            return jsonify({"error": f"Variables not found in dataset: {missing_vars}"}), 400
+            return jsonify({"error": f"Variables not found in dataset: {missing_vars}. Available columns: {list(df.columns)[:10]}"}), 400
         missing_woe = [var for var in selected_variables if var not in woe_transformed_data]
         if missing_woe:
             return jsonify({"error": f"Missing WOE data for variables: {missing_woe}"}), 400
@@ -7528,7 +7953,15 @@ def generate_scorecard():
                 modeling_data[var] = [0] * len(df)
 
         # Create DataFrame with WOE-transformed variables
+        if not modeling_data:
+            return jsonify({"error": "No WOE-transformed data created. Check WOE transformations."}), 400
+        
         model_df = pd.DataFrame(modeling_data)
+        print(f"[GENERATE-SCORECARD] Created model_df: {len(model_df)} rows, {len(model_df.columns)} columns")
+        
+        if model_df.empty:
+            return jsonify({"error": "WOE-transformed DataFrame is empty"}), 400
+        
         model_df[target] = df[target]
 
         # Check for missing variables
@@ -7723,6 +8156,7 @@ def generate_scorecard():
                 "intercept": round(float(intercept), 4),
                 "n_observations": len(model_df),
                 "n_variables": N,
+                "n_columns": len(model_df.columns) if 'model_df' in locals() else 0,
                 "model_type": model_type
             }
         })
@@ -7766,19 +8200,22 @@ def apply_scorecard():
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id/record_id"}), 400
 
+        # Load dataset - use FULL dataset for applying scorecard to all records
         try:
-            csv_path = get_csv_path(dataset_id)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
-        try:
-            df = pd.read_csv(csv_path)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
+            df = get_data_for_stage(dataset_id, 'full')
+            print(f"[APPLY-SCORECARD] Loaded FULL dataset: {len(df)} rows, {len(df.columns)} columns")
+            if df.empty:
+                return jsonify({"error": "Dataset is empty"}), 400
+            if len(df.columns) == 0:
+                return jsonify({"error": "Dataset has no columns"}), 400
         except Exception as e:
-            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
+            print(f"[APPLY-SCORECARD] Error loading dataset: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": f"Failed to load dataset: {str(e)}"}), 400
 
         if target not in df.columns:
-            return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
+            return jsonify({"error": f"Target column '{target}' not found in dataset. Available columns: {list(df.columns)[:10]}"}), 400
 
         # Sanitize non-finite values in selected variables
         for var in selected_variables:
@@ -7911,13 +8348,23 @@ def apply_scorecard():
             modeling_data[f'{var}_WOE'] = woe_column
 
         # Create DataFrame with WOE-transformed variables
+        if not modeling_data:
+            return jsonify({"error": "No WOE-transformed data created. Check WOE transformations."}), 400
+        
         model_df = pd.DataFrame(modeling_data)
+        print(f"[APPLY-SCORECARD] Created model_df: {len(model_df)} rows, {len(model_df.columns)} columns")
+        
+        if model_df.empty:
+            return jsonify({"error": "WOE-transformed DataFrame is empty"}), 400
+        
         model_df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
         model_df['__row_id__'] = np.arange(len(model_df))
 
         # Remove rows with missing target
         mask = ~model_df[target].isna()
         filtered_df = model_df[mask].reset_index(drop=True)
+        print(f"[APPLY-SCORECARD] After filtering: {len(filtered_df)} rows, {len(filtered_df.columns)} columns")
+        
         if filtered_df.empty:
             return jsonify({"error": "No valid data after preprocessing"}), 400
         
@@ -8106,9 +8553,17 @@ def apply_scorecard():
             recall = 0.0
             f1 = 0.0
 
+        print(f"[APPLY-SCORECARD] Returning results: {len(results_list)} records, {len(filtered_df.columns)} columns in model_df")
+        
         return jsonify({
             "success": True, 
-            "results": results_list, 
+            "results": results_list,
+            "summary": {
+                "total_records": len(results_list),
+                "total_columns": len(filtered_df.columns),
+                "selected_variables": selected_variables,
+                "model_type": model_type
+            }, 
             "ks_stat": ks_stat,
             "ks_threshold": ks_threshold,
             "auc": roc_auc,
@@ -8119,6 +8574,7 @@ def apply_scorecard():
             "model_type": model_type,
             "variables_used": selected_variables,
             "n_records": len(results_list),
+            "n_columns": len(filtered_df.columns) if 'filtered_df' in locals() else 0,
             "score_range": {
                 "min": float(np.min(scores_np)) if len(scores_np) > 0 else 0,
                 "max": float(np.max(scores_np)) if len(scores_np) > 0 else 0,
