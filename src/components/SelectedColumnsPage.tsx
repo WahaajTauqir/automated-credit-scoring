@@ -290,9 +290,10 @@ const SelectedColumnsPage = () => {
   );
 
   // Update your model components to pass these handlers
+  // Filter columns by search term, preserving the sorted order from selectedColumns
+  // (selectedColumns is sorted by: monotonic+high IV+more bins > monotonic+lower IV > non-monotonic)
   const filteredColumns = selectedColumns
-    .filter(col => col.toLowerCase().includes(searchTerm.toLowerCase()))
-    .sort((a, b) => a.localeCompare(b));
+    .filter(col => col.toLowerCase().includes(searchTerm.toLowerCase()));
   // Recommend functionality removed (UI buttons removed per request)
   // Initialize component state from navigation state
   useEffect(() => {
@@ -1501,6 +1502,49 @@ const SelectedColumnsPage = () => {
         woeIvResults: latestWoe ?? woeIvResultsRef.current,
       });
 
+      // After autobinning, fetch sorted features to update order and sync model_ready checkboxes
+      if (recordId) {
+        try {
+          // Fetch sorted features for reordering
+          const sortResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features-sorted`);
+          if (sortResponse.ok) {
+            const sortData = await sortResponse.json();
+            const sortedFeatureNames = sortData.sorted_feature_names || [];
+            
+            if (sortedFeatureNames.length > 0) {
+              // Reorder selectedColumns to match the sorted order
+              const currentSelectedSet = new Set(selectedColumns);
+              const sortedSelected = sortedFeatureNames.filter((name: string) => currentSelectedSet.has(name));
+              const unsortedSelected = selectedColumns.filter((name: string) => !sortedFeatureNames.includes(name));
+              const reorderedColumns = [...sortedSelected, ...unsortedSelected];
+              setSelectedColumns(reorderedColumns);
+            }
+          }
+          
+          // Fetch features to sync model_ready checkboxes
+          const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
+          if (featuresResponse.ok) {
+            const featureList = await featuresResponse.json();
+            if (Array.isArray(featureList)) {
+              const modelReadyFeatures = featureList
+                .filter((feature: any) => feature?.model_ready)
+                .map((feature: any) => String(feature.name).trim())
+                .filter(Boolean);
+              
+              if (modelReadyFeatures.length > 0) {
+                // Update selectedForModeling to include all model_ready features
+                setSelectedForModeling((prev) => {
+                  const newSet = new Set([...prev, ...modelReadyFeatures]);
+                  return Array.from(newSet);
+                });
+              }
+            }
+          }
+        } catch (err) {
+          console.error('Error fetching sorted features or model_ready status:', err);
+        }
+      }
+
       // Show success message with details
       const message = `Auto-binning completed for ${col}: ${data.num_merges} merges performed, ` +
         `${data.num_bins_original} → ${data.num_bins_final} bins, ` +
@@ -1523,6 +1567,84 @@ const SelectedColumnsPage = () => {
     }
   };
 
+
+  // Function to fetch sorted features and update selectedColumns order
+  const fetchAndSortFeatures = async () => {
+    if (!recordId) return;
+    
+    try {
+      const response = await fetch(`http://localhost:5000/api/dataset/${recordId}/features-sorted`);
+      if (!response.ok) {
+        console.error('Failed to fetch sorted features');
+        return;
+      }
+      
+      const data = await response.json();
+      const sortedFeatureNames = data.sorted_feature_names || [];
+      
+      if (sortedFeatureNames.length > 0) {
+        // Reorder selectedColumns to match the sorted order
+        // Keep existing selectedColumns but reorder them
+        const currentSelectedSet = new Set(selectedColumns);
+        const sortedSelected = sortedFeatureNames.filter((name: string) => currentSelectedSet.has(name));
+        const unsortedSelected = selectedColumns.filter((name: string) => !sortedFeatureNames.includes(name));
+        
+        // Combine: sorted selected first, then unsorted selected
+        const reorderedColumns = [...sortedSelected, ...unsortedSelected];
+        setSelectedColumns(reorderedColumns);
+      }
+    } catch (err) {
+      console.error('Error fetching sorted features:', err);
+    }
+  };
+
+  // Function to sync model_ready checkboxes from database
+  const syncModelReadyCheckboxes = async () => {
+    if (!recordId) return;
+    
+    try {
+      const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
+      if (featuresResponse.ok) {
+        const featureList = await featuresResponse.json();
+        if (Array.isArray(featureList)) {
+          const modelReadyFeatures = featureList
+            .filter((feature: any) => feature?.model_ready)
+            .map((feature: any) => String(feature.name).trim())
+            .filter(Boolean);
+          
+          if (modelReadyFeatures.length > 0) {
+            // Update selectedForModeling to include all model_ready features
+            setSelectedForModeling((prev) => {
+              const newSet = new Set([...prev, ...modelReadyFeatures]);
+              return Array.from(newSet);
+            });
+            console.log(`Synced ${modelReadyFeatures.length} model_ready features to checkboxes:`, modelReadyFeatures);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error syncing model_ready checkboxes:', err);
+    }
+  };
+
+  // Function to mark all monotonic features as model_ready
+  const markMonotonicAsModelReady = async () => {
+    if (!recordId) return;
+    
+    try {
+      const response = await fetch(`http://localhost:5000/api/dataset/${recordId}/mark-monotonic-as-model-ready`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`Marked ${data.count} monotonic features as model_ready:`, data.features);
+      }
+    } catch (err) {
+      console.error('Error marking monotonic features as model_ready:', err);
+    }
+  };
 
   const runAllAutoMonotonicFineBinning = async () => {
     if (!targetVariable) {
@@ -1557,6 +1679,11 @@ const SelectedColumnsPage = () => {
           errorCount++;
         }
       }
+      
+      // After all autobinning is complete, fetch sorted features, mark monotonic as model_ready, and sync checkboxes
+      await fetchAndSortFeatures();
+      await markMonotonicAsModelReady();
+      await syncModelReadyCheckboxes();
       
       showNotification(
         `All Auto Monotonic Fine Binning completed: ${successCount} successful, ${errorCount} errors`
@@ -2182,9 +2309,9 @@ const SelectedColumnsPage = () => {
           </div>
         </div>
         {notification && <div className="notification" role="alert">{notification}</div>}
-        <div className={`main-content-wrapper ${currentStep === 0 || currentStep === 1 || currentStep === 3 || currentStep === 4 ? 'full-width' : ''}`}>
-          {/* Show sidebar only for Binning step (Step 2) */}
-          {(currentStep === 2) && (
+        <div className={`main-content-wrapper ${currentStep === 0 || currentStep === 1 || currentStep === 3 || currentStep === 4 || (currentStep === 2 && binningMode === 'auto') ? 'full-width' : ''}`}>
+          {/* Show sidebar only for Binning step (Step 2) in manual mode */}
+          {(currentStep === 2 && binningMode === 'manual') && (
             <aside className="column-selection-section" aria-label="Scrollable column selection panel">
               <h3>Columns Dashboard</h3>
               <div className="sidebar-controls">

@@ -9,9 +9,11 @@ For continuous variables: Only adjacent bins can be merged.
 For discrete variables: Any bins can be merged.
 
 Two algorithms are available:
-1. Greedy: Fast, merges one violation at a time
+1. Greedy: Fast, intelligent merging with IV optimization
    - Supports both continuous and discrete variables
-   - For discrete: Finds best non-adjacent merge to minimize WOE variance
+   - For discrete: Considers multi-bin merges (2-3 bins at once) and IV improvement
+   - For continuous: Maintains adjacent-only merging constraint
+   - Uses scoring that prioritizes IV improvement over just violation reduction
    
 2. Exhaustive: Explores all 2^(n-1) possible adjacent merge combinations for n bins
    - Only supports continuous variables (adjacent-bin merging)
@@ -203,8 +205,9 @@ def greedy_merge_bins_woe(
     continuous: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray, Dict[str, List[str]]]:
     """
-    Greedy algorithm to merge bins to achieve monotonic WOE.
-    This is the simpler approach that merges bins one violation at a time.
+    Improved greedy algorithm to merge bins to achieve monotonic WOE.
+    For discrete variables, considers multi-bin merges and IV improvement.
+    For continuous variables, maintains adjacent-only merging.
     
     Parameters:
     -----------
@@ -244,10 +247,12 @@ def greedy_merge_bins_woe(
     
     max_iterations = len(good) * 3
     iteration = 0
+    
     while iteration < max_iterations:
         woe = compute_woe(good, bad)
         if is_monotonic(woe, increasing):
             break
+            
         # Find all violation indices
         violations = []
         for i in range(len(woe) - 1):
@@ -259,64 +264,205 @@ def greedy_merge_bins_woe(
 
         improved = False
         best_good, best_bad, best_labels, best_merge_map = None, None, None, None
-        best_violations_after = len(violations)
+        best_score = float('-inf')
+        current_iv = compute_iv(good, bad)
+        current_violations = len(violations)
 
-        for viol_idx in violations:
-            candidates = list(range(len(good)))
-            candidates.remove(viol_idx)
+        if not continuous:
+            # For discrete variables: consider multi-bin merges
+            # Strategy 1: Try merging multiple violation bins together
+            for num_bins_to_merge in range(2, min(4, len(violations) + 1)):  # Try merging 2-3 bins at once
+                for violation_combo in itertools.combinations(violations, num_bins_to_merge):
+                    # Try merging these violation bins with each other
+                    test_good = good.copy()
+                    test_bad = bad.copy()
+                    test_labels = labels.copy()
+                    test_merge_map = copy.deepcopy(merge_map)
+                    
+                    # Sort indices in descending order to merge from right to left
+                    merge_indices = sorted(list(violation_combo), reverse=True)
+                    target_idx = merge_indices[0]
+                    
+                    # Merge all bins into the first one
+                    merged_labels = [test_labels[i] for i in merge_indices]
+                    for idx in merge_indices[1:]:
+                        test_good[target_idx] += test_good[idx]
+                        test_bad[target_idx] += test_bad[idx]
+                    
+                    # Update merge map
+                    new_label = "_merged_".join(merged_labels)
+                    merged_original_labels = []
+                    for idx in merge_indices:
+                        merged_original_labels.extend(test_merge_map.pop(test_labels[idx], [test_labels[idx]]))
+                    test_merge_map[new_label] = merged_original_labels
+                    test_labels[target_idx] = new_label
+                    
+                    # Remove merged bins (from right to left to maintain indices)
+                    for idx in merge_indices[1:]:
+                        test_good = np.delete(test_good, idx)
+                        test_bad = np.delete(test_bad, idx)
+                        test_labels.pop(idx)
+                    
+                    # Compute new WOE, violations, and IV
+                    test_woe = compute_woe(test_good, test_bad)
+                    test_violations = sum(1 for i in range(len(test_woe)-1)
+                                        if (increasing and test_woe[i] > test_woe[i+1]) or
+                                           (not increasing and test_woe[i] < test_woe[i+1]))
+                    test_iv = compute_iv(test_good, test_bad)
+                    test_num_bins = len(test_good)
+                    current_num_bins = len(good)
+                    
+                    # Score: prioritize monotonicity, then bin preservation, then IV
+                    # If monotonic, give huge bonus and reward more bins
+                    # If not monotonic, prioritize violation reduction, then bins, then IV
+                    is_monotonic_result = test_violations == 0
+                    bins_preserved = test_num_bins
+                    bins_lost = current_num_bins - test_num_bins
+                    
+                    if is_monotonic_result:
+                        # Monotonic solutions: huge bonus, then prefer more bins, then IV
+                        score = 1000000 + bins_preserved * 100 + (test_iv - current_iv) * 1000
+                    else:
+                        # Non-monotonic: prioritize violation reduction, then preserve bins, then IV
+                        # Penalize losing too many bins at once
+                        bin_penalty = bins_lost * 20 if bins_lost > 1 else 0
+                        score = -test_violations * 1000 + bins_preserved * 50 + (test_iv - current_iv) * 100 - bin_penalty
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_good = test_good.copy()
+                        best_bad = test_bad.copy()
+                        best_labels = test_labels.copy()
+                        best_merge_map = copy.deepcopy(test_merge_map)
+                        improved = True
+            
+            # Strategy 2: Try merging violation bins with similar WOE bins
+            if not improved:
+                for viol_idx in violations:
+                    viol_woe = woe[viol_idx]
+                    # Find bins with similar WOE values (within threshold)
+                    similar_bins = []
+                    for i in range(len(woe)):
+                        if i != viol_idx and abs(woe[i] - viol_woe) < 50:  # Threshold for "similar"
+                            similar_bins.append(i)
+                    
+                    # Try merging violation bin with similar bins
+                    for similar_idx in similar_bins[:2]:  # Limit to 2 similar bins
+                        test_good = good.copy()
+                        test_bad = bad.copy()
+                        test_labels = labels.copy()
+                        test_merge_map = copy.deepcopy(merge_map)
+                        
+                        merge_indices = sorted([viol_idx, similar_idx], reverse=True)
+                        target_idx = merge_indices[0]
+                        
+                        # Merge
+                        test_good[target_idx] += test_good[merge_indices[1]]
+                        test_bad[target_idx] += test_bad[merge_indices[1]]
+                        
+                        new_label = f"{test_labels[target_idx]}_merged_{test_labels[merge_indices[1]]}"
+                        test_merge_map[new_label] = test_merge_map.pop(test_labels[target_idx], [test_labels[target_idx]]) + \
+                                                    test_merge_map.pop(test_labels[merge_indices[1]], [test_labels[merge_indices[1]]])
+                        test_labels[target_idx] = new_label
+                        
+                        test_good = np.delete(test_good, merge_indices[1])
+                        test_bad = np.delete(test_bad, merge_indices[1])
+                        test_labels.pop(merge_indices[1])
+                        
+                        test_woe = compute_woe(test_good, test_bad)
+                        test_violations = sum(1 for i in range(len(test_woe)-1)
+                                            if (increasing and test_woe[i] > test_woe[i+1]) or
+                                               (not increasing and test_woe[i] < test_woe[i+1]))
+                        test_iv = compute_iv(test_good, test_bad)
+                        test_num_bins = len(test_good)
+                        current_num_bins = len(good)
+                        
+                        # Score: prioritize monotonicity, then bin preservation, then IV
+                        is_monotonic_result = test_violations == 0
+                        bins_preserved = test_num_bins
+                        bins_lost = current_num_bins - test_num_bins
+                        
+                        if is_monotonic_result:
+                            score = 1000000 + bins_preserved * 100 + (test_iv - current_iv) * 1000
+                        else:
+                            bin_penalty = bins_lost * 20 if bins_lost > 1 else 0
+                            score = -test_violations * 1000 + bins_preserved * 50 + (test_iv - current_iv) * 100 - bin_penalty
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_good = test_good.copy()
+                            best_bad = test_bad.copy()
+                            best_labels = test_labels.copy()
+                            best_merge_map = copy.deepcopy(test_merge_map)
+                            improved = True
 
-            for cand_idx in candidates:
-                if cand_idx == viol_idx:
-                    continue
-                # Simulate merge
-                test_good = good.copy()
-                test_bad = bad.copy()
-                test_labels = labels.copy()
-                test_merge_map = copy.deepcopy(merge_map)
+        # Original strategy: single bin merges (for continuous or as fallback)
+        if not improved:
+            for viol_idx in violations:
+                candidates = list(range(len(good)))
+                candidates.remove(viol_idx)
 
-                # Merge viol_idx into cand_idx (to preserve order better)
-                merge_from = viol_idx
-                merge_to = cand_idx
+                for cand_idx in candidates:
+                    # For continuous variables, only consider adjacent bins
+                    if continuous and abs(viol_idx - cand_idx) != 1:
+                        continue
+                        
+                    # Simulate merge
+                    test_good = good.copy()
+                    test_bad = bad.copy()
+                    test_labels = labels.copy()
+                    test_merge_map = copy.deepcopy(merge_map)
 
-                # Adjust indices if needed
-                if merge_from > merge_to:
-                    merge_from, merge_to = merge_to, merge_from
+                    merge_from = viol_idx
+                    merge_to = cand_idx
 
-                # Update merge map
-                new_label = f"{test_labels[merge_to]}_merged_{test_labels[merge_from]}"
-                test_merge_map[new_label] = test_merge_map.pop(test_labels[merge_to], [test_labels[merge_to]]) + \
-                                            test_merge_map.pop(test_labels[merge_from], [test_labels[merge_from]])
+                    if merge_from > merge_to:
+                        merge_from, merge_to = merge_to, merge_from
 
-                # Merge counts
-                test_good[merge_to] += test_good[merge_from]
-                test_bad[merge_to] += test_bad[merge_from]
+                    new_label = f"{test_labels[merge_to]}_merged_{test_labels[merge_from]}"
+                    test_merge_map[new_label] = test_merge_map.pop(test_labels[merge_to], [test_labels[merge_to]]) + \
+                                                test_merge_map.pop(test_labels[merge_from], [test_labels[merge_from]])
 
-                # Remove the merged-from bin
-                test_good = np.delete(test_good, merge_from)
-                test_bad = np.delete(test_bad, merge_from)
-                test_labels[merge_to] = new_label
-                test_labels.pop(merge_from)
+                    test_good[merge_to] += test_good[merge_from]
+                    test_bad[merge_to] += test_bad[merge_from]
 
-                # Compute new WOE and violations
-                test_woe = compute_woe(test_good, test_bad)
-                test_violations = sum(1 for i in range(len(test_woe)-1)
-                                    if (increasing and test_woe[i] > test_woe[i+1]) or
-                                       (not increasing and test_woe[i] < test_woe[i+1]))
+                    test_good = np.delete(test_good, merge_from)
+                    test_bad = np.delete(test_bad, merge_from)
+                    test_labels[merge_to] = new_label
+                    test_labels.pop(merge_from)
 
-                # Prefer: fewer violations → higher IV → lower variance
-                if test_violations < best_violations_after:
-                    best_violations_after = test_violations
-                    best_good = test_good.copy()
-                    best_bad = test_bad.copy()
-                    best_labels = test_labels.copy()
-                    best_merge_map = copy.deepcopy(test_merge_map)
-                    improved = True
+                    test_woe = compute_woe(test_good, test_bad)
+                    test_violations = sum(1 for i in range(len(test_woe)-1)
+                                        if (increasing and test_woe[i] > test_woe[i+1]) or
+                                           (not increasing and test_woe[i] < test_woe[i+1]))
+                    test_iv = compute_iv(test_good, test_bad)
+                    test_num_bins = len(test_good)
+                    current_num_bins = len(good)
+                    
+                    # Score: prioritize monotonicity, then bin preservation, then IV
+                    is_monotonic_result = test_violations == 0
+                    bins_preserved = test_num_bins
+                    bins_lost = current_num_bins - test_num_bins
+                    
+                    if is_monotonic_result:
+                        score = 1000000 + bins_preserved * 100 + (test_iv - current_iv) * 1000
+                    else:
+                        bin_penalty = bins_lost * 20 if bins_lost > 1 else 0
+                        score = -test_violations * 1000 + bins_preserved * 50 + (test_iv - current_iv) * 100 - bin_penalty
+
+                    if score > best_score:
+                        best_score = score
+                        best_good = test_good.copy()
+                        best_bad = test_bad.copy()
+                        best_labels = test_labels.copy()
+                        best_merge_map = copy.deepcopy(test_merge_map)
+                        improved = True
 
         # Apply best merge found
         if improved and best_good is not None:
             good, bad, labels, merge_map = best_good, best_bad, best_labels, best_merge_map
         else:
-            # No merge reduces violations → force merge first violation with next
+            # Fallback: force merge first violation with next
             viol_idx = violations[0]
             merge_to = viol_idx + 1 if viol_idx + 1 < len(good) else viol_idx - 1
             if merge_to < 0:
@@ -332,6 +478,7 @@ def greedy_merge_bins_woe(
             labels[merge_to] = new_label
             labels.pop(viol_idx)
         iteration += 1
+        
     final_woe = compute_woe(good, bad)
     return good, bad, labels, final_woe, merge_map
 
@@ -345,7 +492,7 @@ def exhaustive_merge_bins_woe(
     prioritize_iv: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray, Dict[str, List[str]]]:
     """
-    Exhaustive algorithm to find the best bin merging that achieves monotonic WOE.
+    Enhanced exhaustive algorithm to find the best bin merging that achieves monotonic WOE.
     
     IMPORTANT: This function only supports continuous variables (adjacent-bin merging).
     For discrete variables, it will fall back to the greedy algorithm.
@@ -354,11 +501,12 @@ def exhaustive_merge_bins_woe(
     (2^(n-1) possibilities for n bins) and selects the optimal solution.
     
     Selection criteria (in priority order):
-    1. Monotonicity (must be monotonic - only monotonic solutions are considered)
-    2. Monotonic quality (prefer solutions with better monotonic trends - fewer flat segments, larger step sizes)
-    3. Maximize bins (prefer more bins, even if it means slightly lower IV)
-    4. IV (when bin counts are equal, prefer higher Information Value)
-    5. Tiebreaker: Lower WOE variance
+    1. Monotonicity (MUST be monotonic - only monotonic solutions are considered)
+    2. Best IV among all monotonic solutions (primary optimization goal)
+    3. More bins (when IV is equal, prefer more bins)
+    4. Lower WOE variance (final tiebreaker)
+    
+    The algorithm tries BOTH increasing and decreasing directions to find the best solution.
     
     For discrete variables: A true exhaustive search would require exploring all 
     possible set partitions (Bell number B_n), which is computationally infeasible.
@@ -374,7 +522,7 @@ def exhaustive_merge_bins_woe(
         Labels for each bin
     increasing : Optional[bool]
         If True, aim for increasing WOE. If False, aim for decreasing WOE.
-        If None, auto-detect based on overall trend.
+        If None, try BOTH directions and pick the best.
     continuous : bool
         If True, only adjacent bins can merge (continuous variable).
         If False, any bins can merge (discrete variable).
@@ -382,7 +530,7 @@ def exhaustive_merge_bins_woe(
         Maximum number of bins to keep (will stop when reached)
     prioritize_iv : bool
         Legacy parameter (kept for backward compatibility).
-        Note: The algorithm now always prioritizes bins first, then IV when bin counts are equal.
+        Note: The algorithm now always prioritizes monotonicity first, then IV.
         
     Returns:
     --------
@@ -393,31 +541,25 @@ def exhaustive_merge_bins_woe(
         - final_woe: WOE values after merging
         - merge_map: Dictionary mapping new labels to original labels
     """
-    # Auto-detect direction if not specified
-    if increasing is None:
-        initial_woe = compute_woe(good, bad)
-        positions = np.arange(len(initial_woe))
-        correlation = np.corrcoef(positions, initial_woe)[0, 1]
-        increasing = correlation >= 0
-    
     # For discrete variables, exhaustive search is not supported (would require exploring
     # all possible set partitions - Bell numbers). Fall back to greedy algorithm.
     if not continuous:
         print("WARNING: Exhaustive search not supported for discrete variables.")
         print("Falling back to greedy algorithm (which supports any-to-any bin merging).")
+        if increasing is None:
+            initial_woe = compute_woe(good, bad)
+            positions = np.arange(len(initial_woe))
+            correlation = np.corrcoef(positions, initial_woe)[0, 1]
+            increasing = correlation >= 0
         return greedy_merge_bins_woe(good, bad, bin_labels, increasing, continuous)
     
-    # Start with greedy solution as baseline
-    best_good, best_bad, best_labels, best_woe, best_merge_map = greedy_merge_bins_woe(
-        good, bad, bin_labels, increasing, continuous
-    )
-    best_num_bins = len(best_good)
-    best_iv = compute_iv(best_good, best_bad)
-    best_monotonic_quality = monotonic_quality_score(best_woe, increasing)
-    
-    # If already has few bins or meets target, return greedy solution
-    if max_bins and best_num_bins <= max_bins:
-        return best_good, best_bad, best_labels, best_woe, best_merge_map
+    # Determine which directions to try
+    directions_to_try = []
+    if increasing is None:
+        # Try both directions to find the best solution
+        directions_to_try = [True, False]
+    else:
+        directions_to_try = [increasing]
     
     # Try all possible merge combinations (truly exhaustive)
     n_bins = len(good)
@@ -437,108 +579,152 @@ def exhaustive_merge_bins_woe(
     if n_bins > 30:
         print(f"ERROR: Exhaustive search not recommended for {n_bins} bins (would require {total_combinations:,} combinations).")
         print(f"Falling back to greedy algorithm.")
-        return best_good, best_bad, best_labels, best_woe, best_merge_map
+        if increasing is None:
+            initial_woe = compute_woe(good, bad)
+            positions = np.arange(len(initial_woe))
+            correlation = np.corrcoef(positions, initial_woe)[0, 1]
+            increasing = correlation >= 0
+        return greedy_merge_bins_woe(good, bad, bin_labels, increasing, continuous)
     
-    print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins (prioritizing: bins > IV > variance)...")
+    print(f"Exploring {total_combinations:,} merge combinations for {n_bins} bins across {len(directions_to_try)} direction(s)...")
+    print(f"Priority: 1) Monotonicity (MUST), 2) Best IV, 3) More bins, 4) Lower variance")
     
-    for combination_idx in range(total_combinations):
-        # Convert combination index to binary representation
-        # Each bit represents whether to merge at that position
-        merge_pattern = format(combination_idx, f'0{n_merge_positions}b')
+    # Track best solution across all directions
+    best_good = None
+    best_bad = None
+    best_labels = None
+    best_woe = None
+    best_merge_map = None
+    best_num_bins = 0
+    best_iv = -np.inf  # Start with negative infinity to ensure any valid solution is better
+    best_direction = None
+    
+    # Try each direction
+    for direction in directions_to_try:
+        direction_name = "increasing" if direction else "decreasing"
+        print(f"  Trying {direction_name} direction...")
         
-        # Skip the all-zeros case (no merges) if we need monotonicity
-        if combination_idx == 0:
-            continue
+        # Track best solution for this direction
+        dir_best_good = None
+        dir_best_bad = None
+        dir_best_labels = None
+        dir_best_woe = None
+        dir_best_merge_map = None
+        dir_best_num_bins = 0
+        dir_best_iv = -np.inf
+        dir_monotonic_found = False
         
-        # Create a different merge strategy
-        test_good = good.copy()
-        test_bad = bad.copy()
-        test_labels = bin_labels.copy()
-        test_merge_map = {label: [label] for label in test_labels}
-        
-        # Apply merges based on the binary pattern
-        # Process from right to left to maintain correct indices
-        merges_to_apply = []
-        for pos in range(n_merge_positions):
-            if merge_pattern[pos] == '1':
-                merges_to_apply.append(pos)
-        
-        # Apply merges from right to left to maintain indices
-        for merge_idx in reversed(merges_to_apply):
-            if merge_idx >= len(test_good) - 1:
+        for combination_idx in range(total_combinations):
+            # Convert combination index to binary representation
+            # Each bit represents whether to merge at that position
+            merge_pattern = format(combination_idx, f'0{n_merge_positions}b')
+            
+            # Skip the all-zeros case (no merges) if we need monotonicity
+            if combination_idx == 0:
                 continue
             
-            # Perform the merge
-            new_label = f"{test_labels[merge_idx]}_merged_{test_labels[merge_idx + 1]}"
-            test_merge_map[new_label] = test_merge_map.get(test_labels[merge_idx], [test_labels[merge_idx]]) + \
-                                        test_merge_map.get(test_labels[merge_idx + 1], [test_labels[merge_idx + 1]])
+            # Create a different merge strategy
+            test_good = good.copy()
+            test_bad = bad.copy()
+            test_labels = bin_labels.copy()
+            test_merge_map = {label: [label] for label in test_labels}
             
-            if test_labels[merge_idx] in test_merge_map:
-                del test_merge_map[test_labels[merge_idx]]
-            if test_labels[merge_idx + 1] in test_merge_map:
-                del test_merge_map[test_labels[merge_idx + 1]]
+            # Apply merges based on the binary pattern
+            # Process from right to left to maintain correct indices
+            merges_to_apply = []
+            for pos in range(n_merge_positions):
+                if merge_pattern[pos] == '1':
+                    merges_to_apply.append(pos)
             
-            # Merge counts
-            test_good[merge_idx] += test_good[merge_idx + 1]
-            test_bad[merge_idx] += test_bad[merge_idx + 1]
-            test_good = np.delete(test_good, merge_idx + 1)
-            test_bad = np.delete(test_bad, merge_idx + 1)
+            # Apply merges from right to left to maintain indices
+            for merge_idx in reversed(merges_to_apply):
+                if merge_idx >= len(test_good) - 1:
+                    continue
+                
+                # Perform the merge
+                new_label = f"{test_labels[merge_idx]}_merged_{test_labels[merge_idx + 1]}"
+                test_merge_map[new_label] = test_merge_map.get(test_labels[merge_idx], [test_labels[merge_idx]]) + \
+                                            test_merge_map.get(test_labels[merge_idx + 1], [test_labels[merge_idx + 1]])
+                
+                if test_labels[merge_idx] in test_merge_map:
+                    del test_merge_map[test_labels[merge_idx]]
+                if test_labels[merge_idx + 1] in test_merge_map:
+                    del test_merge_map[test_labels[merge_idx + 1]]
+                
+                # Merge counts
+                test_good[merge_idx] += test_good[merge_idx + 1]
+                test_bad[merge_idx] += test_bad[merge_idx + 1]
+                test_good = np.delete(test_good, merge_idx + 1)
+                test_bad = np.delete(test_bad, merge_idx + 1)
+                
+                # Update labels
+                test_labels[merge_idx] = new_label
+                test_labels = [label for i, label in enumerate(test_labels) if i != merge_idx + 1]
             
-            # Update labels
-            test_labels[merge_idx] = new_label
-            test_labels = [label for i, label in enumerate(test_labels) if i != merge_idx + 1]
-        
-        # After applying all merges, check if this solution is valid
-        test_woe = compute_woe(test_good, test_bad)
-        
-        if is_monotonic(test_woe, increasing):
-            # Found a valid monotonic solution - check if it's better
-            # Priority order (all monotonic solutions are considered):
-            # 1. Monotonicity (already enforced by the if condition above)
-            # 2. Monotonic quality (prefer solutions with better monotonic trends)
-            # 3. Maximize bins (prefer more bins, even if IV is slightly lower)
-            # 4. IV (when bin counts are equal, prefer higher IV)
-            # 5. WOE variance (final tiebreaker)
+            # After applying all merges, check if this solution is valid
+            test_woe = compute_woe(test_good, test_bad)
             
-            test_iv = compute_iv(test_good, test_bad)
-            test_num_bins = len(test_good)
-            test_monotonic_quality = monotonic_quality_score(test_woe, increasing)
-            
-            # Priority 2: Compare monotonic quality first (prefer better trends)
-            # Only consider solutions with reasonable quality (threshold to avoid very poor trends)
-            min_quality_threshold = 0.1  # Minimum acceptable quality
-            if test_monotonic_quality < min_quality_threshold and best_monotonic_quality >= min_quality_threshold:
+            # PRIORITY 1: Must be monotonic (no exceptions, no quality threshold)
+            if is_monotonic(test_woe, direction):
+                dir_monotonic_found = True
+                test_iv = compute_iv(test_good, test_bad)
+                test_num_bins = len(test_good)
+                
+                # PRIORITY 2: Best IV among monotonic solutions
+                # PRIORITY 3: More bins when IV is equal
+                # PRIORITY 4: Lower WOE variance as tiebreaker
                 is_better = False
-            elif test_monotonic_quality >= min_quality_threshold and best_monotonic_quality < min_quality_threshold:
-                is_better = True
-            elif test_monotonic_quality != best_monotonic_quality:
-                # Both pass threshold, prefer higher quality
-                is_better = test_monotonic_quality > best_monotonic_quality
-            else:
-                # Same monotonic quality, compare by number of bins
-                if test_num_bins != best_num_bins:
-                    # Priority 3: More bins is better (willing to trade some IV for more bins)
-                    is_better = test_num_bins > best_num_bins
-                else:
-                    # Same number of bins, compare by IV
-                    if test_iv != best_iv:
-                        # Priority 4: Higher IV is better
-                        is_better = test_iv > best_iv
-                    else:
-                        # Priority 5: Lower WOE variance as tiebreaker
-                        is_better = np.std(test_woe) < np.std(best_woe)
-            
-            if is_better:
-                best_good = test_good.copy()
-                best_bad = test_bad.copy()
-                best_labels = test_labels.copy()
-                best_woe = test_woe
-                best_merge_map = copy.deepcopy(test_merge_map)
-                best_num_bins = test_num_bins
-                best_iv = test_iv
-                best_monotonic_quality = test_monotonic_quality
+                
+                if test_iv > dir_best_iv:
+                    # Higher IV is always better (primary goal)
+                    is_better = True
+                elif abs(test_iv - dir_best_iv) < 1e-10:  # IV essentially equal
+                    # Same IV, prefer more bins
+                    if test_num_bins > dir_best_num_bins:
+                        is_better = True
+                    elif test_num_bins == dir_best_num_bins:
+                        # Same bins, prefer lower variance
+                        test_variance = np.std(test_woe)
+                        dir_best_variance = np.std(dir_best_woe) if dir_best_woe is not None else np.inf
+                        is_better = test_variance < dir_best_variance
+                
+                if is_better:
+                    dir_best_good = test_good.copy()
+                    dir_best_bad = test_bad.copy()
+                    dir_best_labels = test_labels.copy()
+                    dir_best_woe = test_woe
+                    dir_best_merge_map = copy.deepcopy(test_merge_map)
+                    dir_best_num_bins = test_num_bins
+                    dir_best_iv = test_iv
+        
+        # Compare best solution from this direction with overall best
+        if dir_monotonic_found and dir_best_iv > best_iv:
+            best_good = dir_best_good
+            best_bad = dir_best_bad
+            best_labels = dir_best_labels
+            best_woe = dir_best_woe
+            best_merge_map = dir_best_merge_map
+            best_num_bins = dir_best_num_bins
+            best_iv = dir_best_iv
+            best_direction = direction
+            print(f"    Found better {direction_name} solution: {dir_best_num_bins} bins, IV = {dir_best_iv:.4f}")
+        elif dir_monotonic_found:
+            print(f"    Found {direction_name} solution: {dir_best_num_bins} bins, IV = {dir_best_iv:.4f} (not better)")
+        else:
+            print(f"    No monotonic {direction_name} solution found")
     
-    print(f"Best solution found: {best_num_bins} bins with IV = {best_iv:.4f}, monotonic quality = {best_monotonic_quality:.4f}")
+    # If no monotonic solution found, fall back to greedy
+    if best_good is None:
+        print("WARNING: No monotonic solution found in exhaustive search. Falling back to greedy algorithm.")
+        if increasing is None:
+            initial_woe = compute_woe(good, bad)
+            positions = np.arange(len(initial_woe))
+            correlation = np.corrcoef(positions, initial_woe)[0, 1]
+            increasing = correlation >= 0
+        return greedy_merge_bins_woe(good, bad, bin_labels, increasing, continuous)
+    
+    direction_name = "increasing" if best_direction else "decreasing"
+    print(f"Best solution found: {best_num_bins} bins, {direction_name} direction, IV = {best_iv:.4f}")
     
     return best_good, best_bad, best_labels, best_woe, best_merge_map
 

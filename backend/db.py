@@ -477,6 +477,34 @@ def get_features_by_dataset(dataset_id: int) -> List[Dict]:
     return [dict(f) for f in features]
 
 
+def get_features_with_fine_binning_metadata(dataset_id: int) -> List[Dict]:
+    """
+    Get all features for a dataset with their fine binning metadata.
+    Returns features with is_monotonic, iv_value, and num_bins from fine binning step.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute("""
+        SELECT 
+            f.*,
+            bs.is_monotonic,
+            bs.iv_value,
+            bs.num_bins,
+            bs.monotonic_direction
+        FROM features f
+        LEFT JOIN binning_steps bs ON f.id = bs.feature_id AND bs.step_type = 'fine'
+        WHERE f.dataset_id = %s
+        ORDER BY f.name
+    """, (dataset_id,))
+    features = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
+    return [dict(f) for f in features]
+
+
 def get_feature_by_name(dataset_id: int, name: str) -> Optional[Dict]:
     """Get a feature by dataset ID and name."""
     conn = get_db_connection()

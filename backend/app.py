@@ -37,6 +37,7 @@ from db import (
     # Feature operations
     create_feature, create_features_batch, get_feature, get_features_by_dataset, 
     get_feature_by_name, update_feature, update_features_selection, update_features_final_selection, update_features_model_ready,
+    get_features_with_fine_binning_metadata,
     # Binning step operations
     create_binning_step, get_binning_step, get_binning_steps_by_feature, 
     get_binning_step_by_type, delete_binning_step, update_binning_step,
@@ -87,6 +88,11 @@ def _sanitize_model_label(label: Optional[str]) -> str:
 def _artifact_pattern(dataset_id: int) -> str:
     return os.path.join(ARTIFACTS_DIR, f"{dataset_id}_*.pkl")
 
+
+def _artifact_path(dataset_id: int, model_label: str) -> str:
+    sanitized = _sanitize_model_label(model_label)
+    return os.path.join(ARTIFACTS_DIR, f"{dataset_id}_{sanitized}.pkl")
+
 def _build_artifact_metadata(payload: Dict[str, Any], artifact_path: str) -> Dict[str, Any]:
     selected_vars = payload.get('model_variables') or payload.get('selected_variables', [])
     metrics = payload.get('training_metrics') or {}
@@ -104,9 +110,10 @@ def _build_artifact_metadata(payload: Dict[str, Any], artifact_path: str) -> Dic
 def save_model_artifact(dataset_id: int, model_label: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
         os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-        for existing in glob.glob(_artifact_pattern(dataset_id)):
+        target_path = _artifact_path(dataset_id, model_label)
+        if os.path.exists(target_path):
             try:
-                os.remove(existing)
+                os.remove(target_path)
             except OSError:
                 pass
         try:
@@ -116,8 +123,7 @@ def save_model_artifact(dataset_id: int, model_label: str, payload: Dict[str, An
         payload_copy.setdefault('dataset_id', dataset_id)
         payload_copy.setdefault('model_label', model_label)
         payload_copy.setdefault('saved_at', datetime.datetime.utcnow().isoformat())
-        filename = f"{dataset_id}_{_sanitize_model_label(model_label)}.pkl"
-        artifact_path = os.path.join(ARTIFACTS_DIR, filename)
+        artifact_path = target_path
         with open(artifact_path, 'wb') as handle:
             pickle.dump(payload_copy, handle)
         return _build_artifact_metadata(payload_copy, artifact_path)
@@ -125,10 +131,17 @@ def save_model_artifact(dataset_id: int, model_label: str, payload: Dict[str, An
         print(f"[MODEL ARTIFACT] Failed to save artifact for dataset {dataset_id}: {err}")
         return None
 
-def load_model_artifact(dataset_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    pattern = _artifact_pattern(dataset_id)
-    matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    for path in matches:
+def load_model_artifact(dataset_id: int, model_label: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    paths = []
+    if model_label:
+        target = _artifact_path(dataset_id, model_label)
+        if os.path.exists(target):
+            paths.append(target)
+    else:
+        pattern = _artifact_pattern(dataset_id)
+        paths = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+
+    for path in paths:
         try:
             with open(path, 'rb') as handle:
                 payload = pickle.load(handle)
@@ -345,23 +358,150 @@ def get_finebin_details_db(record_id, column_name):
     """
     Returns fine-bin merged groups for a given record and column.
     Returns a list of dicts with keys `group_id` and `merged_bins`.
+
+    IMPORTANT:
+    - `merged_bins` must contain the actual coarse bin labels (e.g. c1, d3)
+      because downstream WOE calculations map against the *_binned column
+      which stores labels, not bin IDs.
     """
     try:
         dataset_id = record_id
         feature = get_feature_by_name(dataset_id, column_name)
         if not feature:
             return []
+
         fine_step = get_binning_step_by_type(feature['id'], 'fine')
         if not fine_step:
             return []
+
         merged = get_merged_bins_by_step(fine_step['id'])
+        if not merged:
+            return []
+
+        # Build a lookup from bin_id -> bin_label so that we can translate the
+        # stored original_bin_ids into the human-readable labels that exist in
+        # the dataframe's *_binned column.
+        coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
+        coarse_bins = get_bins_by_step(coarse_step['id']) if coarse_step else []
+        prefix = 'c' if feature.get('type') == 'continuous' else 'd'
+        bin_id_to_label = {}
+        for bin_row in coarse_bins:
+            label = bin_row.get('bin_label')
+            if not label:
+                bin_num = bin_row.get('bin_number')
+                label = f"{prefix}{bin_num}" if bin_num is not None else None
+            if label:
+                try:
+                    bin_id = bin_row.get('id')
+                    if bin_id is None:
+                        continue
+                    bin_id_to_label[int(bin_id)] = str(label).strip()
+                except (TypeError, ValueError):
+                    continue
+
         rows = []
         for mb in merged:
-            # return merged_bins as a list (do NOT stringify)
-            rows.append({'group_id': mb.get('merged_bin_number'), 'merged_bins': mb.get('original_bin_ids', [])})
+            original_ids = mb.get('original_bin_ids') or []
+            original_labels = mb.get('original_bin_labels') or []
+
+            labels = [str(lbl).strip() for lbl in original_labels if str(lbl).strip()]
+            if not labels:
+                for bid in original_ids:
+                    try:
+                        bid_int = int(bid)
+                    except (TypeError, ValueError):
+                        bid_int = None
+                    label = bin_id_to_label.get(bid_int)
+                    if label:
+                        labels.append(label)
+            if not labels and original_ids:
+                labels = [str(bid).strip() for bid in original_ids if str(bid).strip()]
+
+            rows.append({
+                'group_id': mb.get('merged_bin_number'),
+                'merged_bins': labels
+            })
         return rows
     except Exception:
         return []
+
+
+def _load_woe_stats_from_db(dataset_id: int, variable: str,
+                            feature_cache: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[List[Dict[str, Any]]]:
+    """
+    Load persisted WOE stats for a variable directly from the database.
+    Prefers the fine-binning step (monotonic/merged bins) and falls back to coarse bins.
+    Returns a list matching the frontend WOE payload structure.
+    """
+    cache = feature_cache if feature_cache is not None else {}
+    feature = cache.get(variable)
+    if feature is None:
+        feature = get_feature_by_name(dataset_id, variable)
+        if feature and feature_cache is not None:
+            feature_cache[variable] = feature
+    if not feature:
+        return None
+
+    step = get_binning_step_by_type(feature['id'], 'fine')
+    step_type = 'fine'
+    if not step:
+        step = get_binning_step_by_type(feature['id'], 'coarse')
+        step_type = 'coarse'
+    if not step:
+        return None
+
+    bins = get_bins_by_step(step['id'])
+    if not bins:
+        return None
+
+    feature_type = feature.get('type') or 'continuous'
+    prefix = 'c' if feature_type == 'continuous' else 'd'
+    stats: List[Dict[str, Any]] = []
+
+    for bin_row in bins:
+        native = _row_to_native_types(dict(bin_row))
+        label = native.get('bin_label')
+        if not label:
+            bin_number = native.get('bin_number')
+            if bin_number is not None:
+                label = f"{prefix}{bin_number}"
+            else:
+                label = str(native.get('id') or '')
+
+        min_val = native.get('min_value')
+        max_val = native.get('max_value')
+        range_text = native.get('range_text')
+
+        if feature_type == 'continuous':
+            if not range_text:
+                lower = min_val if min_val is not None else '-inf'
+                upper = max_val if max_val is not None else 'inf'
+                range_text = f"({lower}, {upper}]"
+        else:
+            if not range_text:
+                range_text = label
+
+        woe_val = native.get('woe')
+        if woe_val is not None:
+            try:
+                woe_val = float(woe_val)
+            except Exception:
+                woe_val = None
+
+        stats.append({
+            'Bin': label,
+            'range': range_text,
+            'Range': range_text,
+            'woe': woe_val,
+            'WOE': woe_val,
+            'min_value': min_val,
+            'max_value': max_val,
+            'source_step': step_type
+        })
+
+    if stats:
+        print(f"XGB DEBUG: Hydrated {len(stats)} bins for {variable} from {step_type} binning step")
+    return stats or None
 
 
 def save_finebin_details_db(record_id, column_name, bin_merges):
@@ -532,6 +672,35 @@ def _row_to_native_types(row: Dict[str, Any]) -> Dict[str, Any]:
         else:
             normalized[key] = value
     return normalized
+
+
+DEFAULT_SCORECARD_CONFIG = {
+    "min_score": 300,
+    "max_score": 850,
+    "base_score": 600,
+    "base_odds": 50,
+    "points_to_double_odds": 50
+}
+
+
+def _scorecard_scaling_params(config: Dict[str, float] = DEFAULT_SCORECARD_CONFIG) -> Tuple[float, float]:
+    """Return (factor, offset) for the standard credit score scaling."""
+    factor = config["points_to_double_odds"] / math.log(2)
+    offset = config["base_score"] - factor * math.log(config["base_odds"])
+    return factor, offset
+
+
+def _probability_to_score(probabilities, config: Dict[str, float] = DEFAULT_SCORECARD_CONFIG):
+    """
+    Convert bad-probabilities to credit scores using Score = Offset + Factor * ln(odds).
+    Clamps output to [min_score, max_score].
+    """
+    factor, offset = _scorecard_scaling_params(config)
+    probs = np.clip(np.asarray(probabilities, dtype=float), 1e-6, 1 - 1e-6)
+    odds = (1.0 - probs) / probs
+    raw_scores = offset + factor * np.log(odds)
+    clipped = np.clip(raw_scores, config["min_score"], config["max_score"])
+    return clipped
 
 
 def get_csv_path(dataset_id: Optional[int] = None):
@@ -995,6 +1164,26 @@ def preprocessing_steps_detailed():
             return jsonify({"error": "Missing dataset_id"}), 400
         
         # Load dataset
+        artifact_payload = None
+        artifact_model_type = None
+        artifact_label = None
+        if model_type == 'xgboost':
+            artifact_label = 'XGBoost'
+        elif model_type == 'logistic':
+            artifact_label = 'LR'
+        elif model_type == 'random_forest':
+            artifact_label = 'RandomForest'
+
+        if artifact_label:
+            try:
+                artifact_payload, _ = load_model_artifact(dataset_id, model_label=artifact_label)
+                if artifact_payload:
+                    artifact_model_type = artifact_payload.get('model_type')
+            except Exception as artifact_err:
+                print(f"[apply_scorecard] Warning: Failed to load model artifact ({artifact_label}): {artifact_err}")
+                artifact_payload = None
+                artifact_model_type = None
+
         try:
             csv_path = get_csv_path(dataset_id)
             df = pd.read_csv(csv_path)
@@ -3079,8 +3268,28 @@ def auto_monotonic_binning_api():
         # Create/update fine step and persist bins/totals
         num_bins = len(tab) if hasattr(tab, 'shape') else (len(tab) if isinstance(tab, list) else 0)
         print(f"[auto_monotonic_binning] DEBUG: Creating fine step for {var}, num_bins={num_bins}, iv={iv}")
-        fine_step_id = create_binning_step(feature_id=feature['id'], step_type='fine', method='merged' if adjusted_merges else 'auto_monotonic', num_bins=num_bins, iv_value=iv)
-        print(f"[auto_monotonic_binning] DEBUG: Created fine_step_id={fine_step_id}")
+        # Update fine step with is_monotonic and monotonic_direction from result
+        monotonic_dir = result['direction'] if result['is_monotonic'] else None
+        fine_step_id = create_binning_step(
+            feature_id=feature['id'], 
+            step_type='fine', 
+            method='merged' if adjusted_merges else 'auto_monotonic', 
+            num_bins=num_bins, 
+            iv_value=iv,
+            is_monotonic=result['is_monotonic'],
+            monotonic_direction=monotonic_dir
+        )
+        print(f"[auto_monotonic_binning] DEBUG: Created fine_step_id={fine_step_id}, is_monotonic={result['is_monotonic']}")
+        
+        # If monotonic and IV >= 0.1, mark feature as model_ready
+        if result['is_monotonic'] and iv >= 0.1:
+            try:
+                update_feature(feature['id'], model_ready=True)
+                print(f"[auto_monotonic_binning] DEBUG: Marked {var} as model_ready (monotonic, IV={iv:.4f} >= 0.1)")
+            except Exception as e:
+                print(f"[auto_monotonic_binning] DEBUG: Error marking model_ready: {e}")
+        elif result['is_monotonic'] and iv < 0.1:
+            print(f"[auto_monotonic_binning] DEBUG: Skipped marking {var} as model_ready (monotonic but IV={iv:.4f} < 0.1)")
 
         # CRITICAL FIX: Delete existing bins for this step before creating new ones
         # This prevents orphaned binning_steps (steps without bins) when ON CONFLICT updates an existing step
@@ -5011,8 +5220,11 @@ def upsert_single_record():
 @app.route('/api/update-feature-modeling', methods=['POST'])
 def update_feature_modeling():
     """
-    Update feature's model_ready and is_monotonic when checkbox is checked in Column Selection & Binning.
+    Fast endpoint to update feature's model_ready when checkbox is checked.
+    Uses direct SQL update for maximum speed - assumes column exists (created on startup).
     """
+    conn = None
+    cur = None
     try:
         data = request.get_json()
         feature_name = data.get('feature_name')
@@ -5028,42 +5240,52 @@ def update_feature_modeling():
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
         
-        # Get feature
-        feature = get_feature_by_name(dataset_id, feature_name)
-        if not feature:
+        # Fast path: Direct SQL update in single query (assumes column exists)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Update model_ready directly - fastest possible path
+        cur.execute("""
+            UPDATE features 
+            SET model_ready = %s 
+            WHERE dataset_id = %s AND name = %s
+        """, (is_selected, dataset_id, feature_name))
+        
+        if cur.rowcount == 0:
+            cur.close()
+            conn.close()
             return jsonify({"error": f"Feature '{feature_name}' not found"}), 404
         
-        # Update model_ready (handle gracefully if column doesn't exist)
-        try:
-            update_feature(feature['id'], model_ready=is_selected)
-        except Exception as e:
-            if 'model_ready' in str(e).lower() or 'does not exist' in str(e).lower():
-                # Column doesn't exist, try to add it
-                try:
-                    ensure_model_ready_column()
-                    update_feature(feature['id'], model_ready=is_selected)
-                except Exception as e2:
-                    print(f"[update_feature_modeling] Could not update model_ready: {e2}")
-            else:
-                raise
-        
-        # Update is_monotonic in the latest binning step (prefer fine, fallback to coarse)
-        # Only set to True when selected, don't set to False when deselected (preserve existing state)
-        if is_selected:
-            fine_step = get_binning_step_by_type(feature['id'], 'fine')
-            if fine_step:
-                update_binning_step(fine_step['id'], is_monotonic=True)
-            else:
-                coarse_step = get_binning_step_by_type(feature['id'], 'coarse')
-                if coarse_step:
-                    update_binning_step(coarse_step['id'], is_monotonic=True)
+        conn.commit()
+        cur.close()
+        conn.close()
         
         return jsonify({"success": True})
     except Exception as e:
-        print(f"[update_feature_modeling] ERROR: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        # If column doesn't exist, fall back to slower path
+        if 'model_ready' in str(e).lower() or 'does not exist' in str(e).lower() or 'column' in str(e).lower():
+            try:
+                ensure_model_ready_column()
+                # Retry with the slower but safer path
+                feature = get_feature_by_name(dataset_id, feature_name)
+                if not feature:
+                    return jsonify({"error": f"Feature '{feature_name}' not found"}), 404
+                update_feature(feature['id'], model_ready=is_selected)
+                return jsonify({"success": True})
+            except Exception as e2:
+                print(f"[update_feature_modeling] Could not update model_ready: {e2}")
+                return jsonify({"error": "Failed to update model_ready"}), 500
+        else:
+            if conn:
+                conn.rollback()
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+            print(f"[update_feature_modeling] ERROR: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
 
 @app.route('/api/sync-model-ready-to-final-selected', methods=['POST'])
 def sync_model_ready_to_final_selected_endpoint():
@@ -5103,6 +5325,88 @@ def get_dataset_features(dataset_id):
         return jsonify(features)
     except Exception as e:
         print(f"[get_dataset_features] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/dataset/<int:dataset_id>/features-sorted', methods=['GET'])
+def get_dataset_features_sorted(dataset_id):
+    """
+    Get all features for a dataset with their fine binning metadata, sorted by:
+    1. Highest IV + Monotonic + More bins (top priority)
+    2. Lower IV but still Monotonic
+    3. Fewer bins but Monotonic + Better IV
+    4. Non-monotonic trends (lowest priority)
+    
+    Only includes features with IV >= 0.1.
+    """
+    try:
+        features = get_features_with_fine_binning_metadata(dataset_id)
+        # Filter features with IV >= 0.1
+        features = [f for f in features if float(f.get('iv_value', 0) or 0) >= 0.1]
+        
+        # Sort features according to the specified criteria
+        def sort_key(f):
+            is_monotonic = f.get('is_monotonic', False) or False
+            iv_value = float(f.get('iv_value', 0) or 0)
+            num_bins = int(f.get('num_bins', 0) or 0)
+            
+            # Priority 1: Monotonic features with high IV and more bins
+            if is_monotonic:
+                # Return a tuple: (is_monotonic=1, -iv_value for descending, -num_bins for descending)
+                # Negative values because we want higher IV and more bins first
+                return (0, -iv_value, -num_bins)  # 0 means monotonic (higher priority)
+            else:
+                # Non-monotonic features come last
+                return (1, -iv_value, -num_bins)  # 1 means non-monotonic (lower priority)
+        
+        sorted_features = sorted(features, key=sort_key)
+        
+        return jsonify({
+            "features": sorted_features,
+            "sorted_feature_names": [f['name'] for f in sorted_features]
+        })
+    except Exception as e:
+        print(f"[get_dataset_features_sorted] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/dataset/<int:dataset_id>/mark-monotonic-as-model-ready', methods=['POST'])
+def mark_monotonic_as_model_ready(dataset_id):
+    """
+    Mark all features with monotonic fine binning and IV >= 0.1 as model_ready.
+    """
+    try:
+        features = get_features_with_fine_binning_metadata(dataset_id)
+        # Filter: monotonic AND IV >= 0.1
+        monotonic_features = [
+            f for f in features 
+            if f.get('is_monotonic', False) and float(f.get('iv_value', 0) or 0) >= 0.1
+        ]
+        
+        if not monotonic_features:
+            return jsonify({
+                "success": True,
+                "message": "No monotonic features with IV >= 0.1 found",
+                "count": 0
+            })
+        
+        # Update model_ready for all monotonic features with IV >= 0.1
+        monotonic_feature_names = [f['name'] for f in monotonic_features]
+        success = update_features_model_ready(dataset_id, monotonic_feature_names)
+        
+        if success:
+            return jsonify({
+                "success": True,
+                "message": f"Marked {len(monotonic_feature_names)} monotonic features with IV >= 0.1 as model_ready",
+                "count": len(monotonic_feature_names),
+                "features": monotonic_feature_names
+            })
+        else:
+            return jsonify({"error": "Failed to update model_ready"}), 500
+    except Exception as e:
+        print(f"[mark_monotonic_as_model_ready] ERROR: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -5447,6 +5751,8 @@ def logistic_regression_analysis():
         selected_variables = data.get('selected_variables', [])
         target = data.get('target')
         woe_transformed_data = data.get('woe_transformed_data', {})
+        if not isinstance(woe_transformed_data, dict):
+            woe_transformed_data = {}
         dataset_id = (
             data.get('record_id')
             or data.get('dataset_id')
@@ -5636,6 +5942,9 @@ def logistic_regression_analysis():
             dup_cols = X.columns[dup_mask].tolist()
             sample = X.head(5).to_dict(orient='records')
             y_counts = y.value_counts().to_dict()
+            feature_totals = {col: float(val) if np.isfinite(val) else None for col, val in X.sum().to_dict().items()}
+            print(f"LOGISTIC DEBUG: Final feature list ({len(X.columns)} features): {list(X.columns)}")
+            print("LOGISTIC DEBUG: Feature column totals:", feature_totals)
             print("LOGISTIC DEBUG: X sample rows:", sample)
             print(f"LOGISTIC DEBUG: Final rank check - Rank: {rank}, Full: {full_rank}")
         except Exception as _diag:
@@ -6203,11 +6512,16 @@ def xgboost_analysis():
         modeling_data = {}
         woe_columns = []  # Track the actual column names we create
         
+        feature_cache: Dict[str, Dict[str, Any]] = {}
         for var in selected_variables:
             if var not in df.columns:
                 print(f"XGB DEBUG: Variable '{var}' not found in dataset columns")
                 continue
             woe_data = woe_transformed_data.get(var)
+            if not woe_data:
+                woe_data = _load_woe_stats_from_db(dataset_id, var, feature_cache=feature_cache)
+                if woe_data:
+                    woe_transformed_data[var] = woe_data
             bins_list = None
             if isinstance(woe_data, list):
                 bins_list = [{
@@ -6286,7 +6600,9 @@ def xgboost_analysis():
         if len(woe_columns) == 0:
             return jsonify({"error": "No valid WOE-transformed features created"}), 400
 
-        print(f"XGB DEBUG: Final features: {woe_columns}")
+        feature_totals = {col: float(val) if np.isfinite(val) else None for col, val in X.sum().to_dict().items()}
+        print(f"XGB DEBUG: Final features ({len(woe_columns)}): {woe_columns}")
+        print("XGB DEBUG: Feature column totals:", feature_totals)
         print(f"XGB DEBUG: X shape: {X.shape}, y shape: {y.shape}")
 
         # Train XGBoost
@@ -7507,105 +7823,131 @@ def apply_scorecard():
 
             print(f"DEBUG: Assigned WOE values for {var}: {assigned_count} rows")
             
-            if woe_mapping:
-                woe_column = [woe_mapping.get(i, 0) for i in range(len(df))]
-                modeling_data[var] = woe_column
-            else:
-                modeling_data[var] = [0] * len(df)
+            woe_column = [woe_mapping.get(i, 0) for i in range(len(df))]
+            modeling_data[var] = woe_column
+            modeling_data[f'{var}_WOE'] = woe_column
 
         # Create DataFrame with WOE-transformed variables
         model_df = pd.DataFrame(modeling_data)
         model_df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
+        model_df['__row_id__'] = np.arange(len(model_df))
 
         # Remove rows with missing target
         mask = ~model_df[target].isna()
-        X = model_df[selected_variables]
-        y = model_df[target][mask]
-        X = X[mask]
-
-        if len(X) == 0:
+        filtered_df = model_df[mask].reset_index(drop=True)
+        if filtered_df.empty:
             return jsonify({"error": "No valid data after preprocessing"}), 400
+        
+        row_ids = filtered_df['__row_id__'].astype(int).tolist()
+        filtered_df = filtered_df.drop(columns=['__row_id__'])
+        y = filtered_df[target]
+        X_logistic = filtered_df[selected_variables]
+        tree_feature_names = [f'{var}_WOE' for var in selected_variables if f'{var}_WOE' in filtered_df.columns]
+        X_tree = filtered_df[tree_feature_names] if tree_feature_names else pd.DataFrame()
 
         # Calculate scores based on model type
         scores = []
         
-        if model_type == 'logistic' and model_results:
-            # Use logistic regression coefficients
+        if model_type == 'logistic':
+            if not model_results or 'coefficients' not in model_results:
+                return jsonify({"error": "Logistic scorecard application requires model coefficients"}), 400
+            
             coefficients = {}
-            intercept = 0
+            intercept = 0.0
+            for coef_info in model_results.get('coefficients', []):
+                var_name = coef_info.get('variable')
+                if var_name and var_name != 'Intercept':
+                    coefficients[var_name] = coef_info.get('coefficient', 0.0)
+                elif var_name == 'Intercept':
+                    intercept = coef_info.get('coefficient', 0.0)
             
-            if 'coefficients' in model_results:
-                for coef_info in model_results['coefficients']:
-                    var_name = coef_info.get('variable')
-                    if var_name and var_name != 'Intercept':
-                        coefficients[var_name] = coef_info.get('coefficient', 0)
-                    elif var_name == 'Intercept':
-                        intercept = coef_info.get('coefficient', 0)
+            logit = np.full(len(filtered_df), intercept, dtype=float)
+            for var in selected_variables:
+                beta = coefficients.get(var, 0.0)
+                if beta == 0.0 or var not in X_logistic.columns:
+                    continue
+                logit += beta * X_logistic[var].values
             
-            # Score card parameters for logistic regression
-            N = len(selected_variables)
-            factor = 20 / np.log(2)  # ≈ 28.8539
-            base_odds = 50
-            base_score = 600
-            offset = base_score - factor * np.log(base_odds)  # ≈ 427.432
-
-            # FIXED: Use NEGATIVE coefficients so higher risk = lower score
-            for idx in range(len(X)):
-                score = 0
-                for var in selected_variables:
-                    beta = coefficients.get(var, 0)
-                    woe = X.iloc[idx][var] if var in X.columns else 0
-                    # FIX: Use NEGATIVE beta to ensure higher risk = lower score
-                    score += (-beta * woe + intercept / N) * factor + offset / N
-                scores.append(round(float(score), 2))
+            prob_bad = 1.0 / (1.0 + np.exp(-logit))
+            scores = _probability_to_score(prob_bad, DEFAULT_SCORECARD_CONFIG).astype(float).tolist()
                 
-        elif model_type in ['random_forest', 'xgboost'] and model_results:
-            # For tree-based models, use the actual model predictions
+        elif model_type in ['random_forest', 'xgboost']:
+            if X_tree.empty:
+                return jsonify({"error": "No WOE-transformed features available for tree-based scoring"}), 400
+            # For tree-based models, reuse the trained model when possible
             try:
-                if model_type == 'random_forest':
-                    from sklearn.ensemble import RandomForestClassifier
-                    # Recreate the Random Forest model with the same parameters
-                    rf_model = RandomForestClassifier(
-                        n_estimators=model_results.get('model_stats', {}).get('n_estimators', 100),
-                        max_depth=model_results.get('model_stats', {}).get('max_depth', 10),
-                        random_state=42,
-                        n_jobs=-1
-                    )
-                    rf_model.fit(X, y)
-                    # Get probability of being BAD (class 1)
-                    y_pred_proba_bad = rf_model.predict_proba(X)[:, 1]
-                    
-                elif model_type == 'xgboost':
+                y_pred_proba_bad = None
+                artifact_used = False
+                
+                if (
+                    model_type == 'xgboost'
+                    and artifact_payload
+                    and artifact_model_type == 'xgboost'
+                    and artifact_payload.get('model_bytes')
+                ):
                     import xgboost as xgb
-                    # Recreate the XGBoost model with the same parameters
-                    xgb_model = xgb.XGBClassifier(
-                        n_estimators=model_results.get('model_stats', {}).get('n_estimators', 100),
-                        max_depth=model_results.get('model_stats', {}).get('max_depth', 6),
-                        learning_rate=model_results.get('model_stats', {}).get('learning_rate', 0.1),
-                        random_state=42
-                    )
-                    xgb_model.fit(X, y)
-                    # Get probability of being BAD (class 1)
-                    y_pred_proba_bad = xgb_model.predict_proba(X)[:, 1]
+                    artifact_feature_cols = artifact_payload.get('feature_columns') or tree_feature_names
+                    missing_cols = [col for col in (artifact_feature_cols or []) if col not in filtered_df.columns]
+                    if missing_cols:
+                        print(f"[apply_scorecard] Warning: Missing artifact feature columns: {missing_cols}")
+                    elif artifact_feature_cols:
+                        try:
+                            booster = xgb.Booster()
+                            booster.load_model(bytearray(artifact_payload['model_bytes']))
+                            dmatrix = xgb.DMatrix(
+                                filtered_df[artifact_feature_cols].values,
+                                feature_names=artifact_feature_cols
+                            )
+                            y_pred_proba_bad = booster.predict(dmatrix)
+                            artifact_used = True
+                            print("[apply_scorecard] Used persisted XGBoost booster for scorecard testing.")
+                        except Exception as load_err:
+                            print(f"[apply_scorecard] Warning: Failed to load XGBoost artifact: {load_err}")
+                            y_pred_proba_bad = None
                 
-                # FIXED: Convert BAD probabilities to scores where higher risk = lower score
-                min_score = 300
-                max_score = 850
+                if y_pred_proba_bad is None:
+                    if model_type == 'random_forest':
+                        from sklearn.ensemble import RandomForestClassifier
+                        stats = (model_results or {}).get('model_stats', {}) if model_results else {}
+                        rf_model = RandomForestClassifier(
+                            n_estimators=stats.get('n_estimators', 100),
+                            max_depth=stats.get('max_depth', 10),
+                            min_samples_split=5,
+                            min_samples_leaf=2,
+                            random_state=42,
+                            n_jobs=-1
+                        )
+                        rf_model.fit(X_tree, y)
+                        y_pred_proba_bad = rf_model.predict_proba(X_tree)[:, 1]
+                    else:  # xgboost fallback (no artifact available)
+                        import xgboost as xgb
+                        artifact_params = artifact_payload.get('xgb_params', {}) if artifact_payload else {}
+                        stats = (model_results or {}).get('model_stats', {}) if model_results else {}
+                        xgb_model = xgb.XGBClassifier(
+                            n_estimators=stats.get('n_estimators', 100),
+                            max_depth=artifact_params.get('max_depth', stats.get('max_depth', 6)),
+                            learning_rate=artifact_params.get('learning_rate', stats.get('learning_rate', 0.1)),
+                            subsample=artifact_params.get('subsample', 1.0),
+                            colsample_bytree=artifact_params.get('colsample_bytree', 1.0),
+                            scale_pos_weight=artifact_params.get('scale_pos_weight', 1.0),
+                            objective=artifact_params.get('objective', 'binary:logistic'),
+                            eval_metric='logloss',
+                            random_state=42,
+                            use_label_encoder=False
+                        )
+                        xgb_model.fit(X_tree, y)
+                        y_pred_proba_bad = xgb_model.predict_proba(X_tree)[:, 1]
                 
-                # FIX: Higher bad probability = Lower score
-                # Use inverse relationship: score = max_score - (bad_probability * score_range)
-                score_range = max_score - min_score
-                scores = max_score - (y_pred_proba_bad * score_range)
-                
-                scores = [round(float(score), 2) for score in scores]
+                scores_array = _probability_to_score(y_pred_proba_bad, DEFAULT_SCORECARD_CONFIG)
+                scores = scores_array.astype(float).tolist()
                 
                 print(f"DEBUG: Tree model scoring - Bad probabilities range: {np.min(y_pred_proba_bad):.4f} to {np.max(y_pred_proba_bad):.4f}")
-                print(f"DEBUG: Tree model scoring - Scores range: {np.min(scores):.2f} to {np.max(scores):.2f}")
+                print(f"DEBUG: Tree model scoring - Scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
                 
             except Exception as model_err:
                 print(f"DEBUG: Tree model scoring failed: {model_err}")
                 # Fallback: use feature importance-based scoring with proper direction
-                if 'feature_importance' in model_results:
+                if model_results and 'feature_importance' in model_results:
                     coefficients = {}
                     for feature_info in model_results['feature_importance']:
                         var_name = feature_info.get('variable')
@@ -7613,27 +7955,32 @@ def apply_scorecard():
                         coefficients[var_name] = importance * 100  # Scale factor
                     
                     # FIXED: Simple additive scoring with proper direction
-                    for idx in range(len(X)):
+                    raw_scores = []
+                    for idx in range(len(X_logistic)):
                         score = 600  # Base score
                         for var in selected_variables:
                             beta = coefficients.get(var, 0)
-                            woe = X.iloc[idx][var] if var in X.columns else 0
+                            woe = X_logistic.iloc[idx][var] if var in X_logistic.columns else 0
                             # FIX: Use negative relationship for risk factors
                             score -= beta * woe
-                        scores.append(round(float(score), 2))
+                        raw_scores.append(score)
+                    scores_array = np.clip(np.asarray(raw_scores, dtype=float), DEFAULT_SCORECARD_CONFIG['min_score'], DEFAULT_SCORECARD_CONFIG['max_score'])
+                    scores = scores_array.astype(float).tolist()
                 else:
                     return jsonify({"error": f"Failed to calculate scores for {model_type}: {str(model_err)}"}), 500
         else:
             return jsonify({"error": f"Unsupported model type or missing model results: {model_type}"}), 400
 
         # Prepare results
+        scores_np = np.asarray(scores, dtype=float)
         results_list = []
         y_true = y.tolist()
-        y_score = scores
+        y_score = scores_np.tolist()
         
-        for idx, score in enumerate(scores):
+        for idx, score in enumerate(scores_np):
+            row_id = row_ids[idx] if idx < len(row_ids) else idx
             results_list.append({
-                "index": int(X.index[idx]) if hasattr(X, 'index') else idx,
+                "index": int(row_id),
                 "score": score,
                 "target": int(y_true[idx])
             })
@@ -7644,7 +7991,7 @@ def apply_scorecard():
         # Calculate KS statistic (separation number)
         try:
             from sklearn.metrics import roc_curve
-            fpr, tpr, thresholds = roc_curve(y_true, y_score)
+            fpr, tpr, thresholds = roc_curve(y_true, scores_np)
             diffs = np.abs(tpr - fpr)
             ks_stat = float(np.max(diffs)) if len(diffs) > 0 else 0.0
             
@@ -7674,8 +8021,8 @@ def apply_scorecard():
             
             # For credit scoring, we typically use a different threshold than 0.5
             # Since scores are now properly scaled, we can use a score threshold
-            score_threshold = np.percentile(scores, 50)  # Median score as threshold
-            y_pred = [1 if score < score_threshold else 0 for score in scores]  # Lower score = higher risk = predicted bad
+            score_threshold = np.percentile(scores_np, 50)  # Median score as threshold
+            y_pred = [1 if score < score_threshold else 0 for score in scores_np]  # Lower score = higher risk = predicted bad
             
             accuracy = accuracy_score(y_true, y_pred)
             precision = precision_score(y_true, y_pred, zero_division=0)
@@ -7707,9 +8054,9 @@ def apply_scorecard():
             "variables_used": selected_variables,
             "n_records": len(results_list),
             "score_range": {
-                "min": float(np.min(scores)) if len(scores) > 0 else 0,
-                "max": float(np.max(scores)) if len(scores) > 0 else 0,
-                "mean": float(np.mean(scores)) if len(scores) > 0 else 0
+                "min": float(np.min(scores_np)) if len(scores_np) > 0 else 0,
+                "max": float(np.max(scores_np)) if len(scores_np) > 0 else 0,
+                "mean": float(np.mean(scores_np)) if len(scores_np) > 0 else 0
             }
         })
         
