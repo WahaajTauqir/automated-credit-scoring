@@ -33,7 +33,11 @@ def get_required_columns():
         'records': [
             'id', 'name', 'file_path', 'total_features', 'discrete_features',
             'continuous_features', 'target_variable', 'created_at', 'updated_at',
-            'identifier', 'preprocess_selection'
+            'identifier',
+            # Train/test split metadata
+            'train_test_split_seed', 'train_test_split_size', 'train_test_split_method',
+            'train_size', 'test_size', 'train_bad_count', 'test_bad_count',
+            'preprocess_selection'
         ],
         'features': [
             'id', 'dataset_id', 'name', 'type', 'selected', 'model_ready',
@@ -225,6 +229,14 @@ def apply_migrations():
             'records.discrete_features': 'INT',
             'records.continuous_features': 'INT',
             'records.target_variable': 'TEXT',
+            # Train/test split metadata
+            'records.train_test_split_seed': 'INT',
+            'records.train_test_split_size': 'REAL',
+            'records.train_test_split_method': 'TEXT',
+            'records.train_size': 'INT',
+            'records.test_size': 'INT',
+            'records.train_bad_count': 'INT',
+            'records.test_bad_count': 'INT',
             'records.created_at': 'TIMESTAMP DEFAULT NOW()',
             'records.updated_at': 'TIMESTAMP DEFAULT NOW()',
             'records.identifier': 'TEXT',

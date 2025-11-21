@@ -17,6 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 import statsmodels.api as sm
 from scipy import stats
+from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
 import re
@@ -79,6 +80,12 @@ try:
     ensure_final_selected_column()
     ensure_model_ready_column()
     ensure_dataset_identifier_column()
+    # Ensure train/test split columns exist in records table
+    try:
+        from db import ensure_train_test_columns
+        ensure_train_test_columns()
+    except Exception as _e:
+        print(f"[APP] Warning: could not ensure train/test columns: {_e}")
 except Exception as e:
     print(f"[APP] Warning: Could not ensure required columns: {e}")
 
@@ -1036,7 +1043,7 @@ def encode_categorical_variables(df, discrete_cols, target_col=None):
     
     return df_encoded, encoding_info, label_encoders
 
-def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_threshold=0.5, treat_negative_one_as_missing=True):
+def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_threshold=0.5, treat_negative_one_as_missing=True, context: str = None):
     """
     Main preprocessing function that applies all preprocessing steps.
     
@@ -1142,15 +1149,24 @@ def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_th
         'discrete': discrete_cols,
         'continuous': continuous_cols
     }
-    
+
+    # Debug: log number of rows and columns after preprocessing
+    try:
+        rows, cols = df_processed.shape
+        tag = f"[{context}]" if context else ''
+        print(f"[preprocess_dataset][DEBUG]{tag} Preprocessing complete: rows={rows}, cols={cols}, steps={preprocessing_report.get('steps_applied')}", flush=True)
+    except Exception:
+        tag = f"[{context}]" if context else ''
+        print(f"[preprocess_dataset][DEBUG]{tag} Preprocessing complete: final_shape={preprocessing_report.get('final_shape')}", flush=True)
+
     return df_processed, preprocessing_report
 
 # =============================================================================
 # PREPROCESSING API ENDPOINTS
 # =============================================================================
 
-@app.route('/api/preprocessing-steps-detailed', methods=['POST'])
-def preprocessing_steps_detailed():
+# @app.route('/api/preprocessing-steps-detailed', methods=['POST'])
+# def preprocessing_steps_detailed():
     """
     Returns detailed information about each preprocessing step for visualization.
     Shows before/after states and highlights changes.
@@ -1463,10 +1479,11 @@ def preprocessing_column_changes():
         
         # Apply preprocessing with new parameters
         df_processed, preprocessing_report = preprocess_dataset(
-            df_original, 
+            df_original,
             preprocessing_steps=preprocessing_steps,
             missing_threshold=missing_threshold,
-            treat_negative_one_as_missing=treat_negative_one_as_missing
+            treat_negative_one_as_missing=treat_negative_one_as_missing,
+            context='preprocessing_column_changes'
         )
         
         # Get outlier information from preprocessing report
@@ -1672,7 +1689,7 @@ def preprocessing_step_preview():
             current_steps[step] = (i <= target_step_index)
         
         df_processed, preprocessing_report = preprocess_dataset(
-            df, preprocessing_steps=current_steps
+            df, preprocessing_steps=current_steps, context='preprocessing_step_preview'
         )
         
         # Get step-specific details
@@ -1926,7 +1943,8 @@ def preprocess_dataset_api():
             target_col=target_column,
             preprocessing_steps=preprocessing_steps,
             missing_threshold=missing_threshold,
-            treat_negative_one_as_missing=treat_negative_one_as_missing
+            treat_negative_one_as_missing=treat_negative_one_as_missing,
+            context='preprocess_dataset_api'
         )
         
         # Generate new dataset ID and save processed data
@@ -2871,16 +2889,23 @@ def fine_bin_api():
             return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 500
         df[target] = df[target].fillna(0).astype(int)
 
+        # Prefer using the train split when available (deterministic split using stored metadata)
+        try:
+            df_for_binning = get_train_df_if_available(dataset_id, df, target, context='fine_bin_api')
+        except Exception as e:
+            print(f"[fine_bin_api] WARNING: get_train_df_if_available failed, falling back to full df: {e}")
+            df_for_binning = df
+
         try:
             if var_type == 'continuous':
-                _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
-                existing_bins = set(df[f'{var}_binned'].unique())
+                _, df_for_binning[f'{var}_binned'] = coarse_bin_continuous(df_for_binning, var, target)
+                existing_bins = set(df_for_binning[f'{var}_binned'].unique())
                 bin_merges = {k: [b for b in v if b in existing_bins] for k, v in bin_merges.items()}
                 bin_merges = {k: v for k, v in bin_merges.items() if v}
-                tab, _, adjusted_merges, _ = fine_bin_continuous(df, var, target, bin_merges)
+                tab, _, adjusted_merges, _ = fine_bin_continuous(df_for_binning, var, target, bin_merges)
             else:
-                _, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
-                tab, _, adjusted_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
+                _, df_for_binning[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df_for_binning, var, target)
+                tab, _, adjusted_merges = fine_bin_discrete(df_for_binning, var, target, bin_merges, bin_mapping)
         except Exception as bin_err:
             import traceback
             print(f"ERROR in fine binning for {var}: {traceback.format_exc()}")
@@ -2893,7 +2918,7 @@ def fine_bin_api():
         try:
             # Use the fine binning results to calculate WOE/IV
             iv, woe_stats = calculate_woe_iv(
-                df=df,
+                df=df_for_binning,
                 variable=var,
                 target=target,
                 bin_merges=adjusted_merges if adjusted_merges else None,
@@ -2925,9 +2950,9 @@ def fine_bin_api():
                 print(f"[fine_bin_api] DEBUG: No coarse step, creating one")
                 # recompute coarse stats and persist
                 if var_type == 'continuous':
-                    coarse_stats, _ = coarse_bin_continuous(df, var, target)
+                    coarse_stats, _ = coarse_bin_continuous(df_for_binning, var, target)
                 else:
-                    coarse_stats, _, _ = coarse_bin_discrete(df, var, target)
+                    coarse_stats, _, _ = coarse_bin_discrete(df_for_binning, var, target)
                 coarse_step_id = save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
                 print(f"[fine_bin_api] DEBUG: Created coarse_step_id={coarse_step_id}")
             else:
@@ -3063,6 +3088,69 @@ def fine_bin_api():
         print("ERROR:", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
+
+# Helper: return a train DataFrame if split metadata exists for dataset_id
+def get_train_df_if_available(dataset_id, df, target, context=None):
+    try:
+        ds = get_dataset(int(dataset_id)) if dataset_id is not None else None
+    except Exception:
+        ds = None
+
+    if not ds:
+        return df
+
+    method = (ds.get('train_test_split_method') or '').lower() if ds.get('train_test_split_method') else None
+    size = ds.get('train_test_split_size') if ds.get('train_test_split_size') is not None else ds.get('train_size')
+    seed = ds.get('train_test_split_seed') if ds.get('train_test_split_seed') is not None else 42
+
+    try:
+        # Normalize size to fraction if it was saved as integer count
+        if isinstance(size, (int, float)):
+            if isinstance(size, int) and size > 1:
+                # If stored as absolute train_size, convert to fraction
+                size = float(size) / float(len(df)) if len(df) > 0 else 0.8
+            else:
+                size = float(size)
+        else:
+            size = 0.8
+
+        # Only attempt stratified split if target column exists
+        if target in df.columns and method and 'strat' in method:
+            from sklearn.model_selection import train_test_split
+            try:
+                train_df, test_df = train_test_split(df, train_size=size, stratify=df[target], random_state=int(seed))
+                print(f"[get_train_df_if_available][{context}] Using stratified train split: train={train_df.shape}, test={test_df.shape}, seed={seed}, size={size}", flush=True)
+                # Preprocess the train split to avoid leakage (apply same preprocessing used elsewhere)
+                try:
+                    processed_train, prep_report = preprocess_dataset(train_df, target_col=target, context=(context or '') + '_train_preprocess')
+                    print(f"[get_train_df_if_available][{context}] Preprocessed train split: {processed_train.shape}", flush=True)
+                    return processed_train
+                except Exception as e:
+                    print(f"[get_train_df_if_available][{context}] Warning: preprocessing train split failed: {e}. Returning raw train split.", flush=True)
+                    return train_df
+            except Exception as e:
+                print(f"[get_train_df_if_available][{context}] Stratified split failed: {e}. Falling back to random split.", flush=True)
+
+        # Fallback: random split if we have a size value
+        if size and size > 0 and size < 1:
+            from sklearn.model_selection import train_test_split
+            train_df, test_df = train_test_split(df, train_size=size, random_state=int(seed))
+            print(f"[get_train_df_if_available][{context}] Using random train split: train={train_df.shape}, test={test_df.shape}, seed={seed}, size={size}", flush=True)
+            try:
+                processed_train, prep_report = preprocess_dataset(train_df, target_col=target, context=(context or '') + '_train_preprocess')
+                print(f"[get_train_df_if_available][{context}] Preprocessed train split: {processed_train.shape}", flush=True)
+                return processed_train
+            except Exception as e:
+                print(f"[get_train_df_if_available][{context}] Warning: preprocessing train split failed: {e}. Returning raw train split.", flush=True)
+                return train_df
+
+    except Exception as e:
+        print(f"[get_train_df_if_available][{context}] Error computing train split: {e}", flush=True)
+
+    # Default: return full df
+    print(f"[get_train_df_if_available][{context}] No valid split metadata, using full dataset for binning: shape={df.shape}", flush=True)
+    return df
+
 # ----------- Automated Monotonic Binning API -----------
 @app.route('/api/auto-monotonic-binning', methods=['POST'])
 def auto_monotonic_binning_api():
@@ -3120,12 +3208,19 @@ def auto_monotonic_binning_api():
         except Exception as e:
             return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
         df[target] = df[target].fillna(0).astype(int)
+
+        # Prefer the train split for auto binning when available
+        try:
+            df_for_binning = get_train_df_if_available(dataset_id, df, target, context='auto_monotonic_binning')
+        except Exception as e:
+            print(f"[auto_monotonic_binning] WARNING: get_train_df_if_available failed: {e}")
+            df_for_binning = df
         
         # First perform coarse binning to get initial bins
         if var_type == 'continuous':
-            coarse_stats, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
+            coarse_stats, df_for_binning[f'{var}_binned'] = coarse_bin_continuous(df_for_binning, var, target)
         else:
-            coarse_stats, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
+            coarse_stats, df_for_binning[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df_for_binning, var, target)
         
         # Extract good/bad counts and bin labels from coarse binning
         bin_labels = []
@@ -3183,14 +3278,14 @@ def auto_monotonic_binning_api():
         # Apply the merges using fine binning
         try:
             if var_type == 'continuous':
-                _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
-                existing_bins = set(df[f'{var}_binned'].unique())
+                _, df_for_binning[f'{var}_binned'] = coarse_bin_continuous(df_for_binning, var, target)
+                existing_bins = set(df_for_binning[f'{var}_binned'].unique())
                 bin_merges = {k: [b for b in v if b in existing_bins] for k, v in bin_merges.items()}
                 bin_merges = {k: v for k, v in bin_merges.items() if v}
-                tab, _, adjusted_merges, _ = fine_bin_continuous(df, var, target, bin_merges)
+                tab, _, adjusted_merges, _ = fine_bin_continuous(df_for_binning, var, target, bin_merges)
             else:
-                _, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
-                tab, _, adjusted_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
+                _, df_for_binning[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df_for_binning, var, target)
+                tab, _, adjusted_merges = fine_bin_discrete(df_for_binning, var, target, bin_merges, bin_mapping)
         except Exception as bin_err:
             import traceback
             print(f"ERROR in auto-binning fine binning for {var}: {traceback.format_exc()}")
@@ -3210,7 +3305,7 @@ def auto_monotonic_binning_api():
         # Recalculate WOE/IV using the result from auto binning
         try:
             iv, woe_stats = calculate_woe_iv(
-                df=df,
+                df=df_for_binning,
                 variable=var,
                 target=target,
                 bin_merges=adjusted_merges if adjusted_merges else None,
@@ -3257,9 +3352,9 @@ def auto_monotonic_binning_api():
             if not coarse_step:
                 print(f"[auto_monotonic_binning] DEBUG: No coarse step found, creating for {var}")
                 if var_type == 'continuous':
-                    coarse_stats, _ = coarse_bin_continuous(df, var, target)
+                    coarse_stats, _ = coarse_bin_continuous(df_for_binning, var, target)
                 else:
-                    coarse_stats, _, _ = coarse_bin_discrete(df, var, target)
+                    coarse_stats, _, _ = coarse_bin_discrete(df_for_binning, var, target)
                 coarse_step_id = save_coarse_binning_to_db(feature['id'], coarse_stats, var_type)
                 print(f"[auto_monotonic_binning] DEBUG: Created coarse step_id={coarse_step_id}")
             else:
@@ -3456,6 +3551,13 @@ def cross_tab_api():
             df[target] = df[target].fillna(0).astype(int)
         except Exception as conv_err:
             return jsonify({"error": f"Failed to convert target '{target}' to numeric: {str(conv_err)}"}), 400
+
+        # Use train split for cross-tab when available
+        try:
+            df_for_binning = get_train_df_if_available(record_id, df, target, context='cross_tab_api')
+        except Exception as e:
+            print(f"[cross_tab_api] WARNING: get_train_df_if_available failed: {e}")
+            df_for_binning = df
         results = {}
         for var in variables:
             if var not in df.columns or var == target:
@@ -3472,11 +3574,11 @@ def cross_tab_api():
                     var_type = 'discrete'
             # Coarse + Fine binning
             if var_type == 'continuous':
-                _, df[f'{var}_binned'] = coarse_bin_continuous(df, var, target)
-                cross_tab, _, final_merges = fine_bin_continuous(df, var, target, bin_merges)
+                _, df_for_binning[f'{var}_binned'] = coarse_bin_continuous(df_for_binning, var, target)
+                cross_tab, _, final_merges = fine_bin_continuous(df_for_binning, var, target, bin_merges)
             else:
-                _, df[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df, var, target)
-                cross_tab, _, final_merges = fine_bin_discrete(df, var, target, bin_merges, bin_mapping)
+                _, df_for_binning[f'{var}_binned'], bin_mapping = coarse_bin_discrete(df_for_binning, var, target)
+                cross_tab, _, final_merges = fine_bin_discrete(df_for_binning, var, target, bin_merges, bin_mapping)
             results[var] = {
                 'stats': cross_tab.to_dict(orient='records'),
                 'bin_merges': final_merges
@@ -3525,6 +3627,13 @@ def univariate_analysis():
             df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
         except Exception as e:
             return jsonify({"error": f"Failed to convert target to numeric: {str(e)}"}), 400
+
+        # Prefer train split for univariate analysis
+        try:
+            df_for_binning = get_train_df_if_available(record_id, df, target, context='univariate_analysis')
+        except Exception as e:
+            print(f"[univariate_analysis] WARNING: get_train_df_if_available failed: {e}")
+            df_for_binning = df
         
         results = {}
         
@@ -3626,7 +3735,7 @@ def univariate_analysis():
                     # If not in database, calculate fresh
                     if stats_dict is None:
                         print(f"[univariate_analysis] DEBUG: Calculating fresh binning for discrete {col}")
-                        stats, _, _ = coarse_bin_discrete(df, col, target)
+                        stats, _, _ = coarse_bin_discrete(df_for_binning, col, target)
                         print(f"[univariate_analysis] ⚙️  Calculated discrete: {col}")
                         
                         # Persist to DB if record_id provided
@@ -3764,7 +3873,7 @@ def univariate_analysis():
                     # If not in database, calculate fresh
                     if stats_dict is None:
                         print(f"[univariate_analysis] DEBUG: Calculating fresh binning for continuous {col}")
-                        stats, _ = coarse_bin_continuous(df, col, target)
+                        stats, _ = coarse_bin_continuous(df_for_binning, col, target)
                         print(f"[univariate_analysis] ⚙️  Calculated continuous: {col}")
                         
                         # Persist to DB if record_id provided
@@ -3853,12 +3962,18 @@ def reset_bins_api():
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
         
         df[target] = df[target].fillna(0).astype(int)
+        # Prefer train split for reset-bins as well
+        try:
+            df_for_binning = get_train_df_if_available(record_id, df, target, context='reset_bins')
+        except Exception as e:
+            print(f"[reset_bins] WARNING: get_train_df_if_available failed: {e}")
+            df_for_binning = df
         
         # Perform coarse binning
         if var_type == 'continuous':
-            coarse_stats, _ = coarse_bin_continuous(df, var, target)
+            coarse_stats, _ = coarse_bin_continuous(df_for_binning, var, target)
         else:
-            coarse_stats, _, _ = coarse_bin_discrete(df, var, target)
+            coarse_stats, _, _ = coarse_bin_discrete(df_for_binning, var, target)
         
         # Get feature from new schema
         dataset_id = record_id
@@ -4647,6 +4762,15 @@ def woe_iv_api():
         if target_distribution.get(1, 0) == 0:
             return jsonify({"error": "No bad cases (target=1) found in dataset"}), 400
 
+        # Prefer preprocessed train split to avoid leakage
+        try:
+            df_for_binning = get_train_df_if_available(record_id, df, target, context='woe_iv')
+            # Replace df with the preprocessed train DF so all downstream operations use preprocessed train data
+            if df_for_binning is not None:
+                df = df_for_binning
+        except Exception as e:
+            print(f"[woe_iv_api] WARNING: get_train_df_if_available failed: {e}")
+
         results = {}
 
         # Create coarse bins for variables that are new
@@ -5213,6 +5337,103 @@ def upsert_single_record():
             continuous_features=continuous_count
         )
         
+        # --- Perform stratified train/test split immediately after target selection ---
+        try:
+            # Load the dataset CSV
+            csv_path = None
+            try:
+                csv_path = get_csv_path(dataset_id)
+                df_full = pd.read_csv(csv_path)
+            except Exception as e_csv:
+                print(f"[upsert_single_record] Warning: could not load CSV for splitting: {e_csv}")
+                df_full = None
+
+            train_df = None
+            test_df = None
+
+            if df_full is not None and target_variable and target_variable in df_full.columns:
+                # Determine seed (use provided seed or default 42)
+                try:
+                    seed_val = int(data.get('train_test_split_seed')) if data.get('train_test_split_seed') is not None else int(os.getenv('TRAIN_TEST_SPLIT_SEED', '42'))
+                except Exception:
+                    seed_val = 42
+
+                # Enforce 80/20 split
+                test_frac = 0.2
+
+                # Prepare stratify vector; if target has only one class, skip stratify
+                try:
+                    y = df_full[target_variable]
+                    stratify_vec = y if len(y.unique()) > 1 else None
+                except Exception:
+                    stratify_vec = None
+
+                try:
+                    print(f"[upsert_single_record] Dataset full shape before split: {getattr(df_full, 'shape', None)}", flush=True)
+                    print(f"[upsert_single_record] Performing stratified train/test split (method=stratified, seed={seed_val}, test_size={test_frac})", flush=True)
+                    if stratify_vec is not None:
+                        train_df, test_df = train_test_split(df_full, test_size=test_frac, stratify=stratify_vec, random_state=seed_val)
+                    else:
+                        # fallback to random split when stratify not possible
+                        train_df, test_df = train_test_split(df_full, test_size=test_frac, random_state=seed_val)
+
+                    print(f"[upsert_single_record] Train/test split completed: train={len(train_df)}, test={len(test_df)}", flush=True)
+
+                    # Debug log before linking train to preprocessing
+                    print(f"[upsert_single_record][DEBUG] Linking train data (dataset_id={dataset_id}) to preprocessing; train_shape={getattr(train_df, 'shape', None)}", flush=True)
+
+                    # Feed train into preprocessing pipeline (in-memory)
+                    try:
+                        # Pass context so preprocess logs identify this as the train-split run
+                        processed_train_df, preprocessing_report = preprocess_dataset(train_df, target_col=target_variable, context='train_split')
+                        # Optionally, you could save processed_train_df to a file or database artifact here
+                        print(f"[upsert_single_record][DEBUG] Train data preprocessing complete (rows={len(processed_train_df)})", flush=True)
+                    except Exception as e_prep:
+                        print(f"[upsert_single_record][DEBUG] Preprocessing of train data failed: {e_prep}", flush=True)
+
+                    # Compute bad counts: try numeric 0/1 detection, otherwise pick second unique value as 'bad'
+                    def _compute_bad_count(series):
+                        try:
+                            if pd.api.types.is_numeric_dtype(series):
+                                return int((series == 1).sum())
+                            uniques = series.dropna().unique().tolist()
+                            if len(uniques) == 2:
+                                bad_label = uniques[1]
+                                return int((series == bad_label).sum())
+                            # fallback: count values matching 'bad' (case-insensitive)
+                            return int(series.astype(str).str.lower().eq('bad').sum())
+                        except Exception:
+                            return 0
+
+                    train_bad = _compute_bad_count(train_df[target_variable]) if train_df is not None else None
+                    test_bad = _compute_bad_count(test_df[target_variable]) if test_df is not None else None
+
+                    # Persist split metadata to dataset record
+                    try:
+                        update_dataset(
+                            dataset_id=dataset_id,
+                            train_test_split_seed=seed_val,
+                            train_test_split_size=1.0 - test_frac,
+                            train_test_split_method='stratified',
+                            train_size=int(len(train_df)),
+                            test_size=int(len(test_df)),
+                            train_bad_count=int(train_bad) if train_bad is not None else None,
+                            test_bad_count=int(test_bad) if test_bad is not None else None
+                        )
+                        print(f"[upsert_single_record] Persisted train/test split metadata for dataset {dataset_id}")
+                    except Exception as e_upd:
+                        print(f"[upsert_single_record] Warning: failed to persist split metadata: {e_upd}")
+
+                except Exception as e_split:
+                    print(f"[upsert_single_record] Warning: train/test split failed: {e_split}")
+            else:
+                if df_full is None:
+                    print(f"[upsert_single_record] No dataframe available to perform train/test split for dataset {dataset_id}")
+                else:
+                    print(f"[upsert_single_record] Target variable '{target_variable}' not present in dataset; skipping train/test split")
+        except Exception as e_all:
+            print(f"[upsert_single_record] Unexpected error during train/test split: {e_all}")
+
         return jsonify({"success": True, "id": dataset_id})
     except Exception as e:
         print(f"[upsert_single_record] ERROR: {str(e)}")

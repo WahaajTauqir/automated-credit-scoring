@@ -25,6 +25,14 @@ CREATE TABLE records (
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
     identifier TEXT,
+    -- Train/Test split metadata (created when target is selected)
+    train_test_split_seed INT,
+    train_test_split_size REAL,
+    train_test_split_method TEXT,
+    train_size INT,
+    test_size INT,
+    train_bad_count INT,
+    test_bad_count INT,
     preprocess_selection BOOLEAN DEFAULT FALSE
 );
 
