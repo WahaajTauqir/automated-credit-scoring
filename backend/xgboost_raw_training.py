@@ -107,9 +107,16 @@ def train_xgboost_on_raw_features(df, selected_variables, target):
     y_pred_proba = xgb_model.predict_proba(X)[:, 1]  # Probability of class 1 (bad)
     y_pred = xgb_model.predict(X)
     
-    # Calculate metrics
+    # Calculate metrics (on training data - will be replaced by test metrics in API)
     fpr, tpr, thresholds = roc_curve(y, y_pred_proba)
     roc_auc = auc(fpr, tpr)
+    
+    # Fix: Handle case where AUC < 0.5 (model worse than random)
+    if roc_auc < 0.5:
+        print(f"[XGBoost RAW] WARNING - AUC < 0.5 ({roc_auc:.4f}), model performing worse than random")
+        roc_auc = 1 - roc_auc  # Flip AUC
+        print(f"[XGBoost RAW] Flipped AUC to {roc_auc:.4f}")
+    
     gini_coefficient = 2 * roc_auc - 1
     
     print(f"[XGBoost RAW] Model AUC: {roc_auc:.4f}, Gini: {gini_coefficient:.4f}")

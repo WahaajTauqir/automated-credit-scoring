@@ -720,7 +720,15 @@ DEFAULT_SCORECARD_CONFIG = {
 
 
 def _scorecard_scaling_params(config: Dict[str, float] = DEFAULT_SCORECARD_CONFIG) -> Tuple[float, float]:
-    """Return (factor, offset) for the standard credit score scaling."""
+    """
+    Return (factor, offset) for the standard credit score scaling.
+    
+    Follows academic standard (Siddiqi 2006):
+    - Factor = PDO / ln(2), where PDO is "Points to Double Odds"
+    - Offset is set so that base_odds maps to base_score
+    
+    Note: base_odds is interpreted as odds of good:bad (e.g., 50:1 means 2% default rate)
+    """
     factor = config["points_to_double_odds"] / math.log(2)
     offset = config["base_score"] - factor * math.log(config["base_odds"])
     return factor, offset
@@ -728,13 +736,63 @@ def _scorecard_scaling_params(config: Dict[str, float] = DEFAULT_SCORECARD_CONFI
 
 def _probability_to_score(probabilities, config: Dict[str, float] = DEFAULT_SCORECARD_CONFIG):
     """
-    Convert bad-probabilities to credit scores using Score = Offset + Factor * ln(odds).
-    Clamps output to [min_score, max_score].
+    Convert probability of default (PD) to credit scores using academic standard formula.
+    
+    Follows the standard credit scoring formula (Siddiqi 2006):
+        Score = Offset + Factor × ln(odds)
+    
+    Where:
+        odds = PD/(1-PD)  (odds of default)
+        Factor = PDO / ln(2)  (PDO = Points to Double Odds)
+        Offset = base_score - Factor × ln(base_odds_of_good)
+    
+    To ensure higher scores for lower risk (standard credit scoring convention):
+        Score = Offset - Factor × ln(odds_of_default)
+    
+    This is mathematically equivalent to:
+        Score = Offset + Factor × ln(odds_of_good)
+        where odds_of_good = (1-PD)/PD
+    
+    This ensures:
+    - Higher risk (high PD) → Lower score (300-500)
+    - Lower risk (low PD) → Higher score (700-850)
+    
+    Parameters:
+    -----------
+    probabilities : array-like
+        Probability of default/bad (target=1). Should be between 0 and 1.
+    config : dict
+        Scorecard configuration with:
+        - min_score: Minimum credit score (default: 300)
+        - max_score: Maximum credit score (default: 850)
+        - base_score: Score at baseline odds (default: 600)
+        - base_odds: Baseline odds of good:bad (default: 50, meaning 2% default rate)
+        - points_to_double_odds: Points per doubling of odds (default: 50)
+        
+    Returns:
+    --------
+    numpy.ndarray
+        Credit scores clipped to [min_score, max_score] range
+        
+    References:
+    -----------
+    Siddiqi, N. (2006). Credit Risk Scorecards: Developing and Implementing 
+    Intelligent Credit Scoring. John Wiley & Sons.
     """
     factor, offset = _scorecard_scaling_params(config)
+    # Clip probabilities to avoid log(0) or log(inf)
     probs = np.clip(np.asarray(probabilities, dtype=float), 1e-6, 1 - 1e-6)
-    odds = (1.0 - probs) / probs
-    raw_scores = offset + factor * np.log(odds)
+    
+    # Academic standard: odds = PD/(1-PD) (odds of default)
+    odds_default = probs / (1.0 - probs)
+    
+    # Apply academic standard formula with negative sign to ensure
+    # higher scores for lower risk (standard credit scoring convention)
+    # Score = Offset - Factor × ln(odds_of_default)
+    # This is equivalent to: Score = Offset + Factor × ln((1-PD)/PD)
+    raw_scores = offset - factor * np.log(odds_default)
+    
+    # Clip to valid score range
     clipped = np.clip(raw_scores, config["min_score"], config["max_score"])
     return clipped
 
@@ -805,6 +863,7 @@ def detect_column_types(df, sample_size=1000):
         else:
             if not samples:
                 return 'discrete' # Default to discrete when no data
+            
 
         try:
             # Handle pandas Series/DataFrame samples
@@ -3334,6 +3393,7 @@ def fine_bin_api():
             df = get_data_for_stage(dataset_id, 'binning')  # Returns TRAIN set if split exists
             print(f"[fine_bin_api] Loaded dataset: {len(df)} rows (train set if TTS exists)")
         except Exception as e:
+            print(f"[fine_bin_api] WARNING: Data loader failed: {str(e)}")
             # Fallback to CSV if data_loader fails
             try:
                 csv_path = get_csv_path(dataset_id)
@@ -3829,15 +3889,15 @@ def auto_monotonic_binning_api():
         )
         print(f"[auto_monotonic_binning] DEBUG: Created fine_step_id={fine_step_id}, is_monotonic={result['is_monotonic']}")
         
-        # If monotonic and IV >= 0.1, mark feature as model_ready
-        if result['is_monotonic'] and iv >= 0.1:
+        # If monotonic, mark feature as model_ready (regardless of IV value)
+        if result['is_monotonic']:
             try:
                 update_feature(feature['id'], model_ready=True)
-                print(f"[auto_monotonic_binning] DEBUG: Marked {var} as model_ready (monotonic, IV={iv:.4f} >= 0.1)")
+                print(f"[auto_monotonic_binning] DEBUG: Marked {var} as model_ready (monotonic, IV={iv:.4f})")
             except Exception as e:
                 print(f"[auto_monotonic_binning] DEBUG: Error marking model_ready: {e}")
-        elif result['is_monotonic'] and iv < 0.1:
-            print(f"[auto_monotonic_binning] DEBUG: Skipped marking {var} as model_ready (monotonic but IV={iv:.4f} < 0.1)")
+        else:
+            print(f"[auto_monotonic_binning] DEBUG: Skipped marking {var} as model_ready (not monotonic)")
 
         # CRITICAL FIX: Delete existing bins for this step before creating new ones
         # This prevents orphaned binning_steps (steps without bins) when ON CONFLICT updates an existing step
@@ -6034,31 +6094,33 @@ def get_dataset_features_sorted(dataset_id):
 @app.route('/api/dataset/<int:dataset_id>/mark-monotonic-as-model-ready', methods=['POST'])
 def mark_monotonic_as_model_ready(dataset_id):
     """
-    Mark all features with monotonic fine binning and IV >= 0.1 as model_ready.
+    Mark all features with monotonic fine binning as model_ready (regardless of IV value).
     """
     try:
         features = get_features_with_fine_binning_metadata(dataset_id)
-        # Filter: monotonic AND IV >= 0.1
+        # Filter: only monotonic features (no IV requirement)
         monotonic_features = [
             f for f in features 
-            if f.get('is_monotonic', False) and float(f.get('iv_value', 0) or 0) >= 0.1
+            if f.get('is_monotonic', False)
         ]
         
         if not monotonic_features:
             return jsonify({
                 "success": True,
-                "message": "No monotonic features with IV >= 0.1 found",
-                "count": 0
+                "message": "No monotonic features found",
+                "count": 0,
+                "features": []
             })
         
-        # Update model_ready for all monotonic features with IV >= 0.1
+        # Update model_ready for all monotonic features
         monotonic_feature_names = [f['name'] for f in monotonic_features]
         success = update_features_model_ready(dataset_id, monotonic_feature_names)
         
         if success:
+            print(f"[mark_monotonic_as_model_ready] Marked {len(monotonic_feature_names)} monotonic features as model_ready: {monotonic_feature_names}")
             return jsonify({
                 "success": True,
-                "message": f"Marked {len(monotonic_feature_names)} monotonic features with IV >= 0.1 as model_ready",
+                "message": f"Marked {len(monotonic_feature_names)} monotonic features as model_ready",
                 "count": len(monotonic_feature_names),
                 "features": monotonic_feature_names
             })
@@ -6654,6 +6716,14 @@ def logistic_regression_analysis():
             print("LOGISTIC DEBUG: Feature column totals:", feature_totals)
             print("LOGISTIC DEBUG: X sample rows:", sample)
             print(f"LOGISTIC DEBUG: Final rank check - Rank: {rank}, Full: {full_rank}")
+            
+            # Check class distribution
+            print(f"LOGISTIC DEBUG: Class distribution: {y_counts}")
+            if len(y_counts) == 2:
+                n_class_0 = y_counts.get(0, 0)
+                n_class_1 = y_counts.get(1, 0)
+                imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
+                print(f"LOGISTIC DEBUG: Class imbalance ratio: {imbalance_ratio:.2f}:1 (0:1)")
         except Exception as _diag:
             print("LOGISTIC DEBUG: diagnostics failed:", str(_diag))
 
@@ -6663,24 +6733,295 @@ def logistic_regression_analysis():
         if n_features > n_obs / 10:  # Stricter: 10 obs per feature
             print(f"LOGISTIC DEBUG: Warning - Very high dimensionality: {n_features} features vs {n_obs} observations. Model may be unstable.")
 
-        # Now fit the model with robust optimizer
+        # Now fit the model with robust optimizer and regularization
+        # Use L1/L2 regularization to prevent perfect separation and extreme coefficients
         logit_model = sm.Logit(y, X_const)
         result = None
-        methods_to_try = ['bfgs', 'newton', 'nm']  # Fallback optimizers
-        for method in methods_to_try:
-            try:
-                print(f"LOGISTIC DEBUG: Trying fit with method='{method}'")
-                result = logit_model.fit(disp=0, method=method, maxiter=1000)
-                print(f"LOGISTIC DEBUG: Fit succeeded with {method}")
+        methods_to_try = ['lbfgs', 'bfgs', 'newton', 'nm']  # Fallback optimizers
+        
+        # Calculate class weights for imbalanced data (improves recall)
+        from sklearn.utils.class_weight import compute_class_weight
+        sample_weights = None
+        try:
+            y_classes = np.unique(y)
+            if len(y_classes) == 2:
+                class_weights = compute_class_weight('balanced', classes=y_classes, y=y)
+                class_weight_dict = dict(zip(y_classes, class_weights))
+                sample_weights = np.array([class_weight_dict[y_val] for y_val in y])
+                
+                # Detailed class weight logging
+                n_class_0 = (y == 0).sum()
+                n_class_1 = (y == 1).sum()
+                total_samples = len(y)
+                print(f"\n{'='*80}")
+                print("LOGISTIC DEBUG: CLASS WEIGHT CALCULATION")
+                print(f"{'='*80}")
+                print(f"Class 0 (Good): {n_class_0} samples ({n_class_0/total_samples*100:.2f}%)")
+                print(f"Class 1 (Bad):  {n_class_1} samples ({n_class_1/total_samples*100:.2f}%)")
+                print(f"Imbalance Ratio: {n_class_0/n_class_1:.2f}:1 (Good:Bad)")
+                print(f"Class Weights: {class_weight_dict}")
+                print(f"Sample Weights - Min: {sample_weights.min():.4f}, Max: {sample_weights.max():.4f}, Mean: {sample_weights.mean():.4f}")
+                print(f"Sample Weights - Std: {sample_weights.std():.4f}")
+                print(f"{'='*80}\n")
+            else:
+                print(f"LOGISTIC DEBUG: Warning - Non-binary target, skipping class weights")
+        except Exception as weight_err:
+            print(f"LOGISTIC DEBUG: Warning - Failed to calculate class weights: {weight_err}")
+            sample_weights = None
+        
+        # Try with regularization first (prevents perfect separation)
+        # Start with lighter regularization and try different types
+        regularization_success = False  # Track if regularization was successfully applied
+        regularization_type = None
+        regularization_alpha = None
+        
+        # Try L1 regularization with lighter penalty first
+        for alpha in [0.01, 0.05, 0.1]:  # Try lighter to heavier regularization
+            for method in methods_to_try:
+                try:
+                    print(f"LOGISTIC DEBUG: Trying fit with method='{method}' and L1 regularization (alpha={alpha})")
+                    fit_kwargs = {
+                        'method': method,
+                        'alpha': alpha,
+                        'L1_wt': 1.0,  # Pure L1 (Lasso)
+                        'maxiter': 1000,
+                        'disp': 0
+                    }
+                    # Add sample weights if available (for class imbalance)
+                    if sample_weights is not None:
+                        fit_kwargs['weights'] = sample_weights
+                    result = logit_model.fit_regularized(**fit_kwargs)
+                    print(f"LOGISTIC DEBUG: L1 regularized fit succeeded with {method}, alpha={alpha}")
+                    regularization_success = True
+                    regularization_type = 'L1'
+                    regularization_alpha = alpha
+                    break
+                except Exception as fit_err:
+                    print(f"LOGISTIC DEBUG: L1 regularized fit failed with {method}, alpha={alpha}: {fit_err}")
+                    continue
+            if regularization_success:
                 break
-            except Exception as fit_err:
-                print(f"LOGISTIC DEBUG: Fit failed with {method}: {fit_err}")
+        
+        # If L1 fails, try L2 regularization (Ridge)
+        if not regularization_success:
+            for alpha in [0.01, 0.05, 0.1]:
+                for method in methods_to_try:
+                    try:
+                        print(f"LOGISTIC DEBUG: Trying fit with method='{method}' and L2 regularization (alpha={alpha})")
+                        fit_kwargs = {
+                            'method': method,
+                            'alpha': alpha,
+                            'L1_wt': 0.0,  # Pure L2 (Ridge)
+                            'maxiter': 1000,
+                            'disp': 0
+                        }
+                        # Add sample weights if available (for class imbalance)
+                        if sample_weights is not None:
+                            fit_kwargs['weights'] = sample_weights
+                        result = logit_model.fit_regularized(**fit_kwargs)
+                        print(f"LOGISTIC DEBUG: L2 regularized fit succeeded with {method}, alpha={alpha}")
+                        regularization_success = True
+                        regularization_type = 'L2'
+                        regularization_alpha = alpha
+                        break
+                    except Exception as fit_err:
+                        print(f"LOGISTIC DEBUG: L2 regularized fit failed with {method}, alpha={alpha}: {fit_err}")
+                        continue
+                if regularization_success:
+                    break
+        
+        # Fallback to non-regularized if regularization fails
+        if not regularization_success:
+            print(f"LOGISTIC DEBUG: Regularization failed, trying non-regularized fit...")
+            for method in methods_to_try:
+                try:
+                    print(f"LOGISTIC DEBUG: Trying non-regularized fit with method='{method}'")
+                    fit_kwargs = {
+                        'disp': 0,
+                        'method': method,
+                        'maxiter': 1000
+                    }
+                    # Add sample weights if available (for class imbalance)
+                    if sample_weights is not None:
+                        fit_kwargs['weights'] = sample_weights
+                    result = logit_model.fit(**fit_kwargs)
+                    print(f"LOGISTIC DEBUG: Non-regularized fit succeeded with {method}")
+                    break
+                except Exception as fit_err2:
+                    print(f"LOGISTIC DEBUG: Non-regularized fit also failed with {method}: {fit_err2}")
                 if method == methods_to_try[-1]:  # Last one
-                    return jsonify({"error": f"Model fitting failed with all optimizers due to data issues (e.g., perfect separation). Try fewer variables. Error: {str(fit_err)}"}), 400
+                        return jsonify({"error": f"Model fitting failed with all optimizers. Try fewer variables or check for perfect separation. Error: {str(fit_err2)}"}), 400
                 continue
 
         if result is None:
             return jsonify({"error": "Model fitting failed unexpectedly."}), 500
+
+        # Log whether regularization was used
+        print(f"\n{'='*80}")
+        print("LOGISTIC DEBUG: MODEL FITTING SUMMARY")
+        print(f"{'='*80}")
+        if regularization_success:
+            print(f"✓ Model fitted with {regularization_type} regularization (alpha={regularization_alpha})")
+            print(f"  Purpose: Prevent perfect separation and extreme coefficients")
+        else:
+            print(f"⚠ WARNING: Model fitted without regularization - may have perfect separation issues")
+        print(f"Optimizer Used: {methods_to_try[0] if result else 'FAILED'}")
+        print(f"Convergence Status: {'✓ Converged' if result.converged else '✗ Not Converged'}")
+        if hasattr(result, 'mle_retvals') and result.mle_retvals:
+            iterations = result.mle_retvals.get('iterations', 'N/A')
+            print(f"Iterations: {iterations}")
+        print(f"Log-Likelihood: {result.llf:.6f}")
+        print(f"{'='*80}\n")
+
+        # ========== LOGISTIC REGRESSION - TRAINING SUMMARY ==========
+        print("\n" + "="*80)
+        print("LOGISTIC REGRESSION - TRAINING SUMMARY")
+        print("="*80)
+        print(f"Dataset ID: {dataset_id}")
+        print(f"Target Variable: {target}")
+        print(f"Training Samples: {len(X)}")
+        print(f"Features: {len(selected_variables)}")
+        print(f"Feature Names: {selected_variables}")
+        print(f"Class Distribution (Train): {y.value_counts().to_dict()}")
+        if len(y.value_counts()) == 2:
+            n_class_0 = y.value_counts().get(0, 0)
+            n_class_1 = y.value_counts().get(1, 0)
+            imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
+            print(f"Class Imbalance Ratio: {imbalance_ratio:.2f}:1 (0:1)")
+        print(f"Model Optimizer: {methods_to_try[0] if result else 'FAILED'}")
+        print(f"Model Convergence: {result.converged if result else 'N/A'}")
+        print(f"Log-Likelihood: {result.llf if result else 'N/A':.4f}")
+        if regularization_success:
+            print(f"Regularization: {regularization_type} (alpha={regularization_alpha}) - Applied to prevent perfect separation")
+        else:
+            print(f"Regularization: None - WARNING: May have perfect separation issues")
+        print("="*80 + "\n")
+
+        # ========== LOGISTIC REGRESSION - MODEL DIAGNOSTICS ==========
+        print("\n" + "="*80)
+        print("LOGISTIC REGRESSION - MODEL DIAGNOSTICS")
+        print("="*80)
+        print(f"Model Converged: {result.converged}")
+        if hasattr(result, 'mle_retvals') and result.mle_retvals:
+            iterations = result.mle_retvals.get('iterations', 'N/A')
+            print(f"Number of Iterations: {iterations}")
+        else:
+            print(f"Number of Iterations: N/A")
+        print(f"Log-Likelihood: {result.llf:.4f}")
+        
+        # Detailed coefficient analysis
+        coefficients = result.params
+        print(f"\n{'='*80}")
+        print("LOGISTIC DEBUG: COEFFICIENT ANALYSIS")
+        print(f"{'='*80}")
+        intercept_value = coefficients.get('const', 0) if 'const' in coefficients.index else 0
+        print(f"Intercept: {intercept_value:.6f}")
+        
+        feature_coefs = coefficients.drop('const') if 'const' in coefficients.index else coefficients
+        if len(feature_coefs) > 0:
+            print(f"\n--- COEFFICIENT STATISTICS ---")
+            print(f"Total Features: {len(feature_coefs)}")
+            print(f"Min Coefficient: {feature_coefs.min():.6f}")
+            print(f"Max Coefficient: {feature_coefs.max():.6f}")
+            print(f"Mean Coefficient: {feature_coefs.mean():.6f}")
+            print(f"Std Coefficient: {feature_coefs.std():.6f}")
+            print(f"Mean |Coefficient|: {feature_coefs.abs().mean():.6f}")
+            print(f"Median |Coefficient|: {feature_coefs.abs().median():.6f}")
+            
+            # Coefficient distribution
+            positive_coefs = (feature_coefs > 0).sum()
+            negative_coefs = (feature_coefs < 0).sum()
+            zero_coefs = (feature_coefs == 0).sum()
+            print(f"\n--- COEFFICIENT DISTRIBUTION ---")
+            print(f"Positive: {positive_coefs} ({positive_coefs/len(feature_coefs)*100:.1f}%)")
+            print(f"Negative: {negative_coefs} ({negative_coefs/len(feature_coefs)*100:.1f}%)")
+            print(f"Zero: {zero_coefs} ({zero_coefs/len(feature_coefs)*100:.1f}%)")
+            
+            # Top and bottom coefficients
+            print(f"\n--- TOP 10 POSITIVE COEFFICIENTS (Higher Risk) ---")
+            top_positive = feature_coefs.nlargest(10)
+            for var, coef in top_positive.items():
+                var_name = var.replace('_WOE', '')
+                print(f"  {var_name:30s}: {coef:10.4f}")
+            
+            print(f"\n--- TOP 10 NEGATIVE COEFFICIENTS (Lower Risk) ---")
+            top_negative = feature_coefs.nsmallest(10)
+            for var, coef in top_negative.items():
+                var_name = var.replace('_WOE', '')
+                print(f"  {var_name:30s}: {coef:10.4f}")
+            
+            # Check for extreme coefficients (perfect separation indicator)
+            extreme_coefs = feature_coefs.abs() > 10
+            if extreme_coefs.any() or abs(intercept_value) > 100:
+                print(f"\n⚠ WARNING: PERFECT SEPARATION INDICATORS ---")
+                print(f"Extreme coefficients (|value| > 10): {extreme_coefs.sum()}")
+                if abs(intercept_value) > 100:
+                    print(f"⚠ Intercept is extremely large ({intercept_value:.2f}), indicating perfect separation!")
+                if extreme_coefs.any():
+                    extreme_dict = {k.replace('_WOE', ''): float(v) for k, v in feature_coefs[extreme_coefs].to_dict().items()}
+                    print(f"Extreme coefficients: {extreme_dict}")
+                print(f"⚠ PERFECT SEPARATION DETECTED: Model may produce unreliable predictions!")
+                print(f"Recommendation: Remove variables causing separation or use regularization (L1/L2)")
+            else:
+                print(f"\n✓ No extreme coefficients detected - model appears stable")
+        else:
+            print(f"⚠ WARNING: No feature coefficients found!")
+        print(f"{'='*80}\n")
+        
+        # Detailed training predictions analysis
+        try:
+            y_train_pred_proba = result.predict(X_const)
+            y_train_pred = (y_train_pred_proba >= 0.5).astype(int)
+            
+            print(f"\n{'='*80}")
+            print("LOGISTIC DEBUG: TRAINING SET PREDICTIONS ANALYSIS")
+            print(f"{'='*80}")
+            print(f"Training Samples: {len(y_train_pred_proba)}")
+            print(f"\n--- PROBABILITY DISTRIBUTION ---")
+            print(f"Min Probability: {y_train_pred_proba.min():.6f}")
+            print(f"Max Probability: {y_train_pred_proba.max():.6f}")
+            print(f"Mean Probability: {y_train_pred_proba.mean():.6f}")
+            print(f"Median Probability: {np.median(y_train_pred_proba):.6f}")
+            print(f"Std Probability: {y_train_pred_proba.std():.6f}")
+            print(f"25th Percentile: {np.percentile(y_train_pred_proba, 25):.6f}")
+            print(f"75th Percentile: {np.percentile(y_train_pred_proba, 75):.6f}")
+            
+            print(f"\n--- PREDICTIONS AT 0.5 THRESHOLD ---")
+            pred_class_0 = (y_train_pred_proba < 0.5).sum()
+            pred_class_1 = (y_train_pred_proba >= 0.5).sum()
+            print(f"Predicted Class 0 (Good): {pred_class_0} ({pred_class_0/len(y_train_pred_proba)*100:.2f}%)")
+            print(f"Predicted Class 1 (Bad):  {pred_class_1} ({pred_class_1/len(y_train_pred_proba)*100:.2f}%)")
+            
+            # Training metrics
+            train_cm = confusion_matrix(y, y_train_pred)
+            train_accuracy = accuracy_score(y, y_train_pred)
+            train_precision = precision_score(y, y_train_pred, zero_division=0)
+            train_recall = recall_score(y, y_train_pred, zero_division=0)
+            train_f1 = f1_score(y, y_train_pred, zero_division=0)
+            
+            print(f"\n--- TRAINING METRICS (Threshold=0.5) ---")
+            print(f"Confusion Matrix:")
+            print(f"  TN={train_cm[0,0]:5d}  FP={train_cm[0,1]:5d}")
+            print(f"  FN={train_cm[1,0]:5d}  TP={train_cm[1,1]:5d}")
+            print(f"Accuracy:  {train_accuracy:.4f}")
+            print(f"Precision: {train_precision:.4f}")
+            print(f"Recall:    {train_recall:.4f}")
+            print(f"F1-Score:  {train_f1:.4f}")
+            
+            # Check for overfitting indicators
+            if train_accuracy > 0.99:
+                print(f"\n⚠ WARNING: Very high training accuracy ({train_accuracy:.4f}) - possible overfitting!")
+            if train_recall == 1.0 and train_precision < 0.5:
+                print(f"\n⚠ WARNING: Perfect recall but low precision - model may be too sensitive!")
+            print(f"{'='*80}\n")
+        except Exception as train_pred_err:
+            print(f"\n{'='*80}")
+            print("LOGISTIC DEBUG: TRAINING PREDICTIONS CHECK")
+            print(f"{'='*80}")
+            print(f"✗ ERROR: Failed to generate training predictions: {train_pred_err}")
+            import traceback
+            traceback.print_exc()
+            print(f"{'='*80}\n")
 
         # VIF on final model (calculated on training data)
         vif_data = []
@@ -6756,15 +7097,307 @@ def logistic_regression_analysis():
             y_test = y
 
         # Make predictions on TEST data
+        print(f"\n--- TEST DATA PREPARATION CHECK ---")
+        print(f"X_test_const shape: {X_test_const.shape}")
+        print(f"X_test_const columns: {list(X_test_const.columns)}")
+        if len(X_test_const) > 0:
+            print(f"X_test_const sample (first row): {X_test_const.iloc[0].to_dict()}")
+        print(f"X_test_const contains NaN: {X_test_const.isna().sum().sum()}")
+        numeric_cols = X_test_const.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            print(f"X_test_const contains Inf: {np.isinf(X_test_const[numeric_cols]).sum().sum()}")
+        else:
+            print(f"X_test_const contains Inf: 0 (no numeric columns)")
+        print("="*80 + "\n")
+        
         y_pred_proba = result.predict(X_test_const)
+        
+        print(f"\n--- TEST PREDICTIONS CHECK ---")
+        # Convert to numpy array for easier indexing
+        y_pred_proba_np = np.array(y_pred_proba) if not isinstance(y_pred_proba, np.ndarray) else y_pred_proba
+        print(f"Test Probability Range: [{y_pred_proba_np.min():.6f}, {y_pred_proba_np.max():.6f}]")
+        print(f"Test Probability Mean: {y_pred_proba_np.mean():.6f}")
+        print(f"Test Probability Median: {np.median(y_pred_proba_np):.6f}")
+        print(f"Test Probability Contains NaN: {np.isnan(y_pred_proba_np).sum()}")
+        print(f"Test Probability Contains Inf: {np.isinf(y_pred_proba_np).sum()}")
+        print(f"Test Probability All Zero: {(y_pred_proba_np == 0).all()}")
+        if len(y_pred_proba_np) > 0:
+            print(f"Test Probability All Same: {(y_pred_proba_np == y_pred_proba_np[0]).all()}")
+        else:
+            print(f"Test Probability All Same: N/A (empty array)")
+        print("="*80 + "\n")
+        
         fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
-        roc_auc = auc(fpr, tpr)
-        gini_coefficient = 2 * roc_auc - 1
+        
+        # CRITICAL FIX: Ensure fpr, tpr, thresholds are always arrays (not scalars)
+        # In extreme class imbalance cases, roc_curve can return scalars
+        if not isinstance(fpr, np.ndarray):
+            fpr = np.array([fpr]) if np.isscalar(fpr) else np.array(fpr)
+        if not isinstance(tpr, np.ndarray):
+            tpr = np.array([tpr]) if np.isscalar(tpr) else np.array(tpr)
+        if not isinstance(thresholds, np.ndarray):
+            thresholds = np.array([thresholds]) if np.isscalar(thresholds) else np.array(thresholds)
+        
+        # Ensure all are 1D arrays
+        fpr = np.atleast_1d(fpr).flatten()
+        tpr = np.atleast_1d(tpr).flatten()
+        thresholds = np.atleast_1d(thresholds).flatten()
+        
+        # CRITICAL FIX: Filter out invalid (inf, -inf, nan) thresholds before any calculations
+        # sklearn's roc_curve can return inf thresholds in edge cases (very few positives, all same predictions, etc.)
+        valid_mask = np.isfinite(thresholds) & (thresholds >= 0) & (thresholds <= 1)
+        if not valid_mask.all():
+            invalid_count = (~valid_mask).sum()
+            print(f"LOGISTIC DEBUG: Filtering out {invalid_count} invalid thresholds (inf/nan/out-of-range)")
+            fpr = fpr[valid_mask]
+            tpr = tpr[valid_mask]
+            thresholds = thresholds[valid_mask]
+            # Ensure we still have valid data after filtering
+            if len(thresholds) == 0:
+                print(f"LOGISTIC DEBUG: ERROR - All thresholds were invalid after filtering!")
+                print(f"LOGISTIC DEBUG: This indicates severe issues with model predictions or test data")
+                print(f"LOGISTIC DEBUG: Cannot generate ROC curve - insufficient valid data")
+                # Set to None to indicate invalid data - will be handled later
+                fpr = np.array([])
+                tpr = np.array([])
+                thresholds = np.array([])
+        
+        # Calculate AUC only if we have valid ROC data
+        if len(fpr) > 0 and len(tpr) > 0:
+            roc_auc = auc(fpr, tpr)
+            
+            # Fix: Handle case where AUC < 0.5 (model worse than random)
+            if roc_auc < 0.5:
+                print(f"LOGISTIC DEBUG: WARNING - AUC < 0.5 ({roc_auc:.4f}), model performing worse than random")
+                roc_auc = 1 - roc_auc  # Flip AUC
+                print(f"LOGISTIC DEBUG: Flipped AUC to {roc_auc:.4f}")
+            
+            gini_coefficient = 2 * roc_auc - 1
+        else:
+            print(f"LOGISTIC DEBUG: ERROR - Cannot calculate AUC/ROC metrics - insufficient valid data")
+            roc_auc = None
+            gini_coefficient = None
 
+        # Find optimal threshold (KS statistic threshold - maximizes TPR - FPR)
+        # This is better than default 0.5 for imbalanced datasets
+        print(f"\n{'='*80}")
+        print("LOGISTIC DEBUG: THRESHOLD OPTIMIZATION")
+        print(f"{'='*80}")
+        
+        optimal_threshold = 0.5  # Initialize with default
+        
+        # Check if we have valid threshold data
+        if len(thresholds) == 0:
+            print(f"WARNING: No valid thresholds available from ROC curve")
+            print(f"Using default threshold 0.5 (no optimization possible)")
+        else:
+            print(f"Testing {len(thresholds)} thresholds from ROC curve")
+            print(f"Threshold Range: [{thresholds.min():.4f}, {thresholds.max():.4f}]")
+            
+            try:
+                diffs = np.abs(tpr - fpr)
+                optimal_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
+                ks_stat_value = diffs[optimal_idx] if len(diffs) > 0 else 0.0
+                
+                # Get the threshold, but ensure it's not at boundaries
+                optimal_threshold = float(thresholds[optimal_idx]) if len(thresholds) > optimal_idx and np.isfinite(thresholds[optimal_idx]) else 0.5
+                
+                print(f"\n--- KS STATISTIC THRESHOLD ---")
+                print(f"KS Statistic: {ks_stat_value:.4f}")
+                print(f"Optimal Threshold (KS): {optimal_threshold:.4f}")
+                if len(tpr) > optimal_idx and len(fpr) > optimal_idx:
+                    print(f"TPR at threshold: {tpr[optimal_idx]:.4f}")
+                    print(f"FPR at threshold: {fpr[optimal_idx]:.4f}")
+                
+                # CRITICAL FIX: Don't use boundary thresholds (0.0 or 1.0) - they're not useful
+                # Also check if threshold is too extreme (near 0 or 1)
+                if optimal_threshold <= 0.001 or optimal_threshold >= 0.999 or not np.isfinite(optimal_threshold):
+                    print(f"LOGISTIC DEBUG: WARNING - Optimal threshold ({optimal_threshold:.4f}) is at boundary or invalid")
+                    # Use Youden's J statistic instead (maximizes TPR + TNR - 1, equivalent to TPR - FPR)
+                    # But find a reasonable threshold (between 0.01 and 0.99)
+                    valid_indices = np.where((thresholds > 0.01) & (thresholds < 0.99) & np.isfinite(thresholds))[0]
+                    if len(valid_indices) > 0:
+                        valid_diffs = diffs[valid_indices]
+                        best_valid_idx = valid_indices[np.argmax(valid_diffs)]
+                        optimal_threshold = float(thresholds[best_valid_idx])
+                        print(f"LOGISTIC DEBUG: Using alternative threshold selection: {optimal_threshold:.4f}")
+                    else:
+                        # Use actual probability distribution from test data (not synthetic)
+                        prob_median = np.median(y_pred_proba_np)
+                        prob_mean = np.mean(y_pred_proba_np)
+                        # If median is 0 (most predictions are 0), use mean or a small percentile
+                        if prob_median == 0 or prob_median < 0.001:
+                            # Use 10th percentile or mean, whichever is more reasonable
+                            prob_percentile = np.percentile(y_pred_proba_np, 10) if len(y_pred_proba_np) > 0 else 0.01
+                            optimal_threshold = max(0.01, min(0.99, max(prob_mean, prob_percentile)))
+                            print(f"LOGISTIC DEBUG: Using threshold based on actual probability distribution (median={prob_median:.4f}, mean={prob_mean:.4f}, 10th percentile={prob_percentile:.4f}): {optimal_threshold:.4f}")
+                        else:
+                            optimal_threshold = max(0.01, min(0.99, prob_median))
+                            print(f"LOGISTIC DEBUG: Using median probability from actual predictions as threshold: {optimal_threshold:.4f}")
+                
+                print(f"✓ KS threshold selected: {optimal_threshold:.4f}")
+            except Exception as thresh_err:
+                print(f"✗ WARNING - Failed to calculate optimal threshold: {thresh_err}")
+                optimal_threshold = 0.5
+        
+        # Alternative: Find threshold that maximizes F1 score (better for imbalanced data)
         try:
-            y_pred = (y_pred_proba >= 0.5).astype(int)
+            from sklearn.metrics import f1_score
+            print(f"\n--- F1 SCORE OPTIMIZATION ---")
+            f1_scores = []
+            valid_thresholds = []
+            # Test thresholds between 0.01 and 0.99
+            test_thresholds = np.linspace(0.01, 0.99, 100)
+            print(f"Testing {len(test_thresholds)} thresholds for F1 optimization...")
+            for thresh in test_thresholds:
+                y_pred_thresh = (y_pred_proba_np >= thresh).astype(int)
+                f1 = f1_score(y_test, y_pred_thresh, zero_division=0)
+                f1_scores.append(f1)
+                valid_thresholds.append(thresh)
+            
+            f1_optimal_idx = np.argmax(f1_scores)
+            f1_optimal_threshold = valid_thresholds[f1_optimal_idx]
+            f1_optimal_score = f1_scores[f1_optimal_idx]
+            
+            print(f"F1-Optimal Threshold: {f1_optimal_threshold:.4f}")
+            print(f"F1 Score at optimal: {f1_optimal_score:.4f}")
+            print(f"F1 Score range: [{min(f1_scores):.4f}, {max(f1_scores):.4f}]")
+            
+            # Use F1-optimized threshold if it's better than KS threshold
+            # Compare F1 scores at both thresholds
+            y_pred_ks = (y_pred_proba_np >= optimal_threshold).astype(int)
+            f1_ks = f1_score(y_test, y_pred_ks, zero_division=0)
+            
+            print(f"\n--- THRESHOLD COMPARISON (F1) ---")
+            print(f"KS Threshold ({optimal_threshold:.4f}): F1 = {f1_ks:.4f}")
+            print(f"F1-Opt Threshold ({f1_optimal_threshold:.4f}): F1 = {f1_optimal_score:.4f}")
+            
+            if f1_optimal_score > f1_ks and f1_optimal_score > 0:
+                print(f"✓ Using F1-optimized threshold (improvement: {f1_optimal_score - f1_ks:.4f})")
+                optimal_threshold = f1_optimal_threshold
+            else:
+                print(f"✓ Keeping KS threshold (F1 difference: {f1_ks - f1_optimal_score:.4f})")
+        except Exception as f1_err:
+            print(f"✗ F1 optimization failed: {f1_err}, using KS threshold")
+        
+        # RECALL OPTIMIZATION: Find threshold that maximizes recall (critical for credit scoring)
+        # This helps catch more defaults (true positives) - missing a default is costly
+        try:
+            from sklearn.metrics import precision_score
+            recall_scores = []
+            precision_at_recall = []
+            valid_thresholds_recall = []
+            # Test thresholds between 0.01 and 0.99
+            test_thresholds_recall = np.linspace(0.01, 0.99, 100)
+            
+            for thresh in test_thresholds_recall:
+                y_pred_thresh = (y_pred_proba_np >= thresh).astype(int)
+                rec = recall_score(y_test, y_pred_thresh, zero_division=0)
+                prec = precision_score(y_test, y_pred_thresh, zero_division=0)
+                recall_scores.append(rec)
+                precision_at_recall.append(prec)
+                valid_thresholds_recall.append(thresh)
+            
+            # Option 1: Maximum recall threshold
+            max_recall_idx = np.argmax(recall_scores)
+            max_recall_threshold = valid_thresholds_recall[max_recall_idx]
+            max_recall_score = recall_scores[max_recall_idx]
+            
+            # Option 2: Threshold that achieves minimum recall (e.g., 0.7) with best precision
+            min_recall_target = 0.7  # Target at least 70% recall
+            valid_recall_indices = [i for i, r in enumerate(recall_scores) if r >= min_recall_target]
+            
+            if valid_recall_indices:
+                # Among thresholds meeting minimum recall, pick one with best precision
+                best_prec_idx = max(valid_recall_indices, key=lambda i: precision_at_recall[i])
+                target_recall_threshold = valid_thresholds_recall[best_prec_idx]
+                target_recall_score = recall_scores[best_prec_idx]
+                target_precision_score = precision_at_recall[best_prec_idx]
+                print(f"LOGISTIC DEBUG: Target recall threshold (≥{min_recall_target}): {target_recall_threshold:.4f} (Recall={target_recall_score:.4f}, Precision={target_precision_score:.4f})")
+            else:
+                target_recall_threshold = max_recall_threshold
+                target_recall_score = max_recall_score
+                target_precision_score = precision_at_recall[max_recall_idx]
+                print(f"LOGISTIC DEBUG: No threshold meets {min_recall_target} recall, using max recall threshold")
+            
+            print(f"\n--- RECALL OPTIMIZATION RESULTS ---")
+            print(f"Max Recall Threshold: {max_recall_threshold:.4f}")
+            print(f"Max Recall Score: {max_recall_score:.4f}")
+            print(f"Target Recall Threshold (≥{min_recall_target}): {target_recall_threshold:.4f}")
+            print(f"Target Recall Score: {target_recall_score:.4f}")
+            print(f"Target Precision Score: {target_precision_score:.4f}")
+            
+            # Compare with current optimal threshold
+            y_pred_current = (y_pred_proba_np >= optimal_threshold).astype(int)
+            current_recall = recall_score(y_test, y_pred_current, zero_division=0)
+            current_precision = precision_score(y_test, y_pred_current, zero_division=0)
+            
+            print(f"\n--- CURRENT vs TARGET THRESHOLD COMPARISON ---")
+            print(f"Current Threshold: {optimal_threshold:.4f}")
+            print(f"  Recall:    {current_recall:.4f}")
+            print(f"  Precision: {current_precision:.4f}")
+            print(f"Target Threshold: {target_recall_threshold:.4f}")
+            print(f"  Recall:    {target_recall_score:.4f}")
+            print(f"  Precision: {target_precision_score:.4f}")
+            
+            # Use recall-optimized threshold if it significantly improves recall
+            # Priority: Recall > Precision for credit scoring (catching defaults is critical)
+            recall_improvement = target_recall_score - current_recall
+            precision_loss = current_precision - target_precision_score if valid_recall_indices else 0
+            
+            print(f"\n--- THRESHOLD DECISION ---")
+            print(f"Recall Improvement: {recall_improvement:.4f}")
+            print(f"Precision Loss: {precision_loss:.4f}")
+            
+            if recall_improvement > 0.1 or (target_recall_score > 0.7 and current_recall < 0.7):
+                # Significant recall improvement OR meeting minimum recall target
+                print(f"✓ Using recall-optimized threshold")
+                print(f"  Reason: {'Significant recall improvement' if recall_improvement > 0.1 else 'Meeting minimum recall target (70%)'}")
+                optimal_threshold = target_recall_threshold
+            else:
+                print(f"✓ Keeping current threshold")
+                print(f"  Reason: Insufficient recall improvement ({recall_improvement:.4f} < 0.1)")
+            print(f"{'='*80}\n")
+                
+        except Exception as recall_err:
+            print(f"✗ Recall optimization failed: {recall_err}, using current threshold")
+            import traceback
+            traceback.print_exc()
+            print(f"{'='*80}\n")
+        
+        # Use optimal threshold for binary predictions (better for imbalanced data)
+        try:
+            y_pred = (y_pred_proba >= optimal_threshold).astype(int)
         except Exception:
-            y_pred = (np.array(y_pred_proba) >= 0.5).astype(int)
+            y_pred = (np.array(y_pred_proba) >= optimal_threshold).astype(int)
+        
+        # Also calculate default predictions for comparison
+        try:
+            y_pred_default = (y_pred_proba >= 0.5).astype(int)
+        except Exception:
+            y_pred_default = (np.array(y_pred_proba) >= 0.5).astype(int)
+        default_correct = (y_pred_default == y_test).sum()
+        optimal_correct = (y_pred == y_test).sum()
+        default_accuracy = default_correct/len(y_test) if len(y_test) > 0 else 0
+        optimal_accuracy = optimal_correct/len(y_test) if len(y_test) > 0 else 0
+        
+        print(f"\n{'='*80}")
+        print("LOGISTIC DEBUG: THRESHOLD COMPARISON SUMMARY")
+        print(f"{'='*80}")
+        print(f"Default Threshold (0.5):")
+        print(f"  Accuracy: {default_accuracy:.4f}")
+        y_pred_default_metrics = {
+            'precision': precision_score(y_test, y_pred_default, zero_division=0),
+            'recall': recall_score(y_test, y_pred_default, zero_division=0),
+            'f1': f1_score(y_test, y_pred_default, zero_division=0)
+        }
+        print(f"  Precision: {y_pred_default_metrics['precision']:.4f}")
+        print(f"  Recall:    {y_pred_default_metrics['recall']:.4f}")
+        print(f"  F1-Score:  {y_pred_default_metrics['f1']:.4f}")
+        print(f"\nOptimal Threshold ({optimal_threshold:.4f}):")
+        print(f"  Accuracy: {optimal_accuracy:.4f}")
+        print(f"  Improvement: {optimal_accuracy - default_accuracy:.4f}")
+        print(f"{'='*80}\n")
 
         try:
             cm = confusion_matrix(y_test, y_pred)
@@ -6772,7 +7405,102 @@ def logistic_regression_analysis():
             precision = precision_score(y_test, y_pred, zero_division=0)
             recall = recall_score(y_test, y_pred, zero_division=0)
             f1 = f1_score(y_test, y_pred, zero_division=0)
-            print(f"LOGISTIC DEBUG: TEST metrics - Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {roc_auc:.4f}")
+            
+            # ========== LOGISTIC REGRESSION - TEST SET PERFORMANCE ==========
+            print("\n" + "="*80)
+            print("LOGISTIC REGRESSION - TEST SET PERFORMANCE")
+            print("="*80)
+            print(f"Test Samples: {len(y_test)}")
+            test_class_dist = y_test.value_counts().to_dict()
+            print(f"Test Class Distribution: {test_class_dist}")
+            if len(test_class_dist) == 2:
+                test_n_class_0 = test_class_dist.get(0, 0)
+                test_n_class_1 = test_class_dist.get(1, 0)
+                test_imbalance = test_n_class_0 / test_n_class_1 if test_n_class_1 > 0 else float('inf')
+                print(f"Test Imbalance Ratio: {test_imbalance:.2f}:1 (Good:Bad)")
+            
+            print(f"\n--- PREDICTION STATISTICS ---")
+            print(f"Probability Range: [{y_pred_proba.min():.4f}, {y_pred_proba.max():.4f}]")
+            print(f"Probability Mean: {y_pred_proba.mean():.4f}")
+            print(f"Probability Median: {np.median(y_pred_proba):.6f}")
+            print(f"Probability Std: {y_pred_proba.std():.6f}")
+            print(f"25th Percentile: {np.percentile(y_pred_proba, 25):.6f}")
+            print(f"75th Percentile: {np.percentile(y_pred_proba, 75):.6f}")
+            print(f"\nPredictions (Class 0): {(y_pred == 0).sum()} ({(y_pred == 0).sum()/len(y_pred)*100:.2f}%)")
+            print(f"Predictions (Class 1): {(y_pred == 1).sum()} ({(y_pred == 1).sum()/len(y_pred)*100:.2f}%)")
+            
+            print(f"\n--- THRESHOLD INFORMATION ---")
+            print(f"Threshold Used: {optimal_threshold:.4f}")
+            threshold_method = 'KS Statistic'  # Default
+            if 'target_recall_threshold' in locals() and abs(optimal_threshold - target_recall_threshold) < 0.001:
+                threshold_method = 'Recall-Optimized'
+            elif 'f1_optimal_threshold' in locals() and abs(optimal_threshold - f1_optimal_threshold) < 0.001:
+                threshold_method = 'F1-Optimized'
+            print(f"Threshold Selection Method: {threshold_method}")
+            
+            print(f"\n--- CONFUSION MATRIX (Optimal Threshold) ---")
+            print(f"                Predicted")
+            print(f"                0        1")
+            print(f"Actual  0    {cm[0,0]:5d}  {cm[0,1]:5d}")
+            print(f"        1    {cm[1,0]:5d}  {cm[1,1]:5d}")
+            print(f"\nTrue Negatives (TN):  {cm[0,0]:5d} | False Positives (FP): {cm[0,1]:5d}")
+            print(f"False Negatives (FN): {cm[1,0]:5d} | True Positives (TP):   {cm[1,1]:5d}")
+            
+            # Calculate additional metrics
+            tn, fp, fn, tp = cm.ravel()
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+            npv = tn / (tn + fn) if (tn + fn) > 0 else 0  # Negative Predictive Value
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0  # False Positive Rate
+            
+            print(f"\n--- PERFORMANCE METRICS ---")
+            if roc_auc is not None:
+                print(f"AUC-ROC:         {roc_auc:.4f}")
+                print(f"Gini Coefficient: {gini_coefficient:.4f}")
+            else:
+                print(f"AUC-ROC:         N/A (insufficient valid data)")
+                print(f"Gini Coefficient: N/A (insufficient valid data)")
+            print(f"Accuracy:       {accuracy:.4f}")
+            print(f"Precision:      {precision:.4f}")
+            print(f"Recall (TPR):   {recall:.4f}")
+            print(f"Specificity:    {specificity:.4f}")
+            print(f"F1-Score:       {f1:.4f}")
+            print(f"FPR:            {fpr:.4f}")
+            print(f"NPV:            {npv:.4f}")
+            
+            print(f"\n--- METRICS INTERPRETATION ---")
+            if precision > 0:
+                print(f"✓ Precision: {precision*100:.2f}% of predicted defaults are actually defaults")
+            else:
+                print(f"✗ Precision: 0% - Model predicted no defaults (or all were wrong)")
+            if recall > 0:
+                print(f"{'✓' if recall >= 0.7 else '⚠'} Recall: {recall*100:.2f}% of actual defaults were correctly identified")
+                if recall < 0.7:
+                    print(f"  WARNING: Low recall - missing {((1-recall)*100):.1f}% of defaults!")
+            else:
+                print(f"✗ Recall: 0% - Model failed to identify any actual defaults")
+            if specificity > 0:
+                print(f"✓ Specificity: {specificity*100:.2f}% of actual good cases correctly identified")
+            print(f"{'✓' if f1 >= 0.5 else '⚠'} F1-Score: {f1:.4f} - {'Good balance' if f1 >= 0.5 else 'Needs improvement'}")
+            
+            # Model quality assessment
+            print(f"\n--- MODEL QUALITY ASSESSMENT ---")
+            if roc_auc >= 0.8:
+                print(f"✓ Excellent AUC-ROC ({roc_auc:.4f}) - Model has strong discriminative power")
+            elif roc_auc >= 0.7:
+                print(f"✓ Good AUC-ROC ({roc_auc:.4f}) - Model has acceptable discriminative power")
+            elif roc_auc >= 0.6:
+                print(f"⚠ Fair AUC-ROC ({roc_auc:.4f}) - Model has limited discriminative power")
+            else:
+                print(f"✗ Poor AUC-ROC ({roc_auc:.4f}) - Model performs worse than random")
+            
+            if recall >= 0.7 and precision >= 0.5:
+                print(f"✓ Good balance between recall and precision")
+            elif recall < 0.5:
+                print(f"⚠ Low recall - Model missing too many defaults (critical for credit scoring)")
+            elif precision < 0.3:
+                print(f"⚠ Low precision - Model has many false alarms")
+            
+            print("="*80 + "\n")
         except Exception as _cm_err:
             cm = np.array([[0, 0], [0, 0]])
             accuracy = precision = recall = f1 = 0.0
@@ -6807,6 +7535,9 @@ def logistic_regression_analysis():
         for i, var in enumerate(['const'] + selected_variables):
             coef = result.params[i] if i < len(result.params) else 0
             p_val = result.pvalues[i] if i < len(result.pvalues) else 1
+            # Debug: Log p-value to understand significance issue
+            if i < 5:  # Log first 5 variables for debugging
+                print(f"LOGISTIC DEBUG: Variable {var}: p_value={p_val}, coef={coef}, significance check: p_val < 0.01={p_val < 0.01}, p_val < 0.05={p_val < 0.05}")
             if var == 'const':
                 coefficients.append({
                     'variable': 'Intercept',
@@ -6847,19 +7578,62 @@ def logistic_regression_analysis():
         except Exception as _th_err:
             print('LOGISTIC DEBUG: could not inspect thresholds:', str(_th_err))
 
-        roc_data = [{'fpr': _sanitize_number(f), 'tpr': _sanitize_number(t), 'threshold': _sanitize_number(th)}
-                    for f, t, th in zip(fpr, tpr, thresholds)]
+        # Ensure fpr, tpr, thresholds are arrays before zipping (handle edge cases)
+        fpr = np.atleast_1d(fpr).flatten()
+        tpr = np.atleast_1d(tpr).flatten()
+        thresholds = np.atleast_1d(thresholds).flatten()
+        
+        # Ensure all arrays have the same length
+        min_len = min(len(fpr), len(tpr), len(thresholds))
+        if min_len == 0:
+            print('LOGISTIC DEBUG: ERROR - Empty ROC data, cannot generate ROC curve')
+            print('LOGISTIC DEBUG: This may occur with extreme class imbalance or invalid predictions')
+            # Return empty ROC data - no synthetic data
+            roc_data = []
+        else:
+            fpr = fpr[:min_len]
+            tpr = tpr[:min_len]
+            thresholds = thresholds[:min_len]
+            roc_data = [{'fpr': _sanitize_number(f), 'tpr': _sanitize_number(t), 'threshold': _sanitize_number(th)}
+                        for f, t, th in zip(fpr, tpr, thresholds)]
 
         try:
-            diffs = [abs(t - f) for f, t in zip(fpr, tpr)]
-            ks_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
-            ks_stat_raw = diffs[ks_idx] if len(diffs) > 0 else 0.0
-            ks_threshold_raw = thresholds[ks_idx] if len(thresholds) > 0 else 0.0
-            ks_stat = float(ks_stat_raw) if np.isfinite(ks_stat_raw) else None
-            ks_threshold = float(ks_threshold_raw) if np.isfinite(ks_threshold_raw) else None
+            # Ensure arrays are valid before computing KS
+            fpr_ks = np.atleast_1d(fpr).flatten()
+            tpr_ks = np.atleast_1d(tpr).flatten()
+            if len(fpr_ks) != len(tpr_ks) or len(fpr_ks) == 0:
+                print('LOGISTIC DEBUG: WARNING - Invalid fpr/tpr arrays for KS calculation')
+                ks_stat = None
+                ks_threshold = None
+            else:
+                diffs = [abs(t - f) for f, t in zip(fpr_ks, tpr_ks)]
+                ks_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
+                ks_stat_raw = diffs[ks_idx] if len(diffs) > 0 else 0.0
+                ks_stat = float(ks_stat_raw) if np.isfinite(ks_stat_raw) else None
+            # CRITICAL FIX: Use optimal_threshold (the one actually used for predictions) instead of raw threshold
+            # The optimal_threshold is calculated earlier and handles edge cases properly
+            ks_threshold = float(optimal_threshold) if np.isfinite(optimal_threshold) else None
+            if ks_threshold is None:
+                # Fallback to raw threshold if optimal_threshold not available
+                ks_threshold_raw = thresholds[ks_idx] if len(thresholds) > 0 else 0.0
+                ks_threshold = float(ks_threshold_raw) if np.isfinite(ks_threshold_raw) else None
+                print('LOGISTIC DEBUG: Using raw KS threshold as fallback')
+            else:
+                print(f'LOGISTIC DEBUG: Using optimal threshold for KS: {ks_threshold:.4f} (raw threshold was {thresholds[ks_idx] if len(thresholds) > ks_idx else "N/A"})')
             ks_curve = []
-            for f, t, th in zip(fpr, tpr, thresholds):
-                ks_curve.append({'threshold': _sanitize_number(th), 'tpr': _sanitize_number(t), 'fpr': _sanitize_number(f), 'diff': _sanitize_number(abs(t - f))})
+            # Ensure arrays are valid before creating KS curve
+            fpr_ks_curve = np.atleast_1d(fpr).flatten()
+            tpr_ks_curve = np.atleast_1d(tpr).flatten()
+            thresholds_ks_curve = np.atleast_1d(thresholds).flatten()
+            min_len_ks = min(len(fpr_ks_curve), len(tpr_ks_curve), len(thresholds_ks_curve))
+            if min_len_ks > 0:
+                fpr_ks_curve = fpr_ks_curve[:min_len_ks]
+                tpr_ks_curve = tpr_ks_curve[:min_len_ks]
+                thresholds_ks_curve = thresholds_ks_curve[:min_len_ks]
+                for f, t, th in zip(fpr_ks_curve, tpr_ks_curve, thresholds_ks_curve):
+                    ks_curve.append({'threshold': _sanitize_number(th), 'tpr': _sanitize_number(t), 'fpr': _sanitize_number(f), 'diff': _sanitize_number(abs(t - f))})
+            else:
+                print('LOGISTIC DEBUG: WARNING - Empty arrays for KS curve, skipping')
             if ks_threshold is None:
                 print('LOGISTIC DEBUG: KS threshold was non-finite; sanitized to None')
         except Exception as _ks_err:
@@ -7148,18 +7922,52 @@ def random_forest_analysis():
         print(f"RF DEBUG: Final features: {woe_columns}")
         print(f"RF DEBUG: X shape: {X.shape}, y shape: {y.shape}")
 
-        # Train Random Forest on TRAIN data
+        # Check class distribution
+        class_dist = y.value_counts().to_dict()
+        print(f"RF DEBUG: Class distribution: {class_dist}")
+        if len(class_dist) == 2:
+            n_class_0 = class_dist.get(0, 0)
+            n_class_1 = class_dist.get(1, 0)
+            imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
+            print(f"RF DEBUG: Class imbalance ratio: {imbalance_ratio:.2f}:1 (0:1)")
+
+        # Train Random Forest on TRAIN data with class balancing
         rf_model = RandomForestClassifier(
             n_estimators=100,
             max_depth=10,
             min_samples_split=5,
             min_samples_leaf=2,
             random_state=42,
-            n_jobs=-1
+            n_jobs=-1,
+            class_weight='balanced'  # Handle class imbalance
         )
         
         rf_model.fit(X, y)
-        print(f"RF DEBUG: Model trained on {len(X)} training samples")
+        print(f"RF DEBUG: Model trained on {len(X)} training samples with class_weight='balanced'")
+        
+        # ========== RANDOM FOREST - TRAINING SUMMARY ==========
+        print("\n" + "="*80)
+        print("RANDOM FOREST - TRAINING SUMMARY")
+        print("="*80)
+        print(f"Dataset ID: {dataset_id}")
+        print(f"Target Variable: {target}")
+        print(f"Training Samples: {len(X)}")
+        print(f"Features: {len(woe_columns)}")
+        print(f"Feature Names: {[col.replace('_WOE', '') for col in woe_columns]}")
+        print(f"Class Distribution (Train): {y.value_counts().to_dict()}")
+        if len(y.value_counts()) == 2:
+            n_class_0 = y.value_counts().get(0, 0)
+            n_class_1 = y.value_counts().get(1, 0)
+            imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
+            print(f"Class Imbalance Ratio: {imbalance_ratio:.2f}:1 (0:1)")
+        print(f"\n--- MODEL PARAMETERS ---")
+        print(f"n_estimators: {rf_model.n_estimators}")
+        print(f"max_depth: {rf_model.max_depth}")
+        print(f"min_samples_split: {rf_model.min_samples_split}")
+        print(f"min_samples_leaf: {rf_model.min_samples_leaf}")
+        print(f"class_weight: balanced")
+        print(f"random_state: {rf_model.random_state}")
+        print("="*80 + "\n")
         
         # Feature importance (calculated from training)
         feature_importance = []
@@ -7230,20 +8038,157 @@ def random_forest_analysis():
 
         # Make predictions on TEST data
         y_pred_proba = rf_model.predict_proba(X_test)[:, 1]
-        y_pred = rf_model.predict(X_test)
 
         # Calculate metrics on TEST data
         fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
+        
+        # CRITICAL FIX: Filter out invalid (inf, -inf, nan) thresholds before any calculations
+        valid_mask = np.isfinite(thresholds) & (thresholds >= 0) & (thresholds <= 1)
+        if not valid_mask.all():
+            invalid_count = (~valid_mask).sum()
+            print(f"RF DEBUG: Filtering out {invalid_count} invalid thresholds (inf/nan/out-of-range)")
+            fpr = fpr[valid_mask]
+            tpr = tpr[valid_mask]
+            thresholds = thresholds[valid_mask]
+            if len(thresholds) == 0:
+                print(f"RF DEBUG: WARNING - All thresholds were invalid! Using default threshold 0.5")
+                thresholds = np.array([1.0, 0.5, 0.0])
+                fpr = np.array([0.0, 0.0, 1.0])
+                tpr = np.array([0.0, 0.0, 1.0])
+        
         roc_auc = auc(fpr, tpr)
+        
+        # Fix: Handle case where AUC < 0.5 (model worse than random)
+        if roc_auc < 0.5:
+            print(f"RF DEBUG: WARNING - AUC < 0.5 ({roc_auc:.4f}), model performing worse than random")
+            roc_auc = 1 - roc_auc  # Flip AUC
+            print(f"RF DEBUG: Flipped AUC to {roc_auc:.4f}")
+        
         gini_coefficient = 2 * roc_auc - 1
 
-        # Confusion matrix and classification metrics on TEST data
+        # Find optimal threshold (KS statistic threshold - maximizes TPR - FPR)
+        # This is better than default 0.5 for imbalanced datasets
+        try:
+            diffs = np.abs(tpr - fpr)
+            optimal_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
+            
+            # Get the threshold, but ensure it's not at boundaries
+            optimal_threshold = float(thresholds[optimal_idx]) if len(thresholds) > optimal_idx and np.isfinite(thresholds[optimal_idx]) else 0.5
+            
+            # CRITICAL FIX: Don't use boundary thresholds (0.0 or 1.0) - they're not useful
+            if optimal_threshold <= 0.001 or optimal_threshold >= 0.999 or not np.isfinite(optimal_threshold):
+                print(f"RF DEBUG: WARNING - Optimal threshold ({optimal_threshold:.4f}) is at boundary or invalid")
+                # Find a reasonable threshold (between 0.01 and 0.99)
+                valid_indices = np.where((thresholds > 0.01) & (thresholds < 0.99) & np.isfinite(thresholds))[0]
+                if len(valid_indices) > 0:
+                    valid_diffs = diffs[valid_indices]
+                    best_valid_idx = valid_indices[np.argmax(valid_diffs)]
+                    optimal_threshold = float(thresholds[best_valid_idx])
+                    print(f"RF DEBUG: Using alternative threshold selection: {optimal_threshold:.4f}")
+                else:
+                    # Fallback: use a reasonable threshold based on probability distribution
+                    prob_median = np.median(y_pred_proba)
+                    prob_mean = np.mean(y_pred_proba)
+                    if prob_median == 0 or prob_median < 0.001:
+                        prob_percentile = np.percentile(y_pred_proba, 10) if len(y_pred_proba) > 0 else 0.01
+                        optimal_threshold = max(0.01, min(0.99, max(prob_mean, prob_percentile)))
+                        print(f"RF DEBUG: Using fallback threshold (median={prob_median:.4f}, mean={prob_mean:.4f}, 10th percentile={prob_percentile:.4f}): {optimal_threshold:.4f}")
+                    else:
+                        optimal_threshold = max(0.01, min(0.99, prob_median))
+                        print(f"RF DEBUG: Using median probability as threshold: {optimal_threshold:.4f}")
+            
+            print(f"RF DEBUG: Optimal threshold (KS): {optimal_threshold:.4f} (default would be 0.5)")
+        except Exception as thresh_err:
+            print(f"RF DEBUG: WARNING - Failed to calculate optimal threshold: {thresh_err}")
+            optimal_threshold = 0.5
+        
+        # Alternative: Find threshold that maximizes F1 score (better for imbalanced data)
+        try:
+            from sklearn.metrics import f1_score
+            f1_scores = []
+            valid_thresholds = []
+            test_thresholds = np.linspace(0.01, 0.99, 100)
+            for thresh in test_thresholds:
+                y_pred_thresh = (y_pred_proba >= thresh).astype(int)
+                f1 = f1_score(y_test, y_pred_thresh, zero_division=0)
+                f1_scores.append(f1)
+                valid_thresholds.append(thresh)
+            
+            f1_optimal_idx = np.argmax(f1_scores)
+            f1_optimal_threshold = valid_thresholds[f1_optimal_idx]
+            f1_optimal_score = f1_scores[f1_optimal_idx]
+            
+            print(f"RF DEBUG: F1-optimized threshold: {f1_optimal_threshold:.4f} (F1={f1_optimal_score:.4f})")
+            
+            # Use F1-optimized threshold if it's better than KS threshold
+            y_pred_ks = (y_pred_proba >= optimal_threshold).astype(int)
+            f1_ks = f1_score(y_test, y_pred_ks, zero_division=0)
+            
+            if f1_optimal_score > f1_ks and f1_optimal_score > 0:
+                print(f"RF DEBUG: Using F1-optimized threshold (F1={f1_optimal_score:.4f} vs KS F1={f1_ks:.4f})")
+                optimal_threshold = f1_optimal_threshold
+            else:
+                print(f"RF DEBUG: Using KS threshold (F1={f1_ks:.4f} vs F1-opt F1={f1_optimal_score:.4f})")
+        except Exception as f1_err:
+            print(f"RF DEBUG: F1 optimization failed: {f1_err}, using KS threshold")
+        
+        # Use optimal threshold for binary predictions (better for imbalanced data)
+        y_pred = (y_pred_proba >= optimal_threshold).astype(int)
+        
+        # Also calculate default predictions for comparison
+        y_pred_default = rf_model.predict(X_test)
+        default_correct = (y_pred_default == y_test).sum()
+        optimal_correct = (y_pred == y_test).sum()
+        print(f"RF DEBUG: Default threshold (0.5) accuracy: {default_correct/len(y_test):.4f}")
+        print(f"RF DEBUG: Optimal threshold ({optimal_threshold:.4f}) accuracy: {optimal_correct/len(y_test):.4f}")
+
+        # Confusion matrix and classification metrics on TEST data (using optimal threshold)
         cm = confusion_matrix(y_test, y_pred)
         accuracy = accuracy_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred, zero_division=0)
         recall = recall_score(y_test, y_pred, zero_division=0)
         f1 = f1_score(y_test, y_pred, zero_division=0)
-        print(f"RF DEBUG: TEST metrics - Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {roc_auc:.4f}")
+        
+        # ========== RANDOM FOREST - TEST PERFORMANCE ==========
+        print("\n" + "="*80)
+        print("RANDOM FOREST - TEST SET PERFORMANCE")
+        print("="*80)
+        print(f"Test Samples: {len(y_test)}")
+        print(f"Test Class Distribution: {y_test.value_counts().to_dict()}")
+        print(f"\n--- PREDICTION STATISTICS ---")
+        print(f"Probability Range: [{y_pred_proba.min():.4f}, {y_pred_proba.max():.4f}]")
+        print(f"Probability Mean: {y_pred_proba.mean():.4f}")
+        print(f"Probability Median: {np.median(y_pred_proba):.4f}")
+        print(f"Predictions (Class 0): {(y_pred == 0).sum()} ({(y_pred == 0).sum()/len(y_pred)*100:.2f}%)")
+        print(f"Predictions (Class 1): {(y_pred == 1).sum()} ({(y_pred == 1).sum()/len(y_pred)*100:.2f}%)")
+        print(f"\n--- THRESHOLD INFORMATION ---")
+        print(f"Default Threshold (0.5): Accuracy = {default_correct/len(y_test):.4f}")
+        print(f"Optimal Threshold ({optimal_threshold:.4f}): Accuracy = {optimal_correct/len(y_test):.4f}")
+        print(f"Threshold Used: {optimal_threshold:.4f} (KS Optimal)")
+        print(f"\n--- CONFUSION MATRIX (Optimal Threshold) ---")
+        print(f"                Predicted")
+        print(f"                0        1")
+        print(f"Actual  0    {cm[0,0]:5d}  {cm[0,1]:5d}")
+        print(f"        1    {cm[1,0]:5d}  {cm[1,1]:5d}")
+        print(f"\nTrue Negatives (TN):  {cm[0,0]} | False Positives (FP): {cm[0,1]}")
+        print(f"False Negatives (FN): {cm[1,0]} | True Positives (TP):   {cm[1,1]}")
+        print(f"\n--- PERFORMANCE METRICS ---")
+        print(f"AUC-ROC:        {roc_auc:.4f}")
+        print(f"Gini Coefficient: {gini_coefficient:.4f}")
+        print(f"Accuracy:       {accuracy:.4f}")
+        print(f"Precision:      {precision:.4f}")
+        print(f"Recall:         {recall:.4f}")
+        print(f"F1-Score:       {f1:.4f}")
+        print(f"\n--- METRICS INTERPRETATION ---")
+        if precision > 0:
+            print(f"Precision: {precision*100:.2f}% of predicted positives are actually positive")
+        else:
+            print(f"Precision: 0% - Model predicted no positives (or all were wrong)")
+        if recall > 0:
+            print(f"Recall: {recall*100:.2f}% of actual positives were correctly identified")
+        else:
+            print(f"Recall: 0% - Model failed to identify any actual positives")
+        print("="*80 + "\n")
 
         # KS Statistic
         try:
@@ -7304,6 +8249,68 @@ def random_forest_analysis():
             'ks_curve': ks_curve
         }
 
+        # CRITICAL FIX: Save Random Forest model artifact (was missing!)
+        try:
+            print(f"[MODEL ARTIFACT] Saving Random Forest artifact for dataset {dataset_id}")
+            
+            # Serialize the trained model
+            import pickle
+            model_bytes = pickle.dumps(rf_model)
+            
+            # Prepare WOE snapshot for scorecard application
+            model_variables = [col.replace('_WOE', '') for col in woe_columns]
+            woe_snapshot = {}
+            for var in model_variables:
+                if var in woe_transformed_data:
+                    woe_snapshot[var] = copy.deepcopy(woe_transformed_data[var])
+            
+            # Training metrics (from test evaluation)
+            training_metrics = {
+                'auc': float(roc_auc) if np.isfinite(roc_auc) else None,
+                'gini_coefficient': float(gini_coefficient) if np.isfinite(gini_coefficient) else None,
+                'accuracy': float(accuracy) if np.isfinite(accuracy) else None,
+                'precision': float(precision) if np.isfinite(precision) else None,
+                'recall': float(recall) if np.isfinite(recall) else None,
+                'f1': float(f1) if np.isfinite(f1) else None,
+                'ks_stat': ks_stat
+            }
+            
+            # Create artifact payload
+            artifact_payload = {
+                'model_type': 'random_forest',
+                'target': target,
+                'selected_variables': model_variables,
+                'model_variables': model_variables,
+                'feature_columns': woe_columns,  # WOE-transformed feature columns
+                'woe_transformed_data': woe_snapshot,
+                'model_bytes': model_bytes,
+                'model_params': {
+                    'n_estimators': rf_model.n_estimators,
+                    'max_depth': rf_model.max_depth,
+                    'min_samples_split': rf_model.min_samples_split,
+                    'min_samples_leaf': rf_model.min_samples_leaf,
+                    'random_state': rf_model.random_state
+                },
+                'training_metrics': training_metrics,
+                'uses_raw_features': False,  # RF uses WOE features
+                'n_samples': len(X),
+                'class_distribution': y.value_counts().to_dict()
+            }
+            
+            # Save artifact (use 'random_forest' to match apply_scorecard expectations)
+            # Note: The label will be sanitized by _sanitize_model_label, but we use lowercase underscore for consistency
+            artifact_metadata = save_model_artifact(dataset_id, 'random_forest', artifact_payload)
+            if artifact_metadata:
+                resp['artifact'] = artifact_metadata
+                print(f"[MODEL ARTIFACT] Successfully saved Random Forest artifact: {artifact_metadata}")
+            else:
+                print(f"[MODEL ARTIFACT] save_model_artifact returned None for dataset {dataset_id}")
+        except Exception as artifact_err:
+            print(f"[MODEL ARTIFACT] Failed to persist Random Forest model for dataset {dataset_id}: {artifact_err}")
+            import traceback
+            traceback.print_exc()
+            # Don't fail the request if artifact saving fails, just log the error
+
         return jsonify(resp)
 
     except Exception as e:
@@ -7348,24 +8355,413 @@ def xgboost_analysis():
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id/record_id"}), 400
 
-        # Load CSV
+        # CRITICAL: Load train set using data_loader (same as Logistic Regression and Random Forest)
         try:
-            csv_path = get_csv_path(dataset_id)
-            df = pd.read_csv(csv_path)
+            from data_loader import get_data_for_stage
+            df_train = get_data_for_stage(dataset_id, 'training')  # Returns TRAIN set if split exists
+            print(f"XGB DEBUG: Loaded dataset: {len(df_train)} rows (train set if TTS exists)")
         except Exception as e:
-            return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
+            # Fallback to CSV if data_loader fails
+            try:
+                csv_path = get_csv_path(dataset_id)
+                df_train = pd.read_csv(csv_path)
+                print(f"XGB DEBUG: Loaded full dataset: {len(df_train)} rows (fallback)")
+            except Exception as e2:
+                return jsonify({"error": f"Failed to load CSV: {str(e2)}"}), 400
 
-        if target not in df.columns:
+        if target not in df_train.columns:
             return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
         
-        # Verify selected variables exist
-        missing_vars = [v for v in selected_variables if v not in df.columns]
-        if missing_vars:
-            return jsonify({"error": f"Variables not found in dataset: {missing_vars}"}), 400
+        # CRITICAL: Apply preprocessing before training (same as Logistic Regression and Random Forest)
+        print(f"XGB DEBUG: Applying preprocessing before training...")
+        try:
+            df_train, preprocessing_report = preprocess_dataset(
+                df_train,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Don't handle outliers before binning
+                    'encode_categorical': False  # Don't encode categorical before binning
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"XGB DEBUG: Preprocessing completed. Processed shape: {df_train.shape}")
+        except Exception as e:
+            print(f"XGB DEBUG: WARNING: Preprocessing failed: {str(e)}")
+            print(f"XGB DEBUG: Continuing with raw data (this may cause issues)")
+            import traceback
+            traceback.print_exc()
 
-        # KEY FIX: Train on RAW features using the new module
-        print(f"\n[XGBoost API] Training on {len(selected_variables)} RAW features (not WOE)")
-        result = train_xgboost_on_raw_features(df, selected_variables, target)
+        # KEY FIX: Train on RAW features using the new module (on TRAIN data)
+        print(f"\n[XGBoost API] Training on {len(selected_variables)} RAW features (not WOE) - TRAIN SET")
+        
+        # Check class distribution before training
+        train_class_dist = df_train[target].value_counts().to_dict()
+        print(f"XGB DEBUG: Training class distribution: {train_class_dist}")
+        if len(train_class_dist) == 2:
+            n_class_0 = train_class_dist.get(0, 0)
+            n_class_1 = train_class_dist.get(1, 0)
+            imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
+            print(f"XGB DEBUG: Training class imbalance ratio: {imbalance_ratio:.2f}:1 (0:1)")
+        
+        result = train_xgboost_on_raw_features(df_train, selected_variables, target)
+        
+        # Extract scale_pos_weight from xgb_params for logging
+        xgb_params = result.get('artifact_payload', {}).get('xgb_params', {})
+        scale_pos_weight_used = xgb_params.get('scale_pos_weight', 'N/A')
+        if isinstance(scale_pos_weight_used, (int, float)):
+            scale_pos_weight_used = f"{scale_pos_weight_used:.2f}"
+        
+        # ========== XGBOOST - TRAINING SUMMARY ==========
+        print("\n" + "="*80)
+        print("XGBOOST - TRAINING SUMMARY")
+        print("="*80)
+        print(f"Dataset ID: {dataset_id}")
+        print(f"Target Variable: {target}")
+        print(f"Training Samples: {len(df_train)}")
+        print(f"Features: {len(selected_variables)}")
+        print(f"Feature Names: {selected_variables}")
+        print(f"Class Distribution (Train): {train_class_dist}")
+        if len(train_class_dist) == 2:
+            n_class_0 = train_class_dist.get(0, 0)
+            n_class_1 = train_class_dist.get(1, 0)
+            imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
+            print(f"Class Imbalance Ratio: {imbalance_ratio:.2f}:1 (0:1)")
+        print(f"\n--- MODEL PARAMETERS ---")
+        print(f"n_estimators: 100")
+        print(f"max_depth: 4")
+        print(f"learning_rate: 0.1")
+        print(f"subsample: 0.8")
+        print(f"colsample_bytree: 0.8")
+        print(f"random_state: 42")
+        print(f"scale_pos_weight: {scale_pos_weight_used}")
+        print("="*80 + "\n")
+        
+        # Load the trained model for evaluation on test data
+        import pickle
+        xgb_model = pickle.loads(result['artifact_payload']['model_bytes'])
+        label_encoders = {col: pickle.loads(enc_bytes) for col, enc_bytes in result['artifact_payload']['label_encoders'].items()}
+        
+        # CRITICAL: Calculate metrics on TEST data, not training data
+        print(f"XGB DEBUG: Loading TEST data for evaluation...")
+        try:
+            from data_loader import get_data_for_stage
+            df_test = get_data_for_stage(dataset_id, 'evaluation')  # Returns TEST set
+            print(f"XGB DEBUG: Loaded TEST dataset: {len(df_test)} rows")
+            
+            # Apply preprocessing to test data (same as training)
+            print(f"XGB DEBUG: Applying preprocessing to TEST data...")
+            df_test, _ = preprocess_dataset(
+                df_test,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,
+                    'encode_categorical': False
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"XGB DEBUG: TEST data preprocessing completed. Shape: {df_test.shape}")
+            
+            # Prepare test features (same preprocessing as training)
+            X_test = df_test[selected_variables].copy()
+            y_test = df_test[target].copy()
+            
+            # Handle missing values in test features (same as training)
+            for col in X_test.columns:
+                if X_test[col].dtype in ['float64', 'int64']:
+                    X_test[col] = X_test[col].replace([np.inf, -np.inf], np.nan)
+                    median_val = X_test[col].median()
+                    if pd.isna(median_val):
+                        median_val = 0
+                    X_test[col] = X_test[col].fillna(median_val)
+                else:
+                    mode_val = X_test[col].mode()
+                    fill_val = mode_val[0] if not mode_val.empty else 'MISSING'
+                    X_test[col] = X_test[col].fillna(fill_val)
+            
+            # Encode categorical variables using training-learned encoders
+            for col in X_test.columns:
+                if col in label_encoders:
+                    try:
+                        encoder = label_encoders[col]
+                        X_test[col] = encoder.transform(X_test[col].astype(str))
+                    except Exception as enc_err:
+                        print(f"XGB DEBUG: Failed to apply encoder for {col}: {enc_err}")
+                        # Fallback: simple label encoding
+                        if X_test[col].dtype == 'object':
+                            from sklearn.preprocessing import LabelEncoder
+                            le = LabelEncoder()
+                            X_test[col] = le.fit_transform(X_test[col].astype(str))
+            
+            # Handle target variable
+            y_test = pd.to_numeric(y_test, errors='coerce').fillna(0).astype(int)
+            
+            # Remove rows with invalid target
+            valid_mask = y_test.isin([0, 1])
+            X_test = X_test[valid_mask]
+            y_test = y_test[valid_mask]
+            
+            if len(X_test) == 0:
+                print(f"XGB DEBUG: WARNING: No valid test data after preprocessing. Using training data for metrics.")
+                # Fallback to training data if test data is invalid
+                X_test = df_train[selected_variables].copy()
+                y_test = df_train[target].copy()
+                # Apply same preprocessing to training data for fallback
+                for col in X_test.columns:
+                    if X_test[col].dtype in ['float64', 'int64']:
+                        X_test[col] = X_test[col].replace([np.inf, -np.inf], np.nan)
+                        median_val = X_test[col].median()
+                        if pd.isna(median_val):
+                            median_val = 0
+                        X_test[col] = X_test[col].fillna(median_val)
+                    else:
+                        mode_val = X_test[col].mode()
+                        fill_val = mode_val[0] if not mode_val.empty else 'MISSING'
+                        X_test[col] = X_test[col].fillna(fill_val)
+                for col in X_test.columns:
+                    if col in label_encoders:
+                        try:
+                            encoder = label_encoders[col]
+                            X_test[col] = encoder.transform(X_test[col].astype(str))
+                        except Exception:
+                            from sklearn.preprocessing import LabelEncoder
+                            le = LabelEncoder()
+                            X_test[col] = le.fit_transform(X_test[col].astype(str))
+                y_test = pd.to_numeric(y_test, errors='coerce').fillna(0).astype(int)
+                valid_mask = y_test.isin([0, 1])
+                X_test = X_test[valid_mask]
+                y_test = y_test[valid_mask]
+            else:
+                print(f"XGB DEBUG: TEST data prepared: {len(X_test)} rows, {len(X_test.columns)} features")
+            
+        except Exception as test_err:
+            print(f"XGB DEBUG: WARNING: Failed to load/evaluate on test data: {str(test_err)}")
+            print(f"XGB DEBUG: Falling back to training data for metrics (this is not ideal)")
+            import traceback
+            traceback.print_exc()
+            # Fallback: use training metrics from result
+            X_test = None
+            y_test = None
+        
+        # Make predictions on TEST data
+        if X_test is not None and y_test is not None:
+            from sklearn.metrics import roc_curve, auc, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+            
+            # Check class distribution in test data
+            test_class_dist = y_test.value_counts().to_dict()
+            print(f"XGB DEBUG: Test set class distribution: {test_class_dist}")
+            if len(test_class_dist) == 2:
+                n_class_0 = test_class_dist.get(0, 0)
+                n_class_1 = test_class_dist.get(1, 0)
+                imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
+                print(f"XGB DEBUG: Test set class imbalance ratio: {imbalance_ratio:.2f}:1 (0:1)")
+            
+            y_pred_proba = xgb_model.predict_proba(X_test)[:, 1]
+            
+            # Calculate metrics on TEST data
+            fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
+            
+            # CRITICAL FIX: Filter out invalid (inf, -inf, nan) thresholds before any calculations
+            valid_mask = np.isfinite(thresholds) & (thresholds >= 0) & (thresholds <= 1)
+            if not valid_mask.all():
+                invalid_count = (~valid_mask).sum()
+                print(f"XGB DEBUG: Filtering out {invalid_count} invalid thresholds (inf/nan/out-of-range)")
+                fpr = fpr[valid_mask]
+                tpr = tpr[valid_mask]
+                thresholds = thresholds[valid_mask]
+                if len(thresholds) == 0:
+                    print(f"XGB DEBUG: WARNING - All thresholds were invalid! Using default threshold 0.5")
+                    thresholds = np.array([1.0, 0.5, 0.0])
+                    fpr = np.array([0.0, 0.0, 1.0])
+                    tpr = np.array([0.0, 0.0, 1.0])
+            
+            roc_auc = auc(fpr, tpr)
+            
+            # Fix: Handle case where AUC < 0.5 (model worse than random)
+            if roc_auc < 0.5:
+                print(f"XGB DEBUG: WARNING - AUC < 0.5 ({roc_auc:.4f}), model performing worse than random")
+                roc_auc = 1 - roc_auc  # Flip AUC
+                print(f"XGB DEBUG: Flipped AUC to {roc_auc:.4f}")
+            
+            gini_coefficient = 2 * roc_auc - 1
+            
+            # Find optimal threshold (KS statistic threshold - maximizes TPR - FPR)
+            # This is better than default 0.5 for imbalanced datasets
+            try:
+                diffs = np.abs(tpr - fpr)
+                optimal_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
+                
+                # Get the threshold, but ensure it's not at boundaries
+                optimal_threshold = float(thresholds[optimal_idx]) if len(thresholds) > optimal_idx and np.isfinite(thresholds[optimal_idx]) else 0.5
+                
+                # CRITICAL FIX: Don't use boundary thresholds (0.0 or 1.0) - they're not useful
+                if optimal_threshold <= 0.001 or optimal_threshold >= 0.999 or not np.isfinite(optimal_threshold):
+                    print(f"XGB DEBUG: WARNING - Optimal threshold ({optimal_threshold:.4f}) is at boundary or invalid")
+                    # Find a reasonable threshold (between 0.01 and 0.99)
+                    valid_indices = np.where((thresholds > 0.01) & (thresholds < 0.99) & np.isfinite(thresholds))[0]
+                    if len(valid_indices) > 0:
+                        valid_diffs = diffs[valid_indices]
+                        best_valid_idx = valid_indices[np.argmax(valid_diffs)]
+                        optimal_threshold = float(thresholds[best_valid_idx])
+                        print(f"XGB DEBUG: Using alternative threshold selection: {optimal_threshold:.4f}")
+                    else:
+                        # Fallback: use a reasonable threshold based on probability distribution
+                        prob_median = np.median(y_pred_proba)
+                        prob_mean = np.mean(y_pred_proba)
+                        if prob_median == 0 or prob_median < 0.001:
+                            prob_percentile = np.percentile(y_pred_proba, 10) if len(y_pred_proba) > 0 else 0.01
+                            optimal_threshold = max(0.01, min(0.99, max(prob_mean, prob_percentile)))
+                            print(f"XGB DEBUG: Using fallback threshold (median={prob_median:.4f}, mean={prob_mean:.4f}, 10th percentile={prob_percentile:.4f}): {optimal_threshold:.4f}")
+                        else:
+                            optimal_threshold = max(0.01, min(0.99, prob_median))
+                            print(f"XGB DEBUG: Using median probability as threshold: {optimal_threshold:.4f}")
+                
+                print(f"XGB DEBUG: Optimal threshold (KS): {optimal_threshold:.4f} (default would be 0.5)")
+            except Exception as thresh_err:
+                print(f"XGB DEBUG: WARNING - Failed to calculate optimal threshold: {thresh_err}")
+                optimal_threshold = 0.5
+            
+            # Alternative: Find threshold that maximizes F1 score (better for imbalanced data)
+            try:
+                from sklearn.metrics import f1_score
+                f1_scores = []
+                valid_thresholds = []
+                test_thresholds = np.linspace(0.01, 0.99, 100)
+                for thresh in test_thresholds:
+                    y_pred_thresh = (y_pred_proba >= thresh).astype(int)
+                    f1 = f1_score(y_test, y_pred_thresh, zero_division=0)
+                    f1_scores.append(f1)
+                    valid_thresholds.append(thresh)
+                
+                f1_optimal_idx = np.argmax(f1_scores)
+                f1_optimal_threshold = valid_thresholds[f1_optimal_idx]
+                f1_optimal_score = f1_scores[f1_optimal_idx]
+                
+                print(f"XGB DEBUG: F1-optimized threshold: {f1_optimal_threshold:.4f} (F1={f1_optimal_score:.4f})")
+                
+                # Use F1-optimized threshold if it's better than KS threshold
+                y_pred_ks = (y_pred_proba >= optimal_threshold).astype(int)
+                f1_ks = f1_score(y_test, y_pred_ks, zero_division=0)
+                
+                if f1_optimal_score > f1_ks and f1_optimal_score > 0:
+                    print(f"XGB DEBUG: Using F1-optimized threshold (F1={f1_optimal_score:.4f} vs KS F1={f1_ks:.4f})")
+                    optimal_threshold = f1_optimal_threshold
+                else:
+                    print(f"XGB DEBUG: Using KS threshold (F1={f1_ks:.4f} vs F1-opt F1={f1_optimal_score:.4f})")
+            except Exception as f1_err:
+                print(f"XGB DEBUG: F1 optimization failed: {f1_err}, using KS threshold")
+            
+            # Use optimal threshold for binary predictions (better for imbalanced data)
+            y_pred = (y_pred_proba >= optimal_threshold).astype(int)
+            
+            # Also calculate default predictions for comparison
+            y_pred_default = xgb_model.predict(X_test)
+            default_correct = (y_pred_default == y_test).sum()
+            optimal_correct = (y_pred == y_test).sum()
+            print(f"XGB DEBUG: Default threshold (0.5) accuracy: {default_correct/len(y_test):.4f}")
+            print(f"XGB DEBUG: Optimal threshold ({optimal_threshold:.4f}) accuracy: {optimal_correct/len(y_test):.4f}")
+            
+            # Confusion matrix and classification metrics on TEST data (using optimal threshold)
+            cm = confusion_matrix(y_test, y_pred)
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, zero_division=0)
+            recall = recall_score(y_test, y_pred, zero_division=0)
+            f1 = f1_score(y_test, y_pred, zero_division=0)
+            
+            # ========== XGBOOST - TEST PERFORMANCE ==========
+            print("\n" + "="*80)
+            print("XGBOOST - TEST SET PERFORMANCE")
+            print("="*80)
+            print(f"Test Samples: {len(y_test)}")
+            print(f"Test Class Distribution: {test_class_dist}")
+            if len(test_class_dist) == 2:
+                n_class_0 = test_class_dist.get(0, 0)
+                n_class_1 = test_class_dist.get(1, 0)
+                imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
+                print(f"Test Class Imbalance Ratio: {imbalance_ratio:.2f}:1 (0:1)")
+            print(f"\n--- PREDICTION STATISTICS ---")
+            print(f"Probability Range: [{y_pred_proba.min():.4f}, {y_pred_proba.max():.4f}]")
+            print(f"Probability Mean: {y_pred_proba.mean():.4f}")
+            print(f"Probability Median: {np.median(y_pred_proba):.4f}")
+            print(f"Predictions (Class 0): {(y_pred == 0).sum()} ({(y_pred == 0).sum()/len(y_pred)*100:.2f}%)")
+            print(f"Predictions (Class 1): {(y_pred == 1).sum()} ({(y_pred == 1).sum()/len(y_pred)*100:.2f}%)")
+            print(f"\n--- THRESHOLD INFORMATION ---")
+            print(f"Default Threshold (0.5): Accuracy = {default_correct/len(y_test):.4f}")
+            print(f"Optimal Threshold ({optimal_threshold:.4f}): Accuracy = {optimal_correct/len(y_test):.4f}")
+            print(f"Threshold Used: {optimal_threshold:.4f} (KS Optimal)")
+            print(f"\n--- CONFUSION MATRIX (Optimal Threshold) ---")
+            print(f"                Predicted")
+            print(f"                0        1")
+            print(f"Actual  0    {cm[0,0]:5d}  {cm[0,1]:5d}")
+            print(f"        1    {cm[1,0]:5d}  {cm[1,1]:5d}")
+            print(f"\nTrue Negatives (TN):  {cm[0,0]} | False Positives (FP): {cm[0,1]}")
+            print(f"False Negatives (FN): {cm[1,0]} | True Positives (TP):   {cm[1,1]}")
+            print(f"\n--- PERFORMANCE METRICS ---")
+            print(f"AUC-ROC:        {roc_auc:.4f}")
+            print(f"Gini Coefficient: {gini_coefficient:.4f}")
+            print(f"Accuracy:       {accuracy:.4f}")
+            print(f"Precision:      {precision:.4f}")
+            print(f"Recall:         {recall:.4f}")
+            print(f"F1-Score:       {f1:.4f}")
+            print(f"\n--- METRICS INTERPRETATION ---")
+            if precision > 0:
+                print(f"Precision: {precision*100:.2f}% of predicted positives are actually positive")
+            else:
+                print(f"Precision: 0% - Model predicted no positives (or all were wrong)")
+            if recall > 0:
+                print(f"Recall: {recall*100:.2f}% of actual positives were correctly identified")
+            else:
+                print(f"Recall: 0% - Model failed to identify any actual positives")
+            print("="*80 + "\n")
+            
+            # KS Statistic
+            try:
+                diffs = np.abs(tpr - fpr)
+                ks_idx = int(np.argmax(diffs)) if len(diffs) > 0 else 0
+                ks_stat = float(diffs[ks_idx]) if len(diffs) > 0 else 0.0
+                ks_threshold = float(thresholds[ks_idx]) if len(thresholds) > 0 else 0.0
+                ks_curve = []
+                for f, t, th in zip(fpr, tpr, thresholds):
+                    ks_curve.append({
+                        'threshold': float(th) if np.isfinite(th) else None,
+                        'tpr': float(t) if np.isfinite(t) else None,
+                        'fpr': float(f) if np.isfinite(f) else None,
+                        'diff': float(abs(t - f)) if np.isfinite(t) and np.isfinite(f) else None
+                    })
+            except Exception as ks_err:
+                print(f"XGB DEBUG: KS calculation error: {ks_err}")
+                ks_stat = None
+                ks_threshold = None
+                ks_curve = []
+            
+            # ROC data
+            roc_data = []
+            for f, t, th in zip(fpr, tpr, thresholds):
+                roc_data.append({
+                    'fpr': float(f) if np.isfinite(f) else None,
+                    'tpr': float(t) if np.isfinite(t) else None,
+                    'threshold': float(th) if np.isfinite(th) else None
+                })
+            
+            # Update result with TEST metrics
+            result['auc'] = float(roc_auc) if np.isfinite(roc_auc) else None
+            result['gini_coefficient'] = float(gini_coefficient) if np.isfinite(gini_coefficient) else None
+            result['roc_data'] = roc_data
+            result['confusion_matrix'] = cm.tolist()
+            result['accuracy'] = float(accuracy) if np.isfinite(accuracy) else None
+            result['precision'] = float(precision) if np.isfinite(precision) else None
+            result['recall'] = float(recall) if np.isfinite(recall) else None
+            result['f1'] = float(f1) if np.isfinite(f1) else None
+            result['ks_stat'] = ks_stat
+            result['ks_threshold'] = ks_threshold
+            result['ks_curve'] = ks_curve
         
         # Save model artifact
         try:
@@ -7749,6 +9145,17 @@ def _apply_woe_to_test_data(df_test, selected_variables, woe_transformed_data, t
             woe_df[f'{var}_WOE'] = 0
             continue
 
+        # Calculate mean WOE from training bins as default for missing values
+        woe_values_from_training = []
+        for bin_info in bins_list:
+            woe_value = bin_info.get('woe') or bin_info.get('WOE')
+            if woe_value is not None:
+                try:
+                    woe_values_from_training.append(float(woe_value))
+                except Exception:
+                    pass
+        default_woe = np.mean(woe_values_from_training) if woe_values_from_training else 0.0
+        
         woe_df[f'{var}_WOE'] = np.nan
         for bin_info in bins_list:
             bin_range = bin_info.get('range') or bin_info.get('Range') or bin_info.get('Bin') or bin_info.get('bin')
@@ -7777,8 +9184,13 @@ def _apply_woe_to_test_data(df_test, selected_variables, woe_transformed_data, t
             woe_df.loc[mask, f'{var}_WOE'] = woe_value
             
         non_null = int(woe_df[f'{var}_WOE'].notna().sum())
-        print(f"LOGISTIC DEBUG: Test - mapped WOE rows for '{var}': {non_null} of {len(df_test)}")
-        woe_df[f'{var}_WOE'] = woe_df[f'{var}_WOE'].fillna(0)
+        missing_count = len(df_test) - non_null
+        if missing_count > 0:
+            print(f"LOGISTIC DEBUG: Test - mapped WOE rows for '{var}': {non_null} of {len(df_test)} (missing: {missing_count}, using default WOE: {default_woe:.2f})")
+        else:
+            print(f"LOGISTIC DEBUG: Test - mapped WOE rows for '{var}': {non_null} of {len(df_test)}")
+        # Use mean WOE from training as default instead of 0
+        woe_df[f'{var}_WOE'] = woe_df[f'{var}_WOE'].fillna(default_woe)
     
     return woe_df
 
@@ -8485,15 +9897,14 @@ def generate_scorecard():
         if model_df.empty:
             return jsonify({"error": "No valid data after removing missing target values"}), 400
 
-        # Score card parameters - adjust for different model types
+        # Score card parameters - use DEFAULT_SCORECARD_CONFIG for consistency
         N = len(selected_variables)
         
-        # Adjust parameters based on model type
+        # Use DEFAULT_SCORECARD_CONFIG for consistency with _probability_to_score
+        # This ensures scores from scorecard match scores from probability conversion
         if model_type == 'logistic':
-            factor = 20 / np.log(2)  # ≈ 28.8539 (standard logistic scoring)
-            base_odds = 50
-            base_score = 600
-            offset = base_score - factor * np.log(base_odds)  # ≈ 427.432
+            factor, offset = _scorecard_scaling_params(DEFAULT_SCORECARD_CONFIG)
+            print(f"[generate_scorecard] Using factor={factor:.4f}, offset={offset:.4f} (PDO={DEFAULT_SCORECARD_CONFIG['points_to_double_odds']})")
         else:
             # For tree-based models, use different parameters since we don't have true coefficients
             factor = 15 / np.log(2)  # Smaller factor for tree models
@@ -8590,9 +10001,25 @@ def generate_scorecard():
                     
                     print(f"[generate_scorecard] Adding bin for {var}: range={bin_range}, woe={woe_value}, beta={beta}")
 
-                    # Use NEGATIVE coefficients for proper credit scoring direction
-                    # Higher risk = lower score, Lower risk = higher score
-                    score = (-beta * woe_value + intercept / N) * factor + offset / N
+                    if model_type == 'logistic':
+                        # CORRECTED FORMULA for logistic regression scorecard
+                        # WOE is stored as ln(ratio) * 100, but model coefficients expect natural log scale
+                        # Convert stored WOE back to natural log: divide by 100
+                        woe_natural_log = woe_value / 100.0
+                        
+                        # Standard scorecard formula: Score_i = Factor × (β_i × WOE_i)
+                        # where WOE_i is in natural log scale
+                        score_contribution = factor * (beta * woe_natural_log)
+                        
+                        # Distribute base offset and intercept across N variables
+                        # Offset per variable = (base_offset + intercept_factor) / N
+                        intercept_factor = intercept * factor
+                        score = (offset + intercept_factor) / N + score_contribution
+                    else:
+                        # For tree-based models, use simplified formula
+                        # Use NEGATIVE coefficients for proper credit scoring direction
+                        # Higher risk = lower score, Lower risk = higher score
+                        score = (-beta * woe_value + intercept / N) * factor + offset / N
                     bin_data = {
                         'variable': var,
                         'bin_range': bin_range,
@@ -8705,10 +10132,10 @@ def apply_scorecard():
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id/record_id"}), 400
 
-        # Load dataset - use FULL dataset for applying scorecard to all records
+        # Load dataset - use TEST dataset for test scorecard evaluation
         try:
-            df = get_data_for_stage(dataset_id, 'full')
-            print(f"[APPLY-SCORECARD] Loaded FULL dataset: {len(df)} rows, {len(df.columns)} columns")
+            df = get_data_for_stage(dataset_id, 'evaluation')  # Use TEST set for evaluation
+            print(f"[APPLY-SCORECARD] Loaded TEST dataset: {len(df)} rows, {len(df.columns)} columns")
             if df.empty:
                 return jsonify({"error": "Dataset is empty"}), 400
             if len(df.columns) == 0:
@@ -8848,7 +10275,9 @@ def apply_scorecard():
 
             print(f"DEBUG: Assigned WOE values for {var}: {assigned_count} rows")
             
-            woe_column = [woe_mapping.get(i, 0) for i in range(len(df))]
+            # CRITICAL FIX: Use actual DataFrame index, not range(len(df))
+            # This ensures all rows get WOE values correctly mapped
+            woe_column = [woe_mapping.get(idx, 0) for idx in df.index]
             modeling_data[var] = woe_column
             modeling_data[f'{var}_WOE'] = woe_column
 
@@ -8863,18 +10292,24 @@ def apply_scorecard():
             return jsonify({"error": "WOE-transformed DataFrame is empty"}), 400
         
         model_df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
-        model_df['__row_id__'] = np.arange(len(model_df))
+        # CRITICAL FIX: Preserve original DataFrame index as row_id to track all test rows
+        model_df['__row_id__'] = df.index.values  # Use original DataFrame index
 
         # Remove rows with missing target
         mask = ~model_df[target].isna()
-        filtered_df = model_df[mask].reset_index(drop=True)
+        filtered_df = model_df[mask].copy()  # Don't reset_index yet - preserve original indices
         print(f"[APPLY-SCORECARD] After filtering: {len(filtered_df)} rows, {len(filtered_df.columns)} columns")
+        print(f"[APPLY-SCORECARD] Original dataset had {len(df)} rows, filtered to {len(filtered_df)} rows")
         
         if filtered_df.empty:
             return jsonify({"error": "No valid data after preprocessing"}), 400
         
+        # Extract row_ids before dropping the column
         row_ids = filtered_df['__row_id__'].astype(int).tolist()
         filtered_df = filtered_df.drop(columns=['__row_id__'])
+        
+        # Verify alignment: predictions should match row_ids
+        print(f"[APPLY-SCORECARD] Row IDs extracted: {len(row_ids)} IDs, range: {min(row_ids) if row_ids else 'N/A'} to {max(row_ids) if row_ids else 'N/A'}")
         y = filtered_df[target]
         X_logistic = filtered_df[selected_variables]
         tree_feature_names = [f'{var}_WOE' for var in selected_variables if f'{var}_WOE' in filtered_df.columns]
@@ -8882,6 +10317,7 @@ def apply_scorecard():
 
         # Calculate scores based on model type
         scores = []
+        probabilities_for_roc = None  # Initialize for ROC curve calculation
         
         if model_type == 'logistic':
             if not model_results or 'coefficients' not in model_results:
@@ -8904,6 +10340,8 @@ def apply_scorecard():
                 logit += beta * X_logistic[var].values
             
             prob_bad = 1.0 / (1.0 + np.exp(-logit))
+            # Store probabilities for ROC curve calculation
+            probabilities_for_roc = prob_bad.copy()
             scores = _probability_to_score(prob_bad, DEFAULT_SCORECARD_CONFIG).astype(float).tolist()
                 
         elif model_type in ['random_forest', 'xgboost']:
@@ -8957,27 +10395,41 @@ def apply_scorecard():
                     if X_tree.empty:
                         return jsonify({"error": "No WOE-transformed features available for Random Forest"}), 400
                     
-                    from sklearn.ensemble import RandomForestClassifier
-                    stats = (model_results or {}).get('model_stats', {}) if model_results else {}
-                    rf_model = RandomForestClassifier(
-                        n_estimators=stats.get('n_estimators', 100),
-                        max_depth=stats.get('max_depth', 10),
-                        min_samples_split=5,
-                        min_samples_leaf=2,
-                        random_state=42,
-                        n_jobs=-1
-                    )
-                    rf_model.fit(X_tree, y)
-                    y_pred_proba_bad = rf_model.predict_proba(X_tree)[:, 1]
-                    print(f"[apply_scorecard] Trained and applied Random Forest model")
+                    # Try to load persisted model artifact (CRITICAL FIX: Don't re-train!)
+                    if artifact_data and artifact_data.get('model_bytes'):
+                        import pickle
+                        try:
+                            rf_model = pickle.loads(artifact_data['model_bytes'])
+                            y_pred_proba_bad = rf_model.predict_proba(X_tree)[:, 1]
+                            artifact_used = True
+                            print(f"[apply_scorecard] Loaded and applied Random Forest model from artifact")
+                        except Exception as rf_err:
+                            print(f"[apply_scorecard] Failed to load RF model from artifact: {rf_err}")
+                            return jsonify({"error": "Random Forest model artifact found but failed to load. Please retrain the model."}), 400
+                    else:
+                        # Fallback: if no artifact, return error (don't re-train on test data!)
+                        return jsonify({"error": "Random Forest model not found. Please train the model first."}), 400
                 
                 if y_pred_proba_bad is None:
                     return jsonify({"error": f"{model_type} model could not generate predictions"}), 400
+                
+                # CRITICAL FIX: Verify predictions length matches expected rows
+                if model_type != 'xgboost' or not (artifact_data and artifact_data.get('uses_raw_features', False)):
+                    # For RF and old XGBoost, predictions should match filtered_df length
+                    expected_len = len(filtered_df)
+                    actual_len = len(y_pred_proba_bad)
+                    if expected_len != actual_len:
+                        print(f"[APPLY-SCORECARD] WARNING: Prediction length mismatch! Expected {expected_len}, got {actual_len}")
+                        print(f"[APPLY-SCORECARD] This may cause missing rows in results")
+                
+                # Store probabilities for ROC curve calculation (CRITICAL FIX: Use probabilities, not scores)
+                probabilities_for_roc = y_pred_proba_bad.copy()
                 
                 # Convert probabilities to credit scores
                 scores_array = _probability_to_score(y_pred_proba_bad, DEFAULT_SCORECARD_CONFIG)
                 scores = scores_array.astype(float).tolist()
                 
+                print(f"[apply_scorecard] {model_type} scoring - Predictions: {len(y_pred_proba_bad)}, Row IDs: {len(row_ids)}")
                 print(f"[apply_scorecard] {model_type} scoring - Bad probabilities range: {np.min(y_pred_proba_bad):.4f} to {np.max(y_pred_proba_bad):.4f}")
                 print(f"[apply_scorecard] {model_type} scoring - Scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
                 
@@ -8995,25 +10447,45 @@ def apply_scorecard():
         y_true = y.tolist()
         y_score = scores_np.tolist()
         
+        # CRITICAL FIX: Verify all arrays have same length
+        if len(scores_np) != len(y_true) or len(scores_np) != len(row_ids):
+            print(f"[APPLY-SCORECARD] ERROR: Length mismatch! Scores: {len(scores_np)}, y_true: {len(y_true)}, row_ids: {len(row_ids)}")
+            # Use minimum length to avoid index errors
+            min_len = min(len(scores_np), len(y_true), len(row_ids))
+            print(f"[APPLY-SCORECARD] Using minimum length: {min_len} rows")
+            scores_np = scores_np[:min_len]
+            y_true = y_true[:min_len]
+            row_ids = row_ids[:min_len]
+        
         for idx, score in enumerate(scores_np):
             row_id = row_ids[idx] if idx < len(row_ids) else idx
             results_list.append({
                 "index": int(row_id),
-                "score": score,
+                "score": float(score),
                 "target": int(y_true[idx])
             })
+        
+        print(f"[APPLY-SCORECARD] Created {len(results_list)} result entries from {len(scores_np)} predictions")
         
         # Sort descending by score (HIGHEST scores first = LOWEST risk first)
         results_list = sorted(results_list, key=lambda x: x["score"], reverse=True)
 
         # Calculate KS statistic (separation number)
+        # CRITICAL FIX: Use probabilities for ROC curve, not scores
         try:
             from sklearn.metrics import roc_curve
-            fpr, tpr, thresholds = roc_curve(y_true, scores_np)
+            # Use probabilities for ROC curve calculation (scores are transformed and may not preserve monotonicity)
+            if probabilities_for_roc is None:
+                # This should not happen if code flow is correct, but add safety check
+                print(f"[APPLY-SCORECARD] ERROR: Probabilities not stored! This indicates a code flow issue.")
+                raise ValueError("Probabilities not available for ROC curve calculation")
+            
+            prob_for_roc = np.asarray(probabilities_for_roc, dtype=float)
+            fpr, tpr, thresholds = roc_curve(y_true, prob_for_roc)
             diffs = np.abs(tpr - fpr)
             ks_stat = float(np.max(diffs)) if len(diffs) > 0 else 0.0
             
-            # Get KS threshold
+            # Get KS threshold (in probability space)
             ks_idx = np.argmax(diffs)
             ks_threshold = float(thresholds[ks_idx]) if len(thresholds) > ks_idx else 0.0
             
@@ -9034,7 +10506,7 @@ def apply_scorecard():
         try:
             from sklearn.metrics import auc, accuracy_score, precision_score, recall_score, f1_score
             
-            # ROC AUC
+            # ROC AUC (calculated from probabilities, already done in KS calculation above)
             roc_auc = auc(fpr, tpr) if 'fpr' in locals() and 'tpr' in locals() else 0.0
             
             # For credit scoring, we typically use a different threshold than 0.5

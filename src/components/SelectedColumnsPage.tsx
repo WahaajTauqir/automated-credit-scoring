@@ -1,5 +1,5 @@
 import { useLocation } from 'react-router-dom';
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo, memo } from 'react';
 import LogisticRegressionResults from './LogisticRegressionResults';
 import Navbar from './Navbar';
 import RandomForestResults from './RandomForestResults';
@@ -46,6 +46,145 @@ import {
   Line,
   Legend,
 } from 'recharts';
+
+// Memoized AutoBinningCard component to prevent unnecessary re-renders
+interface AutoBinningCardProps {
+  col: string;
+  woeData: any;
+  isLoading: boolean;
+  isSelected: boolean;
+  onToggle: (col: string) => void;
+  onConfigureManually: (col: string) => void;
+  continuousColumns: string[];
+}
+
+const AutoBinningCard = memo(({ 
+  col, 
+  woeData, 
+  isLoading, 
+  isSelected, 
+  onToggle,
+  onConfigureManually,
+  continuousColumns 
+}: AutoBinningCardProps) => {
+  const woeStats: NormalizedBin[] = woeData?.stats ?? [];
+  const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
+
+  const chartData = useMemo(() => {
+    return woeStats
+      .map((s, idx) => {
+        const label = getBinLabelValue(s, idx);
+        const order = typeof s.Min === 'number'
+          ? s.Min
+          : getNumericOrderFromLabel(label) ?? idx;
+        return {
+          bin: label,
+          WOE: Number(s.WOE ?? 0),
+          order
+        };
+      })
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  }, [woeStats]); // Only recalculate when woeStats changes
+
+  const isContinuous = (continuousColumns || []).includes(col);
+  const varTypeTag = isContinuous ? 'continuous' : 'discrete';
+
+  return (
+    <div className="auto-binning-card">
+      <div className="auto-binning-card-header">
+        <input
+          type="checkbox"
+          className="fancy-checkbox"
+          checked={isSelected}
+          onChange={(e) => {
+            e.stopPropagation();
+            onToggle(col);
+          }}
+          aria-label={`Select ${col} for modeling`}
+        />
+        <h4>{col}</h4>
+        <span className={`var-type-tag ${varTypeTag}`}>
+          {varTypeTag}
+        </span>
+      </div>
+
+      <div className="auto-binning-chart">
+        <div className="chart-label">WOE Graph</div>
+        {isLoading ? (
+          <div className="loading-placeholder">
+            <span>Loading...</span>
+          </div>
+        ) : chartData.length > 0 ? (
+          <ResponsiveContainer width="100%" height={120}>
+            <LineChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
+              <XAxis
+                dataKey="bin"
+                tick={{ fontSize: 10, fill: '#8b949e' }}
+                interval={0}
+                angle={-45}
+                textAnchor="end"
+                height={60}
+              />
+              <YAxis tick={{ fontSize: 10, fill: '#8b949e' }} />
+              <Tooltip
+                contentStyle={{
+                  background: '#0d1117',
+                  border: '1px solid #30363d',
+                  borderRadius: '6px',
+                  fontSize: '12px'
+                }}
+              />
+              <Line
+                type="monotone"
+                dataKey="WOE"
+                stroke="#2ea043"
+                strokeWidth={2}
+                dot={{ r: 3, fill: '#2ea043' }}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="no-data-placeholder">
+            <span>No WOE data available</span>
+          </div>
+        )}
+      </div>
+
+      <div className="auto-binning-footer">
+        <div className="iv-display">
+          <span className="iv-label">Total IV:</span>
+          <span className={`iv-value ${totalIV < 0.02 ? 'weak' : totalIV < 0.1 ? 'medium' : 'strong'}`}>
+            {totalIV.toFixed(4)}
+          </span>
+        </div>
+        <button
+          className="configure-manually-btn"
+          onClick={() => onConfigureManually(col)}
+        >
+          Configure Manually
+        </button>
+      </div>
+    </div>
+  );
+}, (prevProps, nextProps) => {
+  // Custom comparison function - only re-render if relevant props change
+  // Compare woeData by checking if the stats array reference changed
+  const prevStats = prevProps.woeData?.stats;
+  const nextStats = nextProps.woeData?.stats;
+  const woeDataEqual = prevStats === nextStats; // Reference equality - if stats array hasn't changed, don't re-render
+  
+  return (
+    prevProps.col === nextProps.col &&
+    prevProps.isSelected === nextProps.isSelected &&
+    prevProps.isLoading === nextProps.isLoading &&
+    woeDataEqual &&
+    prevProps.continuousColumns === nextProps.continuousColumns
+  );
+});
+
+AutoBinningCard.displayName = 'AutoBinningCard';
+
 const SelectedColumnsPage = () => {
   const { state } = useLocation();
   const {
@@ -1568,8 +1707,12 @@ const SelectedColumnsPage = () => {
                 // Update selectedForModeling to include all model_ready features
                 setSelectedForModeling((prev) => {
                   const newSet = new Set([...prev, ...modelReadyFeatures]);
-                  return Array.from(newSet);
+                  const updated = Array.from(newSet);
+                  console.log(`[runAutoMonotonicBinning] Synced ${modelReadyFeatures.length} model_ready features for ${col}:`, modelReadyFeatures);
+                  return updated;
                 });
+              } else {
+                console.log(`[runAutoMonotonicBinning] No model_ready features found after binning ${col}`);
               }
             }
           }
@@ -1646,12 +1789,16 @@ const SelectedColumnsPage = () => {
             .filter(Boolean);
           
           if (modelReadyFeatures.length > 0) {
-            // Update selectedForModeling to include all model_ready features
+            // Replace selectedForModeling with all model_ready features (not just add to existing)
+            // This ensures checkboxes reflect the actual model_ready state from database
             setSelectedForModeling((prev) => {
               const newSet = new Set([...prev, ...modelReadyFeatures]);
-              return Array.from(newSet);
+              const updated = Array.from(newSet);
+              console.log(`Synced ${modelReadyFeatures.length} model_ready features to checkboxes (total: ${updated.length}):`, modelReadyFeatures);
+              return updated;
             });
-            console.log(`Synced ${modelReadyFeatures.length} model_ready features to checkboxes:`, modelReadyFeatures);
+          } else {
+            console.log('No model_ready features found to sync');
           }
         }
       }
@@ -1672,10 +1819,20 @@ const SelectedColumnsPage = () => {
       
       if (response.ok) {
         const data = await response.json();
-        console.log(`Marked ${data.count} monotonic features as model_ready:`, data.features);
+        if (data.success) {
+          console.log(`[markMonotonicAsModelReady] Successfully marked ${data.count} monotonic features as model_ready:`, data.features);
+          if (data.count === 0) {
+            console.warn(`[markMonotonicAsModelReady] No monotonic features found to mark as model_ready`);
+          }
+        } else {
+          console.error(`[markMonotonicAsModelReady] Failed:`, data.error || data.message);
+        }
+      } else {
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        console.error(`[markMonotonicAsModelReady] HTTP error ${response.status}:`, errorData);
       }
     } catch (err) {
-      console.error('Error marking monotonic features as model_ready:', err);
+      console.error('[markMonotonicAsModelReady] Error marking monotonic features as model_ready:', err);
     }
   };
 
@@ -1714,9 +1871,21 @@ const SelectedColumnsPage = () => {
       }
       
       // After all autobinning is complete, fetch sorted features, mark monotonic as model_ready, and sync checkboxes
+      console.log('[runAllAutoMonotonicFineBinning] Starting post-processing: marking monotonic features and syncing checkboxes...');
       await fetchAndSortFeatures();
+      
+      // Small delay to ensure all database writes from individual binning operations are complete
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      console.log('[runAllAutoMonotonicFineBinning] Marking all monotonic features as model_ready...');
       await markMonotonicAsModelReady();
+      
+      // Small delay to ensure database update is complete before syncing
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      console.log('[runAllAutoMonotonicFineBinning] Syncing model_ready checkboxes...');
       await syncModelReadyCheckboxes();
+      console.log('[runAllAutoMonotonicFineBinning] Post-processing complete');
       
       showNotification(
         `All Auto Monotonic Fine Binning completed: ${successCount} successful, ${errorCount} errors`
@@ -2569,108 +2738,23 @@ const SelectedColumnsPage = () => {
                 ) : (
                   <div className="auto-binning-grid">
                     {selectedColumns.map((col) => {
-                    const woeData = woeIvResults[col];
-                    const isLoading = loadingColumns.has(col);
+                      const woeData = woeIvResults[col];
+                      const isLoading = loadingColumns.has(col);
+                      const isSelected = selectedForModeling.includes(col);
 
-                    const woeStats: NormalizedBin[] = woeData?.stats ?? [];
-                    const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
-
-                    const chartData = woeStats
-                      .map((s, idx) => {
-                        const label = getBinLabelValue(s, idx);
-                        const order = typeof s.Min === 'number'
-                          ? s.Min
-                          : getNumericOrderFromLabel(label) ?? idx;
-                        return {
-                          bin: label,
-                          WOE: Number(s.WOE ?? 0),
-                          order
-                        };
-                      })
-                      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-
-                    const isContinuous = (continuousColumns || []).includes(col);
-                    const varTypeTag = isContinuous ? 'continuous' : 'discrete';
-
-                    return (
-                      <div key={col} className="auto-binning-card">
-                        <div className="auto-binning-card-header">
-                          <input
-                            type="checkbox"
-                            className="fancy-checkbox"
-                            checked={selectedForModeling.includes(col)}
-                            onChange={(e) => {
-                              e.stopPropagation();
-                              toggleSelectedForModeling(col);
-                            }}
-                            aria-label={`Select ${col} for modeling`}
-                          />
-                          <h4>{col}</h4>
-                          <span className={`var-type-tag ${varTypeTag}`}>
-                            {varTypeTag}
-                          </span>
-                        </div>
-
-                        <div className="auto-binning-chart">
-                          <div className="chart-label">WOE Graph</div>
-                          {isLoading ? (
-                            <div className="loading-placeholder">
-                              <span>Loading...</span>
-                            </div>
-                          ) : chartData.length > 0 ? (
-                            <ResponsiveContainer width="100%" height={120}>
-                              <LineChart data={chartData}>
-                                <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
-                                <XAxis
-                                  dataKey="bin"
-                                  tick={{ fontSize: 10, fill: '#8b949e' }}
-                                  interval={0}
-                                  angle={-45}
-                                  textAnchor="end"
-                                  height={60}
-                                />
-                                <YAxis tick={{ fontSize: 10, fill: '#8b949e' }} />
-                                <Tooltip
-                                  contentStyle={{
-                                    background: '#0d1117',
-                                    border: '1px solid #30363d',
-                                    borderRadius: '6px',
-                                    fontSize: '12px'
-                                  }}
-                                />
-                                <Line
-                                  type="monotone"
-                                  dataKey="WOE"
-                                  stroke="#2ea043"
-                                  strokeWidth={2}
-                                  dot={{ r: 3, fill: '#2ea043' }}
-                                />
-                              </LineChart>
-                            </ResponsiveContainer>
-                          ) : (
-                            <div className="no-data-placeholder">
-                              <span>No WOE data available</span>
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="auto-binning-footer">
-                          <div className="iv-display">
-                            <span className="iv-label">Total IV:</span>
-                            <span className={`iv-value ${totalIV < 0.02 ? 'weak' : totalIV < 0.1 ? 'medium' : 'strong'}`}>
-                              {totalIV.toFixed(4)}
-                            </span>
-                          </div>
-                          <button
-                            className="configure-manually-btn"
-                            onClick={() => handleConfigureManually(col)}
-                          >
-                            Configure Manually
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
+                      return (
+                        <AutoBinningCard
+                          key={col}
+                          col={col}
+                          woeData={woeData}
+                          isLoading={isLoading}
+                          isSelected={isSelected}
+                          onToggle={toggleSelectedForModeling}
+                          onConfigureManually={handleConfigureManually}
+                          continuousColumns={continuousColumns || []}
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </div>
