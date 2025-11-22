@@ -18,6 +18,7 @@ from sklearn.model_selection import train_test_split
 from typing import Tuple, Dict, Optional
 import hashlib
 import os
+from config import DEFAULT_TEST_SIZE, DEFAULT_RANDOM_STATE, MIN_TEST_BAD_CASES
 
 
 def calculate_data_hash(df: pd.DataFrame, target: str) -> str:
@@ -47,9 +48,9 @@ def calculate_data_hash(df: pd.DataFrame, target: str) -> str:
 def create_stratified_split(
     df: pd.DataFrame,
     target: str,
-    test_size: float = 0.2,
-    random_state: int = 42,
-    min_test_bad: int = 30
+    test_size: float = DEFAULT_TEST_SIZE,
+    random_state: int = DEFAULT_RANDOM_STATE,
+    min_test_bad: int = MIN_TEST_BAD_CASES
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
     """
     Create stratified train/test split BEFORE any preprocessing.
@@ -61,7 +62,7 @@ def create_stratified_split(
     target : str
         Target column name
     test_size : float
-        Proportion for test set (default 0.2 for 20%)
+        Proportion for test set (default from config.py: DEFAULT_TEST_SIZE)
     random_state : int
         Random seed for reproducibility
     min_test_bad : int
@@ -70,9 +71,9 @@ def create_stratified_split(
     Returns:
     --------
     train_df : DataFrame
-        Training set (80% of data by default)
+        Training set (70% of data by default)
     test_df : DataFrame
-        Test set (20% of data by default) - LOCKED until final evaluation
+        Test set (30% of data by default) - LOCKED until final evaluation
     split_info : dict
         Information about the split
     """
@@ -94,15 +95,15 @@ def create_stratified_split(
     if n_bad < 10:
         raise ValueError(f"Insufficient bad cases ({n_bad}). Need at least 10 for meaningful split.")
     
-    # STRICT 80/20 SPLIT: Always use the requested test_size (0.2 for 20%)
+    # STRICT SPLIT: Always use the requested test_size (from config.py by default)
     # Only warn if test set will have very few bad cases, but don't adjust
-    actual_test_size = test_size  # Always use the requested size (0.2 for 80/20)
+    actual_test_size = test_size  # Always use the requested size
     expected_test_bad = int(n_bad * actual_test_size)
     
     if expected_test_bad < min_test_bad:
         print(f"[SPLIT] ⚠️  WARNING: Test set will have only ~{expected_test_bad} bad cases (recommended: {min_test_bad})")
         print(f"[SPLIT] ⚠️  Consider collecting more data or reducing min_test_bad requirement")
-        print(f"[SPLIT] ⚠️  Proceeding with {actual_test_size:.1%} test size as requested (80/20 split)")
+        print(f"[SPLIT] ⚠️  Proceeding with {actual_test_size:.1%} test size as requested (70/30 split)")
     else:
         print(f"[SPLIT] Test set will have ~{expected_test_bad} bad cases (sufficient for evaluation)")
     
@@ -157,7 +158,7 @@ def create_stratified_split(
     
     split_info = {
         'seed': random_state,
-        'test_size': float(actual_test_size),  # Proportion (0.2 for 20%)
+        'test_size': float(actual_test_size),  # Proportion from config.py
         'method': 'stratified',
         'train_size': len(train_df),
         'test_size_count': len(test_df),  # Count of test rows
@@ -170,6 +171,48 @@ def create_stratified_split(
         'original_bad_rate': float(bad_rate),
         'stratification_success': stratification_success
     }
+    
+    # Print ASSIGNED_STORE_ID values after TTS
+    column_name = "ASSIGNED_STORE_ID"
+    print(f"\n{'='*80}")
+    print(f"[TTS] ASSIGNED_STORE_ID Column Values After Train-Test Split")
+    print(f"{'='*80}")
+    
+    if column_name in train_df.columns:
+        train_values = train_df[column_name].dropna().unique()
+        train_value_counts = train_df[column_name].value_counts()
+        print(f"\n[TTS] TRAIN SET - ASSIGNED_STORE_ID:")
+        print(f"  Total rows: {len(train_df)}")
+        print(f"  Non-null rows: {train_df[column_name].notna().sum()}")
+        print(f"  Null rows: {train_df[column_name].isna().sum()}")
+        print(f"  Unique values: {len(train_values)}")
+        print(f"  All unique values: {sorted(train_values.tolist())}")
+        print(f"  Value counts:")
+        for val, count in train_value_counts.head(20).items():
+            print(f"    {val}: {count}")
+        if len(train_value_counts) > 20:
+            print(f"    ... and {len(train_value_counts) - 20} more values")
+    else:
+        print(f"\n[TTS] TRAIN SET - Column '{column_name}' NOT FOUND")
+    
+    if column_name in test_df.columns:
+        test_values = test_df[column_name].dropna().unique()
+        test_value_counts = test_df[column_name].value_counts()
+        print(f"\n[TTS] TEST SET - ASSIGNED_STORE_ID:")
+        print(f"  Total rows: {len(test_df)}")
+        print(f"  Non-null rows: {test_df[column_name].notna().sum()}")
+        print(f"  Null rows: {test_df[column_name].isna().sum()}")
+        print(f"  Unique values: {len(test_values)}")
+        print(f"  All unique values: {sorted(test_values.tolist())}")
+        print(f"  Value counts:")
+        for val, count in test_value_counts.head(20).items():
+            print(f"    {val}: {count}")
+        if len(test_value_counts) > 20:
+            print(f"    ... and {len(test_value_counts) - 20} more values")
+    else:
+        print(f"\n[TTS] TEST SET - Column '{column_name}' NOT FOUND")
+    
+    print(f"{'='*80}\n")
     
     return train_df, test_df, split_info
 
@@ -316,8 +359,8 @@ def get_or_create_train_test_split(
     df: pd.DataFrame,
     target: str,
     dataset_id: int,
-    test_size: float = 0.2,
-    random_state: int = 42,
+    test_size: float = DEFAULT_TEST_SIZE,
+    random_state: int = DEFAULT_RANDOM_STATE,
     force_recalculate: bool = False,
     check_data_hash: bool = True
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:

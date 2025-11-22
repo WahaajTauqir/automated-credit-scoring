@@ -11,6 +11,7 @@ import PreprocessingDetails from './PreprocessingDetails';
 import './SelectedColumnsPage.css';
 import { buildBinningState, buildTypeLookup, normalizeBinArray, prepareBinMetricsPayload } from '../utils/binning';
 import { NormalizedBin, NormalizedBinningState } from '../types/analysis';
+import { DEFAULT_TEST_SIZE } from '../config';
 
 const normalizeDisplayLabel = (value: string) => value.replace(/\s+/g, ' ').trim();
 
@@ -643,7 +644,7 @@ const SelectedColumnsPage = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             dataset_id: recordId,
-            test_size: 0.2  // 20% test, 80% train
+            test_size: DEFAULT_TEST_SIZE
           })
         });
 

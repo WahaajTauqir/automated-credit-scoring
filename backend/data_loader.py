@@ -66,6 +66,48 @@ def get_train_test_data(dataset_id: int) -> Tuple[Optional[pd.DataFrame], Option
         method=split_info['method']
     )
     
+    # Print ASSIGNED_STORE_ID values when split is loaded
+    column_name = "ASSIGNED_STORE_ID"
+    print(f"\n{'='*80}")
+    print(f"[DATA_LOADER] ASSIGNED_STORE_ID Column Values After Loading Train-Test Split")
+    print(f"{'='*80}")
+    
+    if column_name in train_df.columns:
+        train_values = train_df[column_name].dropna().unique()
+        train_value_counts = train_df[column_name].value_counts()
+        print(f"\n[DATA_LOADER] TRAIN SET - ASSIGNED_STORE_ID:")
+        print(f"  Total rows: {len(train_df)}")
+        print(f"  Non-null rows: {train_df[column_name].notna().sum()}")
+        print(f"  Null rows: {train_df[column_name].isna().sum()}")
+        print(f"  Unique values: {len(train_values)}")
+        print(f"  All unique values: {sorted(train_values.tolist())}")
+        print(f"  Value counts:")
+        for val, count in train_value_counts.head(20).items():
+            print(f"    {val}: {count}")
+        if len(train_value_counts) > 20:
+            print(f"    ... and {len(train_value_counts) - 20} more values")
+    else:
+        print(f"\n[DATA_LOADER] TRAIN SET - Column '{column_name}' NOT FOUND")
+    
+    if column_name in test_df.columns:
+        test_values = test_df[column_name].dropna().unique()
+        test_value_counts = test_df[column_name].value_counts()
+        print(f"\n[DATA_LOADER] TEST SET - ASSIGNED_STORE_ID:")
+        print(f"  Total rows: {len(test_df)}")
+        print(f"  Non-null rows: {test_df[column_name].notna().sum()}")
+        print(f"  Null rows: {test_df[column_name].isna().sum()}")
+        print(f"  Unique values: {len(test_values)}")
+        print(f"  All unique values: {sorted(test_values.tolist())}")
+        print(f"  Value counts:")
+        for val, count in test_value_counts.head(20).items():
+            print(f"    {val}: {count}")
+        if len(test_value_counts) > 20:
+            print(f"    ... and {len(test_value_counts) - 20} more values")
+    else:
+        print(f"\n[DATA_LOADER] TEST SET - Column '{column_name}' NOT FOUND")
+    
+    print(f"{'='*80}\n")
+    
     return train_df, test_df, True
 
 

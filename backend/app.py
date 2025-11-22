@@ -60,6 +60,7 @@ import traceback
 import logging
 from auto_monotonic_binning import auto_monotonic_binning, compute_woe, compute_iv
 from data_loader import get_data_for_stage, get_csv_path, get_train_test_data
+from config import DEFAULT_TEST_SIZE
 import ast
 
 # Optional: load environment variables from a .env file if present
@@ -680,6 +681,35 @@ def _row_to_native_types(row: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _clean_nan_values(obj: Any) -> Any:
+    """Recursively clean NaN and inf values from dictionaries, lists, and primitives for JSON serialization."""
+    if obj is None:
+        return None
+    elif isinstance(obj, dict):
+        return {k: _clean_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_clean_nan_values(item) for item in obj]
+    elif isinstance(obj, (float, np.floating)):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return float(obj)
+    elif hasattr(obj, 'item'):  # NumPy scalar
+        try:
+            val = obj.item()
+            if isinstance(val, (float, np.floating)) and (np.isnan(val) or np.isinf(val)):
+                return None
+            return val
+        except Exception:
+            return obj
+    elif isinstance(obj, Decimal):
+        val = float(obj)
+        if np.isnan(val) or np.isinf(val):
+            return None
+        return val
+    else:
+        return obj
+
+
 DEFAULT_SCORECARD_CONFIG = {
     "min_score": 300,
     "max_score": 850,
@@ -765,8 +795,16 @@ def detect_column_types(df, sample_size=1000):
             return 'discrete'
 
         # 3. Analyze Sample Values
-        if not samples:
-            return 'discrete' # Default to discrete when no data
+        # Check if samples is empty (handle both Series and list)
+        if hasattr(samples, 'empty'):
+            if samples.empty:
+                return 'discrete' # Default to discrete when no data
+        elif hasattr(samples, '__len__'):
+            if len(samples) == 0:
+                return 'discrete' # Default to discrete when no data
+        else:
+            if not samples:
+                return 'discrete' # Default to discrete when no data
 
         try:
             # Handle pandas Series/DataFrame samples
@@ -1250,6 +1288,33 @@ def preprocess_dataset(df, target_col=None, preprocessing_steps=None, missing_th
     # Debug: Final state
     _debug_print_column_row_counts(df_processed, "FINAL STATE (After All Preprocessing)")
     
+    # Print ASSIGNED_STORE_ID values after preprocessing
+    column_name = "ASSIGNED_STORE_ID"
+    print(f"\n{'='*80}")
+    print(f"[PREPROCESSING] ASSIGNED_STORE_ID Column Values After Preprocessing")
+    print(f"{'='*80}")
+    
+    if column_name in df_processed.columns:
+        processed_values = df_processed[column_name].dropna().unique()
+        processed_value_counts = df_processed[column_name].value_counts()
+        print(f"\n[PREPROCESSING] Processed DataFrame - ASSIGNED_STORE_ID:")
+        print(f"  Total rows: {len(df_processed)}")
+        print(f"  Non-null rows: {df_processed[column_name].notna().sum()}")
+        print(f"  Null rows: {df_processed[column_name].isna().sum()}")
+        print(f"  Unique values: {len(processed_values)}")
+        print(f"  All unique values: {sorted(processed_values.tolist())}")
+        print(f"  Value counts:")
+        for val, count in processed_value_counts.head(20).items():
+            print(f"    {val}: {count}")
+        if len(processed_value_counts) > 20:
+            print(f"    ... and {len(processed_value_counts) - 20} more values")
+    else:
+        print(f"\n[PREPROCESSING] Column '{column_name}' NOT FOUND in processed dataframe")
+        print(f"  (Column may have been removed during preprocessing)")
+        print(f"  Available columns: {list(df_processed.columns)[:20]}...")
+    
+    print(f"{'='*80}\n")
+    
     preprocessing_report['final_shape'] = df_processed.shape
     preprocessing_report['processed_columns'] = {
         'discrete': discrete_cols,
@@ -1708,28 +1773,45 @@ def preprocessing_column_changes():
                 original_stats = None
                 coefficient_of_variation = None
                 if pd.api.types.is_numeric_dtype(processed_series):
+                    # Helper function to safely convert pandas values to float, handling NaN
+                    def safe_float(val):
+                        if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
+                            return None
+                        try:
+                            fval = float(val)
+                            if np.isnan(fval) or np.isinf(fval):
+                                return None
+                            return fval
+                        except (ValueError, TypeError):
+                            return None
+                    
                     original_stats = {
-                        'min': float(original_series.min()) if not original_series.empty else None,
-                        'max': float(original_series.max()) if not original_series.empty else None,
-                        'mean': float(original_series.mean()) if not original_series.empty else None,
-                        'std': float(original_series.std()) if not original_series.empty else None,
-                        'median': float(original_series.median()) if not original_series.empty else None
+                        'min': safe_float(original_series.min()) if not original_series.empty else None,
+                        'max': safe_float(original_series.max()) if not original_series.empty else None,
+                        'mean': safe_float(original_series.mean()) if not original_series.empty else None,
+                        'std': safe_float(original_series.std()) if not original_series.empty else None,
+                        'median': safe_float(original_series.median()) if not original_series.empty else None
                     }
                     
                     processed_stats = {
-                        'min': float(processed_series.min()) if not processed_series.empty else None,
-                        'max': float(processed_series.max()) if not processed_series.empty else None,
-                        'mean': float(processed_series.mean()) if not processed_series.empty else None,
-                        'std': float(processed_series.std()) if not processed_series.empty else None,
-                        'median': float(processed_series.median()) if not processed_series.empty else None
+                        'min': safe_float(processed_series.min()) if not processed_series.empty else None,
+                        'max': safe_float(processed_series.max()) if not processed_series.empty else None,
+                        'mean': safe_float(processed_series.mean()) if not processed_series.empty else None,
+                        'std': safe_float(processed_series.std()) if not processed_series.empty else None,
+                        'median': safe_float(processed_series.median()) if not processed_series.empty else None
                     }
                     
                     # Calculate variance
-                    variance = float(processed_series.var()) if not processed_series.empty else 0.0
+                    if not processed_series.empty:
+                        var_val = processed_series.var()
+                        variance = safe_float(var_val) if var_val is not None else 0.0
+                    else:
+                        variance = 0.0
                     
                     # Calculate coefficient of variation (CV = std/mean * 100)
                     if processed_stats['mean'] is not None and processed_stats['mean'] != 0 and processed_stats['std'] is not None:
                         coefficient_of_variation = abs((processed_stats['std'] / processed_stats['mean']) * 100)
+                        coefficient_of_variation = safe_float(coefficient_of_variation)
                     
                     # Check for significant statistical changes (e.g., due to outlier treatment)
                     stat_changes = []
@@ -1772,7 +1854,14 @@ def preprocessing_column_changes():
                 # Calculate variance for removed columns too (for reference)
                 variance = 0.0
                 if pd.api.types.is_numeric_dtype(original_series):
-                    variance = float(original_series.var()) if not original_series.empty else 0.0
+                    if not original_series.empty:
+                        var_val = original_series.var()
+                        if var_val is not None and not (isinstance(var_val, float) and (np.isnan(var_val) or np.isinf(var_val))):
+                            variance = float(var_val)
+                        else:
+                            variance = 0.0
+                    else:
+                        variance = 0.0
                 
                 column_changes.append({
                     'column': col,
@@ -1787,9 +1876,11 @@ def preprocessing_column_changes():
                     'removed': True
                 })
         
-        # Sample data for preview
+        # Sample data for preview - clean NaN values
         original_sample = df_original.head(10).to_dict('records')
         processed_sample = df_processed.head(10).to_dict('records')
+        original_sample = _clean_nan_values(original_sample)
+        processed_sample = _clean_nan_values(processed_sample)
         
         print(f"\n[PREPROCESSING-COLUMN-CHANGES] ========================================")
         print(f"[PREPROCESSING-COLUMN-CHANGES] Generated {len(column_changes)} column changes")
@@ -1819,6 +1910,9 @@ def preprocessing_column_changes():
                 "total_columns": len(column_changes)
             }
         }
+        
+        # Clean all NaN values before returning
+        response_data = _clean_nan_values(response_data)
         
         print(f"[PREPROCESSING-COLUMN-CHANGES] ✅ Response prepared:")
         print(f"  - success: {response_data['success']}")
@@ -2000,7 +2094,7 @@ def dataset_quality_metrics():
             'total_missing': int(total_missing),
             'missing_percentage': round(missing_percentage, 2),
             'columns_with_missing': [col for col in df.columns if df[col].isna().any()],
-            'missing_by_column': missing_values.to_dict(),
+            'missing_by_column': _clean_nan_values(missing_values.to_dict()),
             'complete_columns': [col for col in df.columns if not df[col].isna().any()],
             'severity': 'High' if missing_percentage > 20 else 'Medium' if missing_percentage > 5 else 'Low'
         }
@@ -2039,8 +2133,8 @@ def dataset_quality_metrics():
             outlier_analysis[col] = {
                 'outliers_count': int(outliers),
                 'outliers_percentage': round(outlier_percentage, 2),
-                'lower_bound': float(lower_bound),
-                'upper_bound': float(upper_bound),
+                'lower_bound': _clean_nan_values(float(lower_bound)),
+                'upper_bound': _clean_nan_values(float(upper_bound)),
                 'severity': 'High' if outlier_percentage > 10 else 'Medium' if outlier_percentage > 2 else 'Low'
             }
         
@@ -2050,10 +2144,15 @@ def dataset_quality_metrics():
             unique_count = df[col].nunique()
             cardinality_percentage = (unique_count / len(df)) * 100
             
+            most_frequent = None
+            if not df[col].mode().empty:
+                most_frequent_val = df[col].mode().iloc[0]
+                most_frequent = _clean_nan_values(most_frequent_val)
+            
             cardinality_analysis[col] = {
                 'unique_values': int(unique_count),
                 'cardinality_percentage': round(cardinality_percentage, 2),
-                'most_frequent': df[col].mode().iloc[0] if not df[col].mode().empty else None,
+                'most_frequent': most_frequent,
                 'freq_count': int(df[col].value_counts().iloc[0]) if not df[col].value_counts().empty else 0,
                 'severity': 'High' if cardinality_percentage > 50 else 'Medium' if cardinality_percentage > 20 else 'Low'
             }
@@ -2089,7 +2188,8 @@ def dataset_quality_metrics():
         else:
             quality_rating = 'Very Poor'
         
-        return jsonify({
+        # Clean all NaN values before returning
+        response_data = {
             "success": True,
             "quality_metrics": {
                 "basic_info": basic_info,
@@ -2101,7 +2201,9 @@ def dataset_quality_metrics():
                 "quality_score": quality_score,
                 "quality_rating": quality_rating
             }
-        })
+        }
+        
+        return jsonify(_clean_nan_values(response_data))
         
     except Exception as e:
         return jsonify({"error": f"Quality metrics calculation failed: {str(e)}"}), 500
@@ -2492,13 +2594,13 @@ def create_train_test_split():
     """
     Create or get train/test split for a dataset.
     
-    This endpoint creates a stratified 80/20 train/test split AFTER variable classification
+    This endpoint creates a stratified 70/30 train/test split AFTER variable classification
     and BEFORE any preprocessing, binning, or model training to prevent data leakage.
     
     Request body:
     {
         "dataset_id": int,
-        "test_size": float (optional, default 0.2),
+        "test_size": float (optional, default from config.py),
         "force_recalculate": bool (optional, default false)
     }
     
@@ -2511,10 +2613,11 @@ def create_train_test_split():
     """
     try:
         from train_test_split import get_or_create_train_test_split
+        from config import DEFAULT_TEST_SIZE
         
         data = request.get_json()
         dataset_id = data.get('dataset_id')
-        test_size = data.get('test_size', 0.2)  # Default 20% test
+        test_size = data.get('test_size', DEFAULT_TEST_SIZE)  # Default from config
         force_recalculate = data.get('force_recalculate', False)
         
         if not dataset_id:
@@ -2559,7 +2662,7 @@ def create_train_test_split():
         # This ensures numpy/pandas types (like numpy.bool_) are converted to native Python types
         split_info_serializable = {
             'seed': int(split_info['seed']),
-            'test_size': float(split_info.get('test_size', 0.2)),  # Proportion (0.2 for 20%)
+            'test_size': float(split_info.get('test_size', DEFAULT_TEST_SIZE)),  # Proportion from config
             'method': str(split_info['method']),
             'train_size': int(split_info['train_size']),
             'test_size_count': int(split_info.get('test_size_count', 0)),  # Count of test rows
@@ -2605,7 +2708,7 @@ def get_train_test_split_info_api(dataset_id):
             'exists': True,
             'split_info': {
                 'seed': split_info['seed'],
-                'test_size': split_info['test_size'],  # Proportion (0.2 for 20%)
+                'test_size': split_info['test_size'],  # Proportion from config.py
                 'method': split_info['method'],
                 'train_size': split_info['train_size'],
                 'test_size_count': split_info.get('test_size_count', split_info.get('test_size', 0)),  # Count of test rows
@@ -3225,20 +3328,50 @@ def fine_bin_api():
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
         
+        # Load data using data_loader to get TRAIN set if split exists
         try:
-            csv_path = get_csv_path(dataset_id)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
+            from data_loader import get_data_for_stage
+            df = get_data_for_stage(dataset_id, 'binning')  # Returns TRAIN set if split exists
+            print(f"[fine_bin_api] Loaded dataset: {len(df)} rows (train set if TTS exists)")
         except Exception as e:
-            return jsonify({"error": f"Failed to get CSV path: {str(e)}"}), 400
+            # Fallback to CSV if data_loader fails
+            try:
+                csv_path = get_csv_path(dataset_id)
+                df = pd.read_csv(csv_path)
+                print(f"[fine_bin_api] Loaded full dataset: {len(df)} rows")
+            except FileNotFoundError as fe:
+                return jsonify({"error": str(fe)}), 400
+            except Exception as e2:
+                return jsonify({"error": f"Failed to load dataset: {str(e2)}"}), 500
         
-        try:
-            df = pd.read_csv(csv_path)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
-        except Exception as e:
-            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 500
+        if target not in df.columns:
+            return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
+        
         df[target] = df[target].fillna(0).astype(int)
+        
+        # CRITICAL: Apply preprocessing before coarse binning
+        # This ensures coarse bins use preprocessed data (missing values handled, duplicates removed, etc.)
+        print(f"[fine_bin_api] Applying preprocessing before coarse binning...")
+        try:
+            df, preprocessing_report = preprocess_dataset(
+                df,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Don't handle outliers before binning
+                    'encode_categorical': False  # Don't encode categorical before binning (we need original values for discrete binning)
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"[fine_bin_api] Preprocessing completed. Processed shape: {df.shape}")
+        except Exception as e:
+            print(f"[fine_bin_api] WARNING: Preprocessing failed: {str(e)}")
+            print(f"[fine_bin_api] Continuing with raw data (this may cause issues)")
+            import traceback
+            traceback.print_exc()
 
         try:
             if var_type == 'continuous':
@@ -3508,6 +3641,30 @@ def auto_monotonic_binning_api():
             df[target] = df[target].fillna(0).astype(int)
         except Exception as e:
             return jsonify({"error": f"Failed to convert target to numeric: {str(e)}"}), 400
+        
+        # CRITICAL: Apply preprocessing before coarse binning
+        # This ensures coarse bins use preprocessed data (missing values handled, duplicates removed, etc.)
+        print(f"[auto_monotonic_binning] Applying preprocessing before coarse binning...")
+        try:
+            df, preprocessing_report = preprocess_dataset(
+                df,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Don't handle outliers before binning
+                    'encode_categorical': False  # Don't encode categorical before binning (we need original values for discrete binning)
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"[auto_monotonic_binning] Preprocessing completed. Processed shape: {df.shape}")
+        except Exception as e:
+            print(f"[auto_monotonic_binning] WARNING: Preprocessing failed: {str(e)}")
+            print(f"[auto_monotonic_binning] Continuing with raw data (this may cause issues)")
+            import traceback
+            traceback.print_exc()
         
         # First perform coarse binning to get initial bins
         if var_type == 'continuous':
@@ -3927,6 +4084,31 @@ def univariate_analysis():
         except Exception as e:
             return jsonify({"error": f"Failed to convert target to numeric: {str(e)}"}), 400
         
+        # CRITICAL: Apply preprocessing before coarse binning
+        # This ensures coarse bins use preprocessed data (missing values handled, duplicates removed, etc.)
+        print(f"[univariate_analysis] Applying preprocessing before coarse binning...")
+        try:
+            df, preprocessing_report = preprocess_dataset(
+                df,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Don't handle outliers before binning
+                    'encode_categorical': False  # Don't encode categorical before binning (we need original values for discrete binning)
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"[univariate_analysis] Preprocessing completed. Processed shape: {df.shape}")
+            print(f"[univariate_analysis] Preprocessing steps applied: {preprocessing_report.get('steps_applied', [])}")
+        except Exception as e:
+            print(f"[univariate_analysis] WARNING: Preprocessing failed: {str(e)}")
+            print(f"[univariate_analysis] Continuing with raw data (this may cause issues)")
+            import traceback
+            traceback.print_exc()
+        
         results = {}
         
         # Process discrete columns
@@ -4238,22 +4420,50 @@ def reset_bins_api():
         if not var or not target or not var_type or not record_id:
             return jsonify({"error": "Missing required fields: variable, target, type, record_id"}), 400
         
-        # Load data and perform coarse binning
+        # Load data using data_loader to get TRAIN set if split exists
         try:
-            csv_path = get_csv_path(record_id)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
-        try:
-            df = pd.read_csv(csv_path)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
+            from data_loader import get_data_for_stage
+            df = get_data_for_stage(record_id, 'binning')  # Returns TRAIN set if split exists
+            print(f"[reset_bins] Loaded dataset: {len(df)} rows (train set if TTS exists)")
         except Exception as e:
-            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
+            # Fallback to CSV if data_loader fails
+            try:
+                csv_path = get_csv_path(record_id)
+                df = pd.read_csv(csv_path)
+                print(f"[reset_bins] Loaded full dataset: {len(df)} rows")
+            except FileNotFoundError as fe:
+                return jsonify({"error": str(fe)}), 400
+            except Exception as e2:
+                return jsonify({"error": f"Failed to load dataset: {str(e2)}"}), 400
         
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
         
         df[target] = df[target].fillna(0).astype(int)
+        
+        # CRITICAL: Apply preprocessing before coarse binning
+        # This ensures coarse bins use preprocessed data (missing values handled, duplicates removed, etc.)
+        print(f"[reset_bins] Applying preprocessing before coarse binning...")
+        try:
+            df, preprocessing_report = preprocess_dataset(
+                df,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Don't handle outliers before binning
+                    'encode_categorical': False  # Don't encode categorical before binning (we need original values for discrete binning)
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"[reset_bins] Preprocessing completed. Processed shape: {df.shape}")
+        except Exception as e:
+            print(f"[reset_bins] WARNING: Preprocessing failed: {str(e)}")
+            print(f"[reset_bins] Continuing with raw data (this may cause issues)")
+            import traceback
+            traceback.print_exc()
         
         # Perform coarse binning
         if var_type == 'continuous':
@@ -4368,22 +4578,36 @@ def ai_classify_columns():
             return 'discrete'
 
         # 3. Analyze Sample Values
-        if not samples:
-            return 'discrete' # Default to discrete when no data
+        # Check if samples is empty (handle both Series and list)
+        if hasattr(samples, 'empty'):
+            if samples.empty:
+                return 'discrete' # Default to discrete when no data
+        elif hasattr(samples, '__len__'):
+            if len(samples) == 0:
+                return 'discrete' # Default to discrete when no data
+        else:
+            if not samples:
+                return 'discrete' # Default to discrete when no data
 
         try:
-            is_numeric = all(isinstance(x, (int, float)) for x in samples)
+            # Handle pandas Series/DataFrame samples
+            if hasattr(samples, 'dtype'):
+                is_numeric = pd.api.types.is_numeric_dtype(samples)
+                samples_list = samples.dropna().tolist()
+            else:
+                is_numeric = all(isinstance(x, (int, float)) for x in samples)
+                samples_list = [x for x in samples if x is not None]
             
             if not is_numeric:
                 return 'discrete' # Text/Categorical data
 
             # Check for presence of non-integer/float values
-            has_float = any(isinstance(x, float) and not x.is_integer() for x in samples)
+            has_float = any(isinstance(x, float) and not x.is_integer() for x in samples_list)
             if has_float:
                 return 'continuous' # Presence of decimals strongly suggests measurement/continuous
 
             # Check cardinality for numeric data (e.g., binary or few levels)
-            unique_values = len(set(samples))
+            unique_values = len(set(samples_list))
             # Use a conservative low-cardinality threshold for discrete classification
             if unique_values <= 15: 
                 return 'discrete'
@@ -5011,20 +5235,47 @@ def woe_iv_api():
         if not variables or not target:
             return jsonify({"error": "Missing required fields: variables or target"}), 400
         
+        # CRITICAL: Load train set using data_loader (same as binning endpoints)
         try:
-            csv_path = get_csv_path(record_id)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
-        
-        try:
-            df = pd.read_csv(csv_path)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
+            from data_loader import get_data_for_stage
+            df = get_data_for_stage(record_id, 'binning')  # Returns TRAIN set if split exists
+            print(f"WOE/IV DEBUG: Loaded dataset: {len(df)} rows (train set if TTS exists)")
         except Exception as e:
-            return jsonify({"error": f"Failed to read dataset CSV: {str(e)}"}), 400
+            # Fallback to CSV if data_loader fails
+            try:
+                csv_path = get_csv_path(record_id)
+                df = pd.read_csv(csv_path)
+                print(f"WOE/IV DEBUG: Loaded full dataset: {len(df)} rows (fallback)")
+            except FileNotFoundError as fe:
+                return jsonify({"error": str(fe)}), 400
+            except Exception as e2:
+                return jsonify({"error": f"Failed to load dataset: {str(e2)}"}), 400
         
         if target not in df.columns:
             return jsonify({"error": f"Target column '{target}' not found in dataset"}), 400
+        
+        # CRITICAL: Apply preprocessing before WOE/IV calculation (same as binning)
+        print(f"WOE/IV DEBUG: Applying preprocessing before WOE/IV calculation...")
+        try:
+            df, preprocessing_report = preprocess_dataset(
+                df,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Don't handle outliers before binning
+                    'encode_categorical': False  # Don't encode categorical before binning
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"WOE/IV DEBUG: Preprocessing completed. Processed shape: {df.shape}")
+        except Exception as e:
+            print(f"WOE/IV DEBUG: WARNING: Preprocessing failed: {str(e)}")
+            print(f"WOE/IV DEBUG: Continuing with raw data (this may cause issues)")
+            import traceback
+            traceback.print_exc()
         
         # Better target validation
         df[target] = df[target].fillna(0)
@@ -6195,14 +6446,44 @@ def logistic_regression_analysis():
         if not selected_variables or not target:
             return jsonify({"error": "Missing selected_variables or target"}), 400
 
-        # Load CSV into df at the very start
+        # CRITICAL: Load train set using data_loader (same as binning/WOE endpoints)
         try:
-            df = pd.read_csv(get_csv_path(dataset_id))
+            from data_loader import get_data_for_stage
+            df = get_data_for_stage(dataset_id, 'training')  # Returns TRAIN set if split exists
+            print(f"LOGISTIC DEBUG: Loaded dataset: {len(df)} rows (train set if TTS exists)")
         except Exception as e:
-            return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
+            # Fallback to CSV if data_loader fails
+            try:
+                df = pd.read_csv(get_csv_path(dataset_id))
+                print(f"LOGISTIC DEBUG: Loaded full dataset: {len(df)} rows (fallback)")
+            except Exception as e2:
+                return jsonify({"error": f"Failed to load CSV: {str(e2)}"}), 400
 
         if target not in df.columns:
             return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
+        
+        # CRITICAL: Apply preprocessing before training (same as binning/WOE)
+        print(f"LOGISTIC DEBUG: Applying preprocessing before training...")
+        try:
+            df, preprocessing_report = preprocess_dataset(
+                df,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Don't handle outliers before binning
+                    'encode_categorical': False  # Don't encode categorical before binning
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"LOGISTIC DEBUG: Preprocessing completed. Processed shape: {df.shape}")
+        except Exception as e:
+            print(f"LOGISTIC DEBUG: WARNING: Preprocessing failed: {str(e)}")
+            print(f"LOGISTIC DEBUG: Continuing with raw data (this may cause issues)")
+            import traceback
+            traceback.print_exc()
 
         # Filter to only variables with WOE data to avoid constant 0 columns
         valid_selected_vars = [var for var in selected_variables if var in woe_transformed_data]
@@ -6401,7 +6682,7 @@ def logistic_regression_analysis():
         if result is None:
             return jsonify({"error": "Model fitting failed unexpectedly."}), 500
 
-        # VIF on final model
+        # VIF on final model (calculated on training data)
         vif_data = []
         if len(feature_cols) > 1:
             X_with_const_final = sm.add_constant(X)
@@ -6419,8 +6700,64 @@ def logistic_regression_analysis():
                         'vif': None
                     })
 
-        y_pred_proba = result.predict(X_const)
-        fpr, tpr, thresholds = roc_curve(y, y_pred_proba)
+        # CRITICAL: Calculate metrics on TEST data, not training data
+        print(f"LOGISTIC DEBUG: Loading TEST data for evaluation...")
+        try:
+            from data_loader import get_data_for_stage
+            df_test = get_data_for_stage(dataset_id, 'evaluation')  # Returns TEST set
+            print(f"LOGISTIC DEBUG: Loaded TEST dataset: {len(df_test)} rows")
+            
+            # Apply preprocessing to test data (same as training)
+            print(f"LOGISTIC DEBUG: Applying preprocessing to TEST data...")
+            df_test, _ = preprocess_dataset(
+                df_test,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,
+                    'encode_categorical': False
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"LOGISTIC DEBUG: TEST data preprocessing completed. Shape: {df_test.shape}")
+            
+            # Apply WOE transformations to test data using training-learned WOE values
+            print(f"LOGISTIC DEBUG: Applying WOE transformations to TEST data...")
+            woe_df_test = _apply_woe_to_test_data(df_test, selected_variables, woe_transformed_data, target)
+            
+            # Prepare test features (same columns as training)
+            X_test = woe_df_test[feature_cols].fillna(0)
+            y_test = woe_df_test[target] if target in woe_df_test.columns else df_test[target]
+            
+            mask_test = ~y_test.isna()
+            X_test = X_test[mask_test]
+            y_test = y_test[mask_test]
+            
+            if len(X_test) == 0:
+                print(f"LOGISTIC DEBUG: WARNING: No valid test data after preprocessing. Using training data for metrics.")
+                # Fallback to training data if test data is invalid
+                X_test_const = X_const
+                y_test = y
+            else:
+                # Add constant for test data
+                X_test_const = sm.add_constant(X_test)
+                print(f"LOGISTIC DEBUG: TEST data prepared: {len(X_test)} rows, {len(X_test.columns)} features")
+            
+        except Exception as test_err:
+            print(f"LOGISTIC DEBUG: WARNING: Failed to load/evaluate on test data: {str(test_err)}")
+            print(f"LOGISTIC DEBUG: Falling back to training data for metrics (this is not ideal)")
+            import traceback
+            traceback.print_exc()
+            # Fallback to training data
+            X_test_const = X_const
+            y_test = y
+
+        # Make predictions on TEST data
+        y_pred_proba = result.predict(X_test_const)
+        fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
         roc_auc = auc(fpr, tpr)
         gini_coefficient = 2 * roc_auc - 1
 
@@ -6430,11 +6767,12 @@ def logistic_regression_analysis():
             y_pred = (np.array(y_pred_proba) >= 0.5).astype(int)
 
         try:
-            cm = confusion_matrix(y, y_pred)
-            accuracy = accuracy_score(y, y_pred)
-            precision = precision_score(y, y_pred, zero_division=0)
-            recall = recall_score(y, y_pred, zero_division=0)
-            f1 = f1_score(y, y_pred, zero_division=0)
+            cm = confusion_matrix(y_test, y_pred)
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, zero_division=0)
+            recall = recall_score(y_test, y_pred, zero_division=0)
+            f1 = f1_score(y_test, y_pred, zero_division=0)
+            print(f"LOGISTIC DEBUG: TEST metrics - Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {roc_auc:.4f}")
         except Exception as _cm_err:
             cm = np.array([[0, 0], [0, 0]])
             accuracy = precision = recall = f1 = 0.0
@@ -6535,7 +6873,9 @@ def logistic_regression_analysis():
             'bic': float(result.bic) if np.isfinite(result.bic) else None,
             'log_likelihood': float(result.llf) if np.isfinite(result.llf) else None,
             'pseudo_r_squared': float(result.prsquared) if np.isfinite(result.prsquared) else None,
-            'n_observations': int(result.nobs)
+            'n_observations': int(result.nobs),  # Training observations
+            'n_test_observations': len(y_test),  # Test observations used for metrics
+            'evaluation_data': 'test'  # Indicates metrics are calculated on test data
         }
 
         try:
@@ -6678,15 +7018,45 @@ def random_forest_analysis():
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id/record_id"}), 400
 
-        # Load CSV into df
+        # CRITICAL: Load train set using data_loader (same as binning/WOE endpoints)
         try:
-            csv_path = get_csv_path(dataset_id)
-            df = pd.read_csv(csv_path)
+            from data_loader import get_data_for_stage
+            df = get_data_for_stage(dataset_id, 'training')  # Returns TRAIN set if split exists
+            print(f"RF DEBUG: Loaded dataset: {len(df)} rows (train set if TTS exists)")
         except Exception as e:
-            return jsonify({"error": f"Failed to load CSV: {str(e)}"}), 400
+            # Fallback to CSV if data_loader fails
+            try:
+                csv_path = get_csv_path(dataset_id)
+                df = pd.read_csv(csv_path)
+                print(f"RF DEBUG: Loaded full dataset: {len(df)} rows (fallback)")
+            except Exception as e2:
+                return jsonify({"error": f"Failed to load CSV: {str(e2)}"}), 400
 
         if target not in df.columns:
             return jsonify({"error": f"Target variable '{target}' not found in dataset"}), 400
+        
+        # CRITICAL: Apply preprocessing before training (same as binning/WOE)
+        print(f"RF DEBUG: Applying preprocessing before training...")
+        try:
+            df, preprocessing_report = preprocess_dataset(
+                df,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Don't handle outliers before binning
+                    'encode_categorical': False  # Don't encode categorical before binning
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"RF DEBUG: Preprocessing completed. Processed shape: {df.shape}")
+        except Exception as e:
+            print(f"RF DEBUG: WARNING: Preprocessing failed: {str(e)}")
+            print(f"RF DEBUG: Continuing with raw data (this may cause issues)")
+            import traceback
+            traceback.print_exc()
 
         # Prepare WOE-transformed data (same logic as logistic regression)
         modeling_data = {}
@@ -6778,7 +7148,7 @@ def random_forest_analysis():
         print(f"RF DEBUG: Final features: {woe_columns}")
         print(f"RF DEBUG: X shape: {X.shape}, y shape: {y.shape}")
 
-        # Train Random Forest
+        # Train Random Forest on TRAIN data
         rf_model = RandomForestClassifier(
             n_estimators=100,
             max_depth=10,
@@ -6789,15 +7159,9 @@ def random_forest_analysis():
         )
         
         rf_model.fit(X, y)
-        y_pred_proba = rf_model.predict_proba(X)[:, 1]
-        y_pred = rf_model.predict(X)
-
-        # Calculate metrics
-        fpr, tpr, thresholds = roc_curve(y, y_pred_proba)
-        roc_auc = auc(fpr, tpr)
-        gini_coefficient = 2 * roc_auc - 1
-
-        # Feature importance
+        print(f"RF DEBUG: Model trained on {len(X)} training samples")
+        
+        # Feature importance (calculated from training)
         feature_importance = []
         for i, col in enumerate(woe_columns):
             # Extract original variable name (remove _WOE suffix)
@@ -6811,12 +7175,75 @@ def random_forest_analysis():
         # Sort by importance
         feature_importance.sort(key=lambda x: x['importance'], reverse=True)
 
-        # Confusion matrix and classification metrics
-        cm = confusion_matrix(y, y_pred)
-        accuracy = accuracy_score(y, y_pred)
-        precision = precision_score(y, y_pred, zero_division=0)
-        recall = recall_score(y, y_pred, zero_division=0)
-        f1 = f1_score(y, y_pred, zero_division=0)
+        # CRITICAL: Calculate metrics on TEST data, not training data
+        print(f"RF DEBUG: Loading TEST data for evaluation...")
+        try:
+            from data_loader import get_data_for_stage
+            df_test = get_data_for_stage(dataset_id, 'evaluation')  # Returns TEST set
+            print(f"RF DEBUG: Loaded TEST dataset: {len(df_test)} rows")
+            
+            # Apply preprocessing to test data (same as training)
+            print(f"RF DEBUG: Applying preprocessing to TEST data...")
+            df_test, _ = preprocess_dataset(
+                df_test,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,
+                    'encode_categorical': False
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"RF DEBUG: TEST data preprocessing completed. Shape: {df_test.shape}")
+            
+            # Apply WOE transformations to test data using training-learned WOE values
+            print(f"RF DEBUG: Applying WOE transformations to TEST data...")
+            woe_df_test = _apply_woe_to_test_data(df_test, selected_variables, woe_transformed_data, target)
+            
+            # Prepare test features (same columns as training)
+            X_test = woe_df_test[woe_columns].fillna(0)
+            y_test = woe_df_test[target] if target in woe_df_test.columns else df_test[target]
+            
+            mask_test = ~y_test.isna()
+            X_test = X_test[mask_test]
+            y_test = y_test[mask_test]
+            
+            if len(X_test) == 0:
+                print(f"RF DEBUG: WARNING: No valid test data after preprocessing. Using training data for metrics.")
+                # Fallback to training data if test data is invalid
+                X_test = X
+                y_test = y
+            else:
+                print(f"RF DEBUG: TEST data prepared: {len(X_test)} rows, {len(X_test.columns)} features")
+            
+        except Exception as test_err:
+            print(f"RF DEBUG: WARNING: Failed to load/evaluate on test data: {str(test_err)}")
+            print(f"RF DEBUG: Falling back to training data for metrics (this is not ideal)")
+            import traceback
+            traceback.print_exc()
+            # Fallback to training data
+            X_test = X
+            y_test = y
+
+        # Make predictions on TEST data
+        y_pred_proba = rf_model.predict_proba(X_test)[:, 1]
+        y_pred = rf_model.predict(X_test)
+
+        # Calculate metrics on TEST data
+        fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
+        roc_auc = auc(fpr, tpr)
+        gini_coefficient = 2 * roc_auc - 1
+
+        # Confusion matrix and classification metrics on TEST data
+        cm = confusion_matrix(y_test, y_pred)
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, zero_division=0)
+        recall = recall_score(y_test, y_pred, zero_division=0)
+        f1 = f1_score(y_test, y_pred, zero_division=0)
+        print(f"RF DEBUG: TEST metrics - Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {roc_auc:.4f}")
 
         # KS Statistic
         try:
@@ -6851,9 +7278,11 @@ def random_forest_analysis():
         model_stats = {
             'n_estimators': rf_model.n_estimators,
             'max_depth': rf_model.max_depth,
-            'n_observations': len(X),
+            'n_observations': len(X),  # Training observations
+            'n_test_observations': len(y_test),  # Test observations used for metrics
             'n_features': len(woe_columns),
-            'oob_score': float(getattr(rf_model, 'oob_score_', 0)) if hasattr(rf_model, 'oob_score_') else None
+            'oob_score': float(getattr(rf_model, 'oob_score_', 0)) if hasattr(rf_model, 'oob_score_') else None,
+            'evaluation_data': 'test'  # Indicates metrics are calculated on test data
         }
 
         # Data is already sanitized during construction (using np.isfinite checks)
@@ -7278,6 +7707,82 @@ def xgboost_analysis():
         return jsonify({"error": f"Failed to perform XGBoost analysis: {str(e)}"}), 500
         
 # Helper function for WOE mapping (used by all models)
+def _apply_woe_to_test_data(df_test, selected_variables, woe_transformed_data, target):
+    """
+    Apply WOE transformations to test data using WOE values learned from training data.
+    
+    Parameters:
+    -----------
+    df_test : DataFrame
+        Test dataset (preprocessed)
+    selected_variables : list
+        List of variable names to transform
+    woe_transformed_data : dict
+        WOE transformation data (learned from train)
+    target : str
+        Target column name
+        
+    Returns:
+    --------
+    woe_df : DataFrame
+        Test data with WOE transformations applied
+    """
+    woe_df = df_test[[target]].copy() if target in df_test.columns else pd.DataFrame(index=df_test.index)
+    
+    for var in selected_variables:
+        if var not in woe_transformed_data:
+            print(f"LOGISTIC DEBUG: No WOE data for '{var}', skipping")
+            woe_df[f'{var}_WOE'] = 0
+            continue
+            
+        # Get WOE bins from training data
+        raw_bins = woe_transformed_data.get(var)
+        if isinstance(raw_bins, dict) and isinstance(raw_bins.get('stats'), list):
+            bins_list = raw_bins.get('stats')
+        elif isinstance(raw_bins, list):
+            bins_list = raw_bins
+        else:
+            bins_list = []
+            
+        if not bins_list:
+            print(f"LOGISTIC DEBUG: no bin definitions found for '{var}' in woe_transformed_data")
+            woe_df[f'{var}_WOE'] = 0
+            continue
+
+        woe_df[f'{var}_WOE'] = np.nan
+        for bin_info in bins_list:
+            bin_range = bin_info.get('range') or bin_info.get('Range') or bin_info.get('Bin') or bin_info.get('bin')
+            
+            # Handle min_value/max_value if bin_range is not available
+            if not bin_range and (bin_info.get('min_value') is not None or bin_info.get('max_value') is not None):
+                min_val = bin_info.get('min_value')
+                max_val = bin_info.get('max_value')
+                if min_val is not None and max_val is not None:
+                    bin_range = f"({min_val}, {max_val}]"
+                elif min_val is not None:
+                    bin_range = f"({min_val}, inf)"
+                elif max_val is not None:
+                    bin_range = f"(-inf, {max_val}]"
+            
+            woe_value = bin_info.get('woe') or bin_info.get('WOE')
+            if woe_value is None:
+                continue
+            try:
+                woe_value = float(woe_value)
+            except Exception:
+                continue
+                
+            # Use the existing _create_woe_mask function
+            mask = _create_woe_mask(df_test, var, bin_range)
+            woe_df.loc[mask, f'{var}_WOE'] = woe_value
+            
+        non_null = int(woe_df[f'{var}_WOE'].notna().sum())
+        print(f"LOGISTIC DEBUG: Test - mapped WOE rows for '{var}': {non_null} of {len(df_test)}")
+        woe_df[f'{var}_WOE'] = woe_df[f'{var}_WOE'].fillna(0)
+    
+    return woe_df
+
+
 def _create_woe_mask(df, var, bin_range):
     """Create mask for WOE value assignment based on bin range."""
     import re

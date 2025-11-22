@@ -9,6 +9,7 @@ import './App.css';
 import './components/Admin/AdminPanel.css';
 import { AnalysisRecord } from './types/analysis';
 import { buildBinningState, buildTypeLookup } from './utils/binning';
+import { DEFAULT_TEST_SIZE } from './config';
 
 function App() {
   const location = useLocation();
@@ -322,7 +323,7 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             dataset_id: activeRecordId,
-            test_size: 0.2  // 20% test, 80% train
+            test_size: DEFAULT_TEST_SIZE
           })
         });
 
