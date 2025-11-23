@@ -4,6 +4,7 @@ import LogisticRegressionResults from './LogisticRegressionResults';
 import Navbar from './Navbar';
 import RandomForestResults from './RandomForestResults';
 import XGBoostResults from './XGBoostResults';
+import StackingResults from './StackingResults';
 import { DiscreteValuesDropdown } from './DiscreteValues';
 import ColumnPanels from './ColumnsPanel';
 import PreprocessingDetails from './PreprocessingDetails';
@@ -317,6 +318,7 @@ const SelectedColumnsPage = () => {
   const [logisticResults, setLogisticResults] = useState<any>(null);
   const [randomForestResults, setRandomForestResults] = useState<any>(null);
   const [xgboostResults, setXgboostResults] = useState<any>(null);
+  const [stackingResults, setStackingResults] = useState<any>(null);
   const [binningMode, setBinningMode] = useState<'manual' | 'auto'>('manual');
   const isLoadingAutoBinning = useRef(false);
   const [loadingColumns] = useState<Set<string>>(new Set());
@@ -372,6 +374,10 @@ const SelectedColumnsPage = () => {
 
   const handleXGBoostResults = (results: any) => {
     setXgboostResults(results);
+  };
+
+  const handleStackingResults = (results: any) => {
+    setStackingResults(results);
   };
 
   const syncBinningFromState = useCallback(
@@ -1674,8 +1680,26 @@ const SelectedColumnsPage = () => {
         woeIvResults: latestWoe ?? woeIvResultsRef.current,
       });
 
+      // FIX: Only select if feature is BOTH model_ready AND monotonic
+      // Use is_monotonic from response to ensure we only select truly monotonic features
+      if (data.model_ready && data.is_monotonic && data.variable === col) {
+        // Feature is model_ready AND monotonic according to the response
+        setSelectedForModeling((prev) => {
+          const newSet = new Set([...prev, col]);
+          const updated = Array.from(newSet);
+          console.log(`[runAutoMonotonicBinning] Feature ${col} is model_ready AND monotonic (from response), added to selectedForModeling`);
+          return updated;
+        });
+      } else if (data.model_ready && !data.is_monotonic) {
+        console.log(`[runAutoMonotonicBinning] Feature ${col} is model_ready but NOT monotonic, skipping selection`);
+      }
+
       // After autobinning, fetch sorted features to update order and sync model_ready checkboxes
+      // FIX: Add a small delay to ensure database is fully updated before fetching
       if (recordId) {
+        // Wait a bit for database to be fully updated
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
         try {
           // Fetch sorted features for reordering
           const sortResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features-sorted`);
@@ -1693,27 +1717,60 @@ const SelectedColumnsPage = () => {
             }
           }
           
-          // Fetch features to sync model_ready checkboxes
-          const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-          if (featuresResponse.ok) {
-            const featureList = await featuresResponse.json();
-            if (Array.isArray(featureList)) {
-              const modelReadyFeatures = featureList
-                .filter((feature: any) => feature?.model_ready)
-                .map((feature: any) => String(feature.name).trim())
-                .filter(Boolean);
-              
-              if (modelReadyFeatures.length > 0) {
-                // Update selectedForModeling to include all model_ready features
-                setSelectedForModeling((prev) => {
-                  const newSet = new Set([...prev, ...modelReadyFeatures]);
-                  const updated = Array.from(newSet);
-                  console.log(`[runAutoMonotonicBinning] Synced ${modelReadyFeatures.length} model_ready features for ${col}:`, modelReadyFeatures);
-                  return updated;
-                });
-              } else {
-                console.log(`[runAutoMonotonicBinning] No model_ready features found after binning ${col}`);
+          // Fetch features to sync model_ready checkboxes (with retry if needed)
+          // FIX: Retry once if model_ready status doesn't match response
+          let retryCount = 0;
+          const maxRetries = 2;
+          while (retryCount < maxRetries) {
+            const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
+            if (featuresResponse.ok) {
+              const featureList = await featuresResponse.json();
+              if (Array.isArray(featureList)) {
+                const currentFeature = featureList.find((f: any) => f.name === col);
+                // FIX: Only select features that are BOTH model_ready AND monotonic
+                // Check is_monotonic from fine binning metadata
+                const modelReadyFeatures = featureList
+                  .filter((feature: any) => {
+                    // Feature must be model_ready
+                    if (!feature?.model_ready) return false;
+                    // Feature must also be monotonic (check is_monotonic from binning_steps)
+                    // The features API should include is_monotonic from fine binning step
+                    const isMonotonic = feature?.is_monotonic === true || feature?.is_monotonic === 1;
+                    if (!isMonotonic) {
+                      console.log(`[runAutoMonotonicBinning] Feature ${feature.name} is model_ready but NOT monotonic, skipping`);
+                      return false;
+                    }
+                    return true;
+                  })
+                  .map((feature: any) => String(feature.name).trim())
+                  .filter(Boolean);
+                
+                // Check if the current feature's model_ready status matches the response
+                if (data.model_ready && currentFeature && !currentFeature.model_ready && retryCount < maxRetries - 1) {
+                  // Status doesn't match, wait and retry
+                  console.log(`[runAutoMonotonicBinning] Model_ready status mismatch for ${col}, retrying...`);
+                  await new Promise(resolve => setTimeout(resolve, 500));
+                  retryCount++;
+                  continue;
+                }
+                
+                if (modelReadyFeatures.length > 0) {
+                  // Update selectedForModeling to include all model_ready features
+                  setSelectedForModeling((prev) => {
+                    const newSet = new Set([...prev, ...modelReadyFeatures]);
+                    const updated = Array.from(newSet);
+                    console.log(`[runAutoMonotonicBinning] Synced ${modelReadyFeatures.length} model_ready features after binning ${col}:`, modelReadyFeatures);
+                    return updated;
+                  });
+                } else {
+                  console.log(`[runAutoMonotonicBinning] No model_ready features found after binning ${col}`);
+                }
+                break; // Exit retry loop
               }
+            }
+            retryCount++;
+            if (retryCount < maxRetries) {
+              await new Promise(resolve => setTimeout(resolve, 500));
             }
           }
         } catch (err) {
@@ -3553,6 +3610,12 @@ const SelectedColumnsPage = () => {
                   >
                     XGBoost
                   </button>
+                  <button
+                    className={`model-btn ${selectedModel === 'stacking' ? 'active' : ''}`}
+                    onClick={() => setSelectedModel('stacking')}
+                  >
+                    Stacking
+                  </button>
                 </div>
 
                 {selectedModel === 'logistic' && (
@@ -3617,6 +3680,28 @@ const SelectedColumnsPage = () => {
                     generatingScoreCard={generatingScoreCard}
                     onGotoScoreCard={gotoScoreCardAndGenerate}
                     onResultsUpdate={handleXGBoostResults}
+                    recordId={recordId}
+                  />
+                )}
+
+                {selectedModel === 'stacking' && (
+                  <StackingResults
+                    selectedVariables={currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling}
+                    allSelectedVariables={selectedColumns}
+                    targetVariable={targetVariable}
+                    woeTransformedData={Object.fromEntries(
+                      Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
+                    )}
+                    onColumnSelect={(column) => setActiveColumn(column)}
+                    onToggleSelect={toggleSelectedForFinalModeling}
+                    selectedColumn={activeColumn}
+                    onGenerateScoreCard={(modelType) => {
+                      setSelectedModelForScorecard(modelType);
+                      gotoScoreCardAndGenerate();
+                    }}
+                    generatingScoreCard={generatingScoreCard}
+                    onGotoScoreCard={gotoScoreCardAndGenerate}
+                    onResultsUpdate={handleStackingResults}
                     recordId={recordId}
                   />
                 )}

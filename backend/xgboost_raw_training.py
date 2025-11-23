@@ -61,14 +61,31 @@ def train_xgboost_on_raw_features(df, selected_variables, target):
             fill_val = mode_val[0] if not mode_val.empty else 'MISSING'
             X[col] = X[col].fillna(fill_val)
     
-    # Encode categorical variables
+    # Encode categorical variables (one-hot for low cardinality, label for high)
     label_encoders = {}
     for col in X.columns:
         if X[col].dtype == 'object' or X[col].dtype.name == 'category':
-            le = LabelEncoder()
-            X[col] = le.fit_transform(X[col].astype(str))
-            label_encoders[col] = le
-            print(f"[XGBoost RAW] Encoded categorical variable '{col}' ({len(le.classes_)} categories)")
+            # FIX: Handle NaN values first
+            nan_count = X[col].isna().sum()
+            if nan_count > 0:
+                X[col] = X[col].fillna('__MISSING__')
+                print(f"[XGBoost RAW] Column '{col}': Filled {nan_count} NaN values with '__MISSING__'")
+            
+            unique_count = X[col].nunique()
+            if unique_count <= 10:  # One-hot encode if <= 10 categories (real data only)
+                X = pd.get_dummies(X, columns=[col], prefix=col)
+                print(f"[XGBoost RAW] One-hot encoded '{col}' ({unique_count} categories)")
+            else:  # Label encode if > 10 categories
+                le = LabelEncoder()
+                # Remove any remaining NaN (shouldn't be any after fillna, but safety check)
+                unique_vals = X[col].dropna().unique()
+                if len(unique_vals) == 0:
+                    print(f"[XGBoost RAW] Column '{col}': Skipping (all NaN)")
+                    continue
+                le.fit(unique_vals)
+                X[col] = le.transform(X[col].astype(str))
+                label_encoders[col] = le
+                print(f"[XGBoost RAW] Label encoded '{col}' ({unique_count} categories)")
     
     # Handle target variable
     y = pd.to_numeric(y, errors='coerce').fillna(0).astype(int)
@@ -87,23 +104,63 @@ def train_xgboost_on_raw_features(df, selected_variables, target):
     # Calculate class imbalance for scale_pos_weight
     n_negative = (y == 0).sum()
     n_positive = (y == 1).sum()
-    scale_pos_weight = n_negative / n_positive if n_positive > 0 else 1.0
-    print(f"[XGBoost RAW] Class imbalance - Negatives: {n_negative}, Positives: {n_positive}, scale_pos_weight: {scale_pos_weight:.2f}")
+    base_ratio = n_negative / n_positive if n_positive > 0 else 1.0
     
-    # Train XGBoost on RAW features
+    # For extreme imbalance, use more aggressive weighting (2x the ratio)
+    # This helps the model learn from the minority class better
+    scale_pos_weight = 2.0 * base_ratio if n_positive > 0 else 1.0
+    print(f"[XGBoost RAW] Class imbalance - Negatives: {n_negative}, Positives: {n_positive}")
+    print(f"[XGBoost RAW] Base ratio: {base_ratio:.2f}, Adjusted scale_pos_weight: {scale_pos_weight:.2f} (2x for extreme imbalance)")
+    
+    # Split training data for validation (using real data only, no synthetic data)
+    from sklearn.model_selection import train_test_split
+    try:
+        # Try stratified split first
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        print(f"[XGBoost RAW] Training split: {len(X_train)} train, {len(X_val)} validation (stratified)")
+    except ValueError as e:
+        # If stratification fails (e.g., one class has too few samples), use non-stratified split
+        print(f"[XGBoost RAW] WARNING: Stratified split failed ({str(e)}), using non-stratified split")
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        print(f"[XGBoost RAW] Training split: {len(X_train)} train, {len(X_val)} validation (non-stratified)")
+    
+    # Train XGBoost on RAW features with early stopping and regularization
+    # XGBoost 3.0+ requires early_stopping_rounds in constructor, not in fit()
+    # Optimized for extreme class imbalance and better recall
     xgb_model = xgb.XGBClassifier(
-        n_estimators=100,
-        max_depth=4,  # Reduced depth for better generalization
-        learning_rate=0.1,
+        n_estimators=1000,  # Increase max trees for better learning
+        max_depth=6,  # Increase depth slightly to capture more patterns (was 4)
+        learning_rate=0.03,  # Lower learning rate for more stable training (was 0.05)
         subsample=0.8,
         colsample_bytree=0.8,
+        reg_alpha=0.01,  # Reduce L1 regularization to allow more learning (was 0.1)
+        reg_lambda=0.5,  # Reduce L2 regularization to allow more learning (was 1.0)
+        min_child_weight=1,  # Lower to allow splits on minority class (was 3)
+        gamma=0.05,  # Lower gamma to allow more splits (was 0.1)
         random_state=42,
-        eval_metric='logloss',
-        scale_pos_weight=scale_pos_weight,  # Handle class imbalance
-        use_label_encoder=False
+        eval_metric='auc',  # Use AUC for early stopping (better for imbalanced data than logloss)
+        scale_pos_weight=scale_pos_weight,  # Handle class imbalance (real data only)
+        use_label_encoder=False,
+        early_stopping_rounds=30  # Increase patience for better convergence (was 20)
     )
     
-    xgb_model.fit(X, y)
+    # Train with early stopping (XGBoost 3.0+ - early_stopping_rounds already in constructor)
+    xgb_model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False
+    )
+    
+    if hasattr(xgb_model, 'best_iteration') and xgb_model.best_iteration is not None:
+        print(f"[XGBoost RAW] Training stopped at {xgb_model.best_iteration} iterations (best score: {xgb_model.best_score:.4f})")
+    else:
+        print(f"[XGBoost RAW] Training completed with {xgb_model.n_estimators} iterations")
+    
+    # Use full training set for final predictions (for metrics calculation)
     y_pred_proba = xgb_model.predict_proba(X)[:, 1]  # Probability of class 1 (bad)
     y_pred = xgb_model.predict(X)
     
@@ -121,14 +178,33 @@ def train_xgboost_on_raw_features(df, selected_variables, target):
     
     print(f"[XGBoost RAW] Model AUC: {roc_auc:.4f}, Gini: {gini_coefficient:.4f}")
     
-    # Feature importance (using original variable names)
+    # Feature importance (using actual feature names after encoding)
+    # Note: After one-hot encoding, feature names may have changed
     feature_importance = []
-    for i, col in enumerate(selected_variables):
-        feature_importance.append({
-            'variable': col,
-            'importance': float(xgb_model.feature_importances_[i]),
-            'importance_percentage': float(xgb_model.feature_importances_[i] * 100)
-        })
+    feature_names = list(X.columns)  # Get actual feature names after encoding
+    
+    # Ensure feature_importances_ length matches number of features
+    if len(xgb_model.feature_importances_) != len(feature_names):
+        print(f"[XGBoost RAW] WARNING: Feature importance length mismatch: {len(xgb_model.feature_importances_)} vs {len(feature_names)}")
+        # Use minimum length to avoid index errors
+        min_len = min(len(xgb_model.feature_importances_), len(feature_names))
+        feature_names = feature_names[:min_len]
+    
+    for i, col_name in enumerate(feature_names):
+        # Try to map back to original variable name
+        original_var = col_name
+        for orig_var in selected_variables:
+            if col_name.startswith(orig_var + '_') or col_name == orig_var:
+                original_var = orig_var
+                break
+        
+        if i < len(xgb_model.feature_importances_):
+            feature_importance.append({
+                'variable': original_var,
+                'feature_name': col_name,  # Actual feature name used in model
+                'importance': float(xgb_model.feature_importances_[i]),
+                'importance_percentage': float(xgb_model.feature_importances_[i] * 100)
+            })
     
     # Sort by importance
     feature_importance.sort(key=lambda x: x['importance'], reverse=True)
@@ -171,12 +247,23 @@ def train_xgboost_on_raw_features(df, selected_variables, target):
         })
     
     # Model stats
+    best_iter = None
+    best_score_val = None
+    if hasattr(xgb_model, 'best_iteration') and xgb_model.best_iteration is not None:
+        best_iter = int(xgb_model.best_iteration)
+    if hasattr(xgb_model, 'best_score') and xgb_model.best_score is not None:
+        best_score_val = float(xgb_model.best_score)
+    
     model_stats = {
-        'n_estimators': xgb_model.n_estimators,
+        'n_estimators': best_iter if best_iter is not None else xgb_model.n_estimators,
         'max_depth': xgb_model.max_depth,
         'learning_rate': float(xgb_model.learning_rate),
         'n_observations': len(X),
-        'n_features': len(selected_variables)
+        'n_features': len(X.columns),  # Actual number of features after encoding
+        'n_original_features': len(selected_variables),
+        'early_stopping_used': best_iter is not None,
+        'best_iteration': best_iter,
+        'best_score': best_score_val
     }
     
     # Serialize model and encoders
@@ -205,7 +292,8 @@ def train_xgboost_on_raw_features(df, selected_variables, target):
             'target': target,
             'selected_variables': selected_variables,
             'model_variables': selected_variables,
-            'feature_columns': selected_variables,  # Use original features, not WOE
+            'feature_columns': list(X.columns),  # Use actual feature columns after encoding
+            'original_feature_columns': selected_variables,  # Original feature names before encoding
             'model_bytes': model_bytes,
             'label_encoders': encoders_serialized,
             'xgb_params': xgb_model.get_xgb_params(),
@@ -250,11 +338,13 @@ def apply_xgboost_scorecard(df_raw, target, artifact_data):
     print(f"\n[XGBoost SCORING] Applying XGBoost scorecard")
     
     # Get feature columns and encoders
+    # Handle both old format (original features) and new format (encoded features)
     artifact_feature_cols = artifact_data.get('feature_columns', [])
+    original_feature_cols = artifact_data.get('original_feature_columns', artifact_feature_cols)
     encoders_serialized = artifact_data.get('label_encoders', {})
     
-    # Prepare features same way as training
-    X_pred = df_raw[artifact_feature_cols].copy()
+    # Always start with original features and apply same encoding as training
+    X_pred = df_raw[original_feature_cols].copy()
     
     # Handle missing values
     for col in X_pred.columns:
@@ -269,21 +359,59 @@ def apply_xgboost_scorecard(df_raw, target, artifact_data):
             fill_val = mode_val[0] if not mode_val.empty else 'MISSING'
             X_pred[col] = X_pred[col].fillna(fill_val)
     
-    # Encode categorical variables using saved encoders
-    for col in X_pred.columns:
-        if col in encoders_serialized:
-            try:
-                encoder = pickle.loads(encoders_serialized[col])
-                X_pred[col] = encoder.transform(X_pred[col].astype(str))
-            except Exception as enc_err:
-                print(f"[XGBoost SCORING] Failed to apply encoder for {col}: {enc_err}")
-                # Fallback: simple label encoding
-                if X_pred[col].dtype == 'object':
+    # Encode categorical variables using saved encoders (same logic as training)
+    for col in list(X_pred.columns):  # Use list() to avoid modification during iteration
+        if X_pred[col].dtype == 'object' or X_pred[col].dtype.name == 'category':
+            unique_count = X_pred[col].nunique()
+            if unique_count <= 10:  # One-hot encode if <= 10 categories (same as training)
+                X_pred = pd.get_dummies(X_pred, columns=[col], prefix=col)
+                print(f"[XGBoost SCORING] One-hot encoded '{col}' ({unique_count} categories)")
+            else:  # Label encode if > 10 categories
+                if col in encoders_serialized:
+                    try:
+                        encoder = pickle.loads(encoders_serialized[col])
+                        # FIX: Handle NaN first
+                        X_pred[col] = X_pred[col].fillna('__MISSING__')
+                        # FIX: Handle unseen categories
+                        seen_categories = set(encoder.classes_)
+                        pred_values = X_pred[col].astype(str)
+                        unseen_mask = ~pred_values.isin(seen_categories)
+                        if unseen_mask.any():
+                            unseen_count = unseen_mask.sum()
+                            print(f"[XGBoost SCORING] Found {unseen_count} unseen categories in '{col}', mapping to '__MISSING__'")
+                            X_pred.loc[unseen_mask, col] = '__MISSING__'
+                            # If '__MISSING__' is not in encoder, map to most frequent category
+                            if '__MISSING__' not in seen_categories:
+                                if len(seen_categories) > 0:
+                                    most_frequent = pred_values[~unseen_mask].mode()
+                                    if len(most_frequent) > 0:
+                                        X_pred.loc[unseen_mask, col] = most_frequent.iloc[0]
+                                    else:
+                                        X_pred.loc[unseen_mask, col] = list(seen_categories)[0]
+                        X_pred[col] = encoder.transform(X_pred[col].astype(str))
+                    except Exception as enc_err:
+                        print(f"[XGBoost SCORING] Failed to apply encoder for {col}: {enc_err}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fallback: handle NaN and create new encoder
+                        X_pred[col] = X_pred[col].fillna('__MISSING__')
+                        le = LabelEncoder()
+                        X_pred[col] = le.fit_transform(X_pred[col].astype(str))
+                        print(f"[XGBoost SCORING] Created new encoder for {col} (fallback mode)")
+                else:
+                    # FIX: Handle NaN before creating new encoder
+                    X_pred[col] = X_pred[col].fillna('__MISSING__')
                     le = LabelEncoder()
                     X_pred[col] = le.fit_transform(X_pred[col].astype(str))
-        elif X_pred[col].dtype == 'object' or X_pred[col].dtype.name == 'category':
-            le = LabelEncoder()
-            X_pred[col] = le.fit_transform(X_pred[col].astype(str))
+                    print(f"[XGBoost SCORING] Created new encoder for {col} (no saved encoder found)")
+    
+    # Ensure feature columns match training (add missing one-hot columns with zeros)
+    if artifact_feature_cols and len(artifact_feature_cols) > 0:
+        missing_cols = set(artifact_feature_cols) - set(X_pred.columns)
+        for col in missing_cols:
+            X_pred[col] = 0  # Add missing one-hot columns with zeros
+        # Reorder columns to match training
+        X_pred = X_pred[artifact_feature_cols]
     
     # Remove rows with missing target
     target_series = pd.to_numeric(df_raw[target], errors='coerce').fillna(0).astype(int)

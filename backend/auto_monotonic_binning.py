@@ -107,9 +107,11 @@ def compute_iv(good: np.ndarray, bad: np.ndarray) -> float:
     return iv
 
 
-def is_monotonic(arr: np.ndarray, increasing: bool = True) -> bool:
+def is_monotonic(arr: np.ndarray, increasing: bool = True, tolerance: float = 0.1) -> bool:
     """
-    Check if array is monotonic (either increasing or decreasing).
+    Check if array is monotonic (either increasing or decreasing) with tolerance.
+    Allows small violations to handle flexible monotonic trends (not strictly linear).
+    Goal: Avoid harsh wavy WOE trends while allowing slight variations.
     
     Parameters:
     -----------
@@ -117,19 +119,53 @@ def is_monotonic(arr: np.ndarray, increasing: bool = True) -> bool:
         Array to check
     increasing : bool
         If True, check for increasing trend. If False, check for decreasing trend.
+    tolerance : float
+        Tolerance for violations (0.0 = strict, higher = more lenient)
+        Default 0.1 means allow violations if they're < 10% of the average step size
         
     Returns:
     --------
     bool
-        True if array is monotonic in the specified direction
+        True if array is mostly monotonic in the specified direction
     """
     if len(arr) <= 1:
         return True
-        
+    
+    if len(arr) == 2:
+        # For 2 elements, just check direction
+        if increasing:
+            return arr[0] <= arr[1]
+        else:
+            return arr[0] >= arr[1]
+    
+    # Calculate average step size for tolerance
     if increasing:
-        return all(arr[i] <= arr[i+1] for i in range(len(arr)-1))
+        steps = [arr[i+1] - arr[i] for i in range(len(arr)-1)]
     else:
-        return all(arr[i] >= arr[i+1] for i in range(len(arr)-1))
+        steps = [arr[i] - arr[i+1] for i in range(len(arr)-1)]
+    
+    avg_step = np.mean([abs(s) for s in steps if abs(s) > 1e-10]) if any(abs(s) > 1e-10 for s in steps) else 1.0
+    max_allowed_violation = avg_step * tolerance
+    
+    # Count violations (adjacent pairs that go against the trend)
+    violations = 0
+    total_pairs = len(arr) - 1
+    
+    for i in range(len(arr) - 1):
+        if increasing:
+            violation = arr[i] - arr[i+1]  # Positive means violation
+        else:
+            violation = arr[i+1] - arr[i]  # Positive means violation
+        
+        # Only count as violation if it exceeds tolerance
+        if violation > max_allowed_violation:
+            violations += 1
+    
+    # Allow up to 20% violations for flexible monotonicity (avoids harsh wavy trends)
+    # This means 80% of pairs must follow the trend
+    max_allowed_violations = max(1, int(total_pairs * 0.2))  # At least 1 violation allowed, or 20% of pairs
+    
+    return violations <= max_allowed_violations
 
 
 def monotonic_quality_score(woe: np.ndarray, increasing: bool) -> float:
@@ -250,7 +286,14 @@ def greedy_merge_bins_woe(
     
     while iteration < max_iterations:
         woe = compute_woe(good, bad)
-        if is_monotonic(woe, increasing):
+        # FIX: Use strict monotonicity check (no tolerance) to ensure 100% monotonicity
+        # Only exit if WOE is strictly monotonic (no violations allowed)
+        is_strictly_monotonic = True
+        for i in range(len(woe) - 1):
+            if (increasing and woe[i] > woe[i+1]) or (not increasing and woe[i] < woe[i+1]):
+                is_strictly_monotonic = False
+                break
+        if is_strictly_monotonic:
             break
             
         # Find all violation indices
@@ -664,8 +707,14 @@ def exhaustive_merge_bins_woe(
             # After applying all merges, check if this solution is valid
             test_woe = compute_woe(test_good, test_bad)
             
-            # PRIORITY 1: Must be monotonic (no exceptions, no quality threshold)
-            if is_monotonic(test_woe, direction):
+            # PRIORITY 1: Must be strictly monotonic (100% monotonicity, no tolerance)
+            # FIX: Use strict monotonicity check to ensure 100% monotonicity
+            is_strictly_monotonic = True
+            for i in range(len(test_woe) - 1):
+                if (direction and test_woe[i] > test_woe[i+1]) or (not direction and test_woe[i] < test_woe[i+1]):
+                    is_strictly_monotonic = False
+                    break
+            if is_strictly_monotonic:
                 dir_monotonic_found = True
                 test_iv = compute_iv(test_good, test_bad)
                 test_num_bins = len(test_good)
@@ -832,6 +881,14 @@ def auto_monotonic_binning(
     num_final_bins = len(merged_labels)
     num_merges = num_original_bins - num_final_bins
     
+    # FIX: Use strict monotonicity check for final result (100% monotonicity required)
+    final_increasing = final_direction == 'increasing'
+    is_strictly_monotonic_final = True
+    for i in range(len(final_woe) - 1):
+        if (final_increasing and final_woe[i] > final_woe[i+1]) or (not final_increasing and final_woe[i] < final_woe[i+1]):
+            is_strictly_monotonic_final = False
+            break
+    
     return {
         'merged_good': merged_good.tolist(),
         'merged_bad': merged_bad.tolist(),
@@ -839,7 +896,7 @@ def auto_monotonic_binning(
         'woe_values': final_woe.tolist(),
         'iv': final_iv,
         'merge_mapping': merge_map,
-        'is_monotonic': is_monotonic(final_woe, final_direction == 'increasing'),
+        'is_monotonic': is_strictly_monotonic_final,
         'direction': final_direction,
         'num_merges': num_merges,
         'num_bins_original': num_original_bins,

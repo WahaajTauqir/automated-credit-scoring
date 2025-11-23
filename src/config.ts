@@ -6,6 +6,6 @@
 
 // Train/Test Split Configuration
 // ===============================
-// Default test size for train/test split (0.3 = 30% test, 70% train)
-export const DEFAULT_TEST_SIZE = 0.3;
+// Default test size for train/test split (0.2 = 20% test, 80% train)
+export const DEFAULT_TEST_SIZE = 0.2;
 

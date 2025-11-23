@@ -19,7 +19,7 @@ interface FeaturePreprocessingDetail {
     processed_missing: number;
     changes_applied: string[];
     passes_quality_check: boolean; // Auto-checked if true
-    variance: number; // Variance of the processed feature
+    variance: number | null; // Variance of the processed feature (null for categorical columns)
     coefficient_of_variation?: number; // Coefficient of variation (CV)
     repeat_rate?: number; // Repeat rate (percentage of most frequent value)
     processed_stats?: FeatureStats; // Statistical information
@@ -211,8 +211,9 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                 // Include ALL columns (including removed ones) so they can be unchecked
                 const featuresList: FeaturePreprocessingDetail[] = changesData.column_changes
                         .map((col: any) => {
-                            // Get variance (default to 0 if not provided)
-                            const variance = col.variance !== undefined ? col.variance : 0;
+                            // Get variance (null for categorical columns, number for numeric)
+                            // FIX: Categorical columns have variance = null (not applicable)
+                            const variance = col.variance !== undefined ? col.variance : null;
                             const coefficientOfVariation = col.coefficient_of_variation !== undefined ? col.coefficient_of_variation : null;
                             const repeatRate = col.repeat_rate !== undefined ? col.repeat_rate : null;
                             
@@ -223,8 +224,14 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                             // Check if column is removed
                             const isRemoved = col.processed_dtype === 'REMOVED' || col.removed === true;
                             
-                            // Check for low variance (CV < 5%)
-                            const hasLowVariance = coefficientOfVariation !== null && coefficientOfVariation < 5 && coefficientOfVariation > 0;
+                            // Check for low variance (CV < 5%) - only for numeric columns
+                            // FIX: Don't check low variance for categorical columns
+                            const isCategoricalForLowVar = col.original_dtype === 'object' || 
+                                                          col.processed_dtype === 'object' ||
+                                                          col.original_dtype === 'category' ||
+                                                          col.processed_dtype === 'category' ||
+                                                          variance === null || variance === undefined;
+                            const hasLowVariance = !isCategoricalForLowVar && coefficientOfVariation !== null && coefficientOfVariation < 5 && coefficientOfVariation > 0;
                             
                             // Check for high repeat rate (>95%) for continuous columns
                             const isContinuous = col.processed_dtype === 'int64' || 
@@ -237,11 +244,29 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                             // 1. Not removed
                             // 2. Has no missing values after preprocessing
                             // 3. Has a valid data type (discrete or continuous)
-                            // 4. Has non-zero variance (variance > 0)
+                            // 4. Has non-zero variance (variance > 0) OR for categorical columns, has multiple unique values
                             // 5. Missing values are not > 95%
                             // 6. Coefficient of variation is not < 5% (low variance)
                             // 7. Repeat rate is not > 95% (high repeat rate for continuous)
-                            const hasZeroVariance = variance === 0 || (typeof variance === 'number' && Math.abs(variance) < 1e-10);
+                            
+                            // FIX: For categorical columns, variance doesn't apply (it's null)
+                            // For numeric columns, check if variance is zero
+                            const isCategorical = col.original_dtype === 'object' || 
+                                                  col.processed_dtype === 'object' ||
+                                                  col.original_dtype === 'category' ||
+                                                  col.processed_dtype === 'category' ||
+                                                  variance === null || variance === undefined;
+                            
+                            // FIX: Categorical columns should NOT be marked as zero variance
+                            // Only numeric columns with variance = 0 should be marked as zero variance
+                            const hasZeroVariance = isCategorical ? false : (variance === 0 || (typeof variance === 'number' && Math.abs(variance) < 1e-10));
+                            // FIX: isFitForBinning should include categorical columns (even if encoded to numeric)
+                            // Check if original dtype was categorical (object/category) OR if processed dtype is numeric
+                            const wasCategorical = col.original_dtype === 'object' || 
+                                                   col.original_dtype === 'category' ||
+                                                   col.processed_dtype === 'object' ||
+                                                   col.processed_dtype === 'category';
+                            
                             const isFitForBinning = !isRemoved &&
                                                    col.processed_missing === 0 && 
                                                    col.processed_dtype !== 'REMOVED' &&
@@ -249,7 +274,8 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                                    !hasHighMissingValues &&
                                                    !hasLowVariance &&
                                                    !hasHighRepeatRate &&
-                                                   (col.processed_dtype === 'categorical' || 
+                                                   (wasCategorical ||  // Include categorical columns (original or processed)
+                                                    col.processed_dtype === 'categorical' || 
                                                     col.processed_dtype === 'int64' || 
                                                     col.processed_dtype === 'float64' ||
                                                     col.processed_dtype === 'int32' ||
@@ -289,9 +315,34 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                             let shouldBeSelected: boolean;
                             
                             if (preprocessSelectionSavedLocal) {
-                                // If preprocess_selection is true, strictly use database selected status
-                                // Calculations are only for display purposes (stats, quality checks, etc.)
-                                shouldBeSelected = dbFeature?.selected || false;
+                                // If preprocess_selection is true, use database selected status
+                                // BUT: Auto-select valid categorical columns that were incorrectly unselected
+                                // (e.g., due to previous zero variance bug)
+                                if (wasCategorical && !isRemoved && !hasHighMissingValues && !hasZeroVariance) {
+                                    // Valid categorical column - ensure it's selected
+                                    if (!dbFeature?.selected) {
+                                        console.log(`[PREPROCESSING UI] Auto-selecting valid categorical column (preprocessSelectionSaved=true): ${col.column}`);
+                                        shouldBeSelected = true;
+                                        // Update DB to reflect correct selection
+                                        fetch('http://localhost:5000/api/update-feature-selection', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({
+                                                dataset_id: datasetId,
+                                                feature_name: col.column,
+                                                selected: true
+                                            })
+                                        })
+                                        .then(res => res.json())
+                                        .then(data => console.log(`[PREPROCESSING UI] Auto-select response for ${col.column}:`, data))
+                                        .catch(err => console.error(`[PREPROCESSING UI] Error auto-saving feature selection for ${col.column}:`, err));
+                                    } else {
+                                        shouldBeSelected = dbFeature.selected;
+                                    }
+                                } else {
+                                    // For other features, strictly use database selected status
+                                    shouldBeSelected = dbFeature?.selected || false;
+                                }
                             } else {
                                 // If preprocess_selection is false, use calculation-based logic
                                 // 1. If feature is removed, automatically uncheck it
@@ -391,8 +442,50 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                         .catch(err => console.error(`[PREPROCESSING UI] Error creating feature ${col.column}:`, err));
                                     }
                                 } else {
-                                    // Feature doesn't pass quality checks, use DB value or false
-                                    shouldBeSelected = dbFeature?.selected || false;
+                                    // Feature doesn't pass quality checks
+                                    // FIX: For valid categorical columns (not removed, no high missing, no zero variance),
+                                    // default to selected=true even if they don't pass all quality checks
+                                    // This ensures categorical columns are available for use
+                                    if (wasCategorical && !isRemoved && !hasHighMissingValues && !hasZeroVariance) {
+                                        // Valid categorical column - auto-select it
+                                        shouldBeSelected = true;
+                                        // Update DB if feature exists, or create it if it doesn't
+                                        if (dbFeature?.exists) {
+                                            if (!dbFeature.selected) {
+                                                console.log(`[PREPROCESSING UI] Auto-selecting valid categorical column: ${col.column}`);
+                                                fetch('http://localhost:5000/api/update-feature-selection', {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({
+                                                        dataset_id: datasetId,
+                                                        feature_name: col.column,
+                                                        selected: true
+                                                    })
+                                                })
+                                                .then(res => res.json())
+                                                .then(data => console.log(`[PREPROCESSING UI] Auto-select response for ${col.column}:`, data))
+                                                .catch(err => console.error(`[PREPROCESSING UI] Error auto-saving feature selection for ${col.column}:`, err));
+                                            }
+                                        } else {
+                                            // Create feature with selected=true for valid categorical columns
+                                            console.log(`[PREPROCESSING UI] Creating feature with selected=true for valid categorical: ${col.column}`);
+                                            fetch('http://localhost:5000/api/update-feature-selection', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({
+                                                    dataset_id: datasetId,
+                                                    feature_name: col.column,
+                                                    selected: true
+                                                })
+                                            })
+                                            .then(res => res.json())
+                                            .then(data => console.log(`[PREPROCESSING UI] Create feature response for ${col.column}:`, data))
+                                            .catch(err => console.error(`[PREPROCESSING UI] Error creating feature ${col.column}:`, err));
+                                        }
+                                    } else {
+                                        // For other features, use DB value or false
+                                        shouldBeSelected = dbFeature?.selected || false;
+                                    }
                                 }
                             }
                             
@@ -619,9 +712,17 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
 
     // Helper function to render feature card
     const renderFeatureCard = (feature: FeaturePreprocessingDetail, index: number, isSelected: boolean) => {
-        const hasZeroVariance = feature.variance === 0 || (typeof feature.variance === 'number' && Math.abs(feature.variance) < 1e-10);
+        // FIX: Categorical columns have variance = null (not applicable)
+        // Only numeric columns with variance = 0 should be marked as zero variance
+        const isCategorical = feature.original_dtype === 'object' || 
+                             feature.processed_dtype === 'object' ||
+                             feature.original_dtype === 'category' ||
+                             feature.processed_dtype === 'category' ||
+                             feature.variance === null || feature.variance === undefined;
+        
+        const hasZeroVariance = isCategorical ? false : (feature.variance === 0 || (typeof feature.variance === 'number' && Math.abs(feature.variance) < 1e-10));
         const hasHighMissing = feature.missingPercentage !== undefined && feature.missingPercentage > 95;
-        const hasLowVariance = feature.coefficient_of_variation !== undefined && feature.coefficient_of_variation < 5 && feature.coefficient_of_variation > 0;
+        const hasLowVariance = !isCategorical && feature.coefficient_of_variation !== undefined && feature.coefficient_of_variation < 5 && feature.coefficient_of_variation > 0;
         const hasHighRepeatRate = feature.type === 'continuous' && feature.repeat_rate !== undefined && feature.repeat_rate > 95;
         // Low variance and high repeat rate features are selectable (not disabled), but zero variance, high missing, and removed are disabled
         const shouldDisable = hasZeroVariance || hasHighMissing || feature.isRemoved;
@@ -704,18 +805,23 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                         </span>
                     </div>
 
-                    {(feature.type === 'continuous' || (feature.type === 'discrete' && feature.variance !== undefined)) && (
+                    {/* Show variance for all columns: numeric columns show actual variance, categorical show N/A */}
+                    {/* FIX: Always show variance section for discrete columns (including categorical with null variance) */}
+                    {(feature.type === 'continuous' || feature.type === 'discrete') && (
                         <>
                             <div className="detail-row">
                                 <span className="detail-label">Variance:</span>
                                 <span className="detail-value">
-                                    {feature.variance === 0 || (typeof feature.variance === 'number' && Math.abs(feature.variance) < 1e-10) ? (
+                                    {feature.variance === null || feature.variance === undefined ? (
+                                        <span className="success">N/A (Categorical)</span>
+                                    ) : feature.variance === 0 || (typeof feature.variance === 'number' && Math.abs(feature.variance) < 1e-10) ? (
                                         <span className="old-value" style={{ color: '#ef4444' }}>0 (Zero Variance)</span>
                                     ) : (
                                         <span className="success">{typeof feature.variance === 'number' ? feature.variance.toFixed(6) : 'N/A'}</span>
                                     )}
                                 </span>
                             </div>
+                            {/* Coefficient of Variation only applies to numeric columns */}
                             {feature.coefficient_of_variation !== undefined && feature.coefficient_of_variation !== null && (
                                 <div className="detail-row">
                                     <span className="detail-label">Coefficient of Variation:</span>
