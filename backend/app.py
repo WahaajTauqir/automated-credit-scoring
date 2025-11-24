@@ -4972,14 +4972,20 @@ def fine_bin_api():
         # dataset_id was already validated and converted to int above
         print(f"[fine_bin_api] DEBUG: Persisting results for dataset_id={dataset_id}, variable={var}")
 
-        # Ensure feature exists in new schema
+        # CRITICAL: Ensure feature exists and belongs to the correct dataset_id
+        # This prevents binning data from being saved to features from other records
         feature = get_feature_by_name(dataset_id, var)
         if not feature:
             fid = create_feature(dataset_id, var, var_type, selected=True)
             feature = get_feature(fid)
-            print(f"[fine_bin_api] DEBUG: Created feature, feature_id={fid}")
+            print(f"[fine_bin_api] ✅ Created new feature: {var}, feature_id={fid}, dataset_id={dataset_id}")
         else:
-            print(f"[fine_bin_api] DEBUG: Feature exists, feature_id={feature['id']}")
+            # CRITICAL: Verify feature belongs to the correct dataset
+            if feature.get('dataset_id') != dataset_id:
+                error_msg = f"Feature {var} (id={feature['id']}) belongs to dataset {feature.get('dataset_id')}, not {dataset_id}. This indicates data mixing!"
+                print(f"[fine_bin_api] ❌ ERROR: {error_msg}")
+                return jsonify({"error": error_msg}), 400
+            print(f"[fine_bin_api] ✅ Feature exists: {var}, feature_id={feature['id']}, dataset_id={dataset_id}")
 
         # Ensure coarse binning exists (recompute and save if missing)
         try:
@@ -5599,14 +5605,20 @@ def auto_monotonic_binning_api():
             dataset_id = create_dataset(name='Auto Binning', file_path='', total_features=0, discrete_features=0, continuous_features=0, target_variable=target)
             print(f"[auto_monotonic_binning] DEBUG: Created new dataset: {dataset_id}")
 
-        # Ensure feature exists
+        # CRITICAL: Ensure feature exists and belongs to the correct dataset_id
+        # This prevents binning data from being saved to features from other records
         feature = get_feature_by_name(dataset_id, var)
         if not feature:
             fid = create_feature(dataset_id, var, var_type, selected=True)
             feature = get_feature(fid)
-            print(f"[auto_monotonic_binning] DEBUG: Created new feature: {var}, feature_id={fid}")
+            print(f"[auto_monotonic_binning] ✅ Created new feature: {var}, feature_id={fid}, dataset_id={dataset_id}")
         else:
-            print(f"[auto_monotonic_binning] DEBUG: Feature exists: {var}, feature_id={feature['id']}")
+            # CRITICAL: Verify feature belongs to the correct dataset
+            if feature.get('dataset_id') != dataset_id:
+                error_msg = f"Feature {var} (id={feature['id']}) belongs to dataset {feature.get('dataset_id')}, not {dataset_id}. This indicates data mixing!"
+                print(f"[auto_monotonic_binning] ❌ ERROR: {error_msg}")
+                return jsonify({"error": error_msg}), 400
+            print(f"[auto_monotonic_binning] ✅ Feature exists: {var}, feature_id={feature['id']}, dataset_id={dataset_id}")
 
         # Ensure coarse saved
         try:
@@ -7494,8 +7506,8 @@ def save_record():
 def upsert_single_record():
     """
     Create or update a single dataset record.
-    If no dataset exists, insert one; otherwise update the latest dataset.
-    This supports the UX where only one record should exist and be updated across actions.
+    If record_id is provided, update that specific record.
+    If record_id is not provided, always create a new record to prevent data mixing.
     """
     print("\n[API] /api/upsert-single-record called")
     try:
@@ -7527,6 +7539,21 @@ def upsert_single_record():
             dataset_name = re.sub(r'_\d{8}_\d{6}$', '', dataset_name)
         else:
             dataset_name = "Dataset"
+        
+        # CRITICAL: When creating a new dataset (no record_id), validate columns exist in CSV
+        # This prevents old columns from previous records mixing into new records
+        csv_columns = set()
+        if not record_id and dataset_path:
+            try:
+                csv_path = _resolve_dataset_file_path(dataset_path)
+                if csv_path and os.path.exists(csv_path):
+                    df = pd.read_csv(csv_path, nrows=0)  # Read only headers
+                    csv_columns = set(df.columns.str.strip())
+                    print(f'[upsert_single_record] ✅ Validated CSV columns: {len(csv_columns)} columns found')
+                else:
+                    print(f'[upsert_single_record] WARNING: CSV path not found: {dataset_path}')
+            except Exception as e:
+                print(f'[upsert_single_record] WARNING: Failed to validate CSV columns: {str(e)}')
         
         # Determine which dataset to use
         if record_id:
@@ -7561,38 +7588,39 @@ def upsert_single_record():
                 )
                 print(f'[backend] Created new dataset with id: {dataset_id}')
         else:
-            # No record_id provided - get latest or create new
-            latest = get_latest_dataset()
+            # No record_id provided - ALWAYS create a new dataset
+            # This prevents data from previous records mixing into new records
+            if not dataset_path:
+                print('[backend] WARNING: Creating new dataset without dataset_path')
             
-            if latest is None:
-                # Create new dataset
-                if not dataset_path:
-                    print('[backend] WARNING: Creating new dataset without dataset_path')
-                dataset_id = create_dataset(
-                    name=dataset_name,
-                    file_path=dataset_path or '',
-                    target_variable=target_variable
-                )
-                print(f'[backend] Created new dataset with id: {dataset_id}')
-            else:
-                # Update existing dataset
-                dataset_id = latest['id']
-                # If dataset_path not provided, keep existing one
-                if not dataset_path:
-                    dataset_path = latest.get('file_path', '')
-                update_dataset(
-                    dataset_id=dataset_id,
-                    name=dataset_name,
-                    target_variable=target_variable,
-                    file_path=dataset_path if dataset_path else None
-                )
-                print(f'[backend] Updated latest dataset with id: {dataset_id}')
+            dataset_id = create_dataset(
+                name=dataset_name,
+                file_path=dataset_path or '',
+                target_variable=target_variable
+            )
+            print(f'[backend] Created new dataset with id: {dataset_id} (no record_id provided)')
         
         # Update features for this dataset
         existing_features = get_features_by_dataset(dataset_id)
         existing_feature_names = {f['name'] for f in existing_features}
         
         all_columns = set(discrete_columns + continuous_columns)
+        
+        # CRITICAL: When creating a new dataset (no record_id was provided), 
+        # only create features for columns that exist in the CSV file
+        # This prevents old columns from previous records mixing into new records
+        if not record_id and dataset_path and csv_columns:
+            # Filter out columns that don't exist in the CSV
+            invalid_columns = all_columns - csv_columns
+            if invalid_columns:
+                print(f'[upsert_single_record] ⚠️ FILTERING OUT invalid columns not in CSV: {invalid_columns}')
+                print(f'[upsert_single_record] Valid columns from CSV: {sorted(csv_columns)}')
+                all_columns = all_columns & csv_columns  # Keep only columns that exist in CSV
+                # Also filter discrete_columns and continuous_columns
+                discrete_columns = [c for c in discrete_columns if c in csv_columns]
+                continuous_columns = [c for c in continuous_columns if c in csv_columns]
+                selected_columns = [c for c in selected_columns if c in csv_columns]
+                print(f'[upsert_single_record] ✅ After filtering: {len(all_columns)} valid columns')
         
         # Create new features that don't exist
         # Target variable is always set to selected=False
@@ -7601,12 +7629,13 @@ def upsert_single_record():
                 var_type = 'discrete' if col in discrete_columns else 'continuous'
                 # Target variable is always False, others follow selected_columns
                 is_selected = False if col == target_variable else (col in selected_columns)
-                create_feature(
+                feature_id = create_feature(
                     dataset_id=dataset_id,
                     name=col,
                     feature_type=var_type,
                     selected=is_selected
                 )
+                print(f'[upsert_single_record] ✅ Created feature: {col} (id={feature_id}, type={var_type}, selected={is_selected}, dataset_id={dataset_id})')
         
         # Update existing features (type and selection)
         # NOTE: Only update selected if feature is explicitly in selected_columns

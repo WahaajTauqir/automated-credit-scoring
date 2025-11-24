@@ -1192,27 +1192,61 @@ const SelectedColumnsPage = () => {
   const loadSavedData = async () => {
     if (!recordId) return;
     try {
+      console.log(`[SelectedColumnsPage] 🔄 Loading saved data for record ${recordId}`);
       const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
       const recordData = await recordResp.json();
 
+      // CRITICAL: Load ALL record-specific data to ensure complete isolation
       // Load dataset path from record
       if (recordData.dataset_path) {
         setDatasetPath(recordData.dataset_path);
       }
 
+      // CRITICAL: Load target variable - this was missing!
+      const targetVar = recordData.target_variable || '';
+      console.log(`[SelectedColumnsPage] ✅ Loading target_variable: "${targetVar}" for record ${recordId}`);
+      setTargetVariable(targetVar);
+
+      // CRITICAL: Load discrete and continuous columns - these were missing!
+      const discreteCols = Array.isArray(recordData.discrete_columns) ? recordData.discrete_columns : [];
+      const continuousCols = Array.isArray(recordData.continuous_columns) ? recordData.continuous_columns : [];
+      console.log(`[SelectedColumnsPage] ✅ Loading columns: ${discreteCols.length} discrete, ${continuousCols.length} continuous for record ${recordId}`);
+      setDiscreteColumns(discreteCols);
+      setContinuousColumns(continuousCols);
+
+      // CRITICAL: Build set of valid columns for this record to filter selectedColumns
+      const validColumnsForRecord = new Set([...discreteCols, ...continuousCols]);
+      console.log(`[SelectedColumnsPage] ✅ Valid columns for record ${recordId}: ${validColumnsForRecord.size} total`);
+
       if (recordData.binning_data) {
-        const lookup = buildTypeLookup(
-          Array.isArray(recordData.discrete_columns) ? recordData.discrete_columns : [],
-          Array.isArray(recordData.continuous_columns) ? recordData.continuous_columns : []
-        );
+        const lookup = buildTypeLookup(discreteCols, continuousCols);
         const normalized = buildBinningState(recordData.binning_data, lookup);
         syncBinningFromState(normalized);
       }
 
+      // CRITICAL: Filter selected_columns to only include columns that exist in this record
+      // This prevents features from other records appearing in binning
       if (Array.isArray(recordData.selected_columns)) {
-        setSelectedColumns(recordData.selected_columns);
+        const filteredSelected = recordData.selected_columns.filter((col: string) => 
+          validColumnsForRecord.has(col)
+        );
+        
+        // Log if any columns were filtered out
+        const filteredOut = recordData.selected_columns.filter((col: string) => 
+          !validColumnsForRecord.has(col)
+        );
+        if (filteredOut.length > 0) {
+          console.log(`[SelectedColumnsPage] ⚠️ Filtered out ${filteredOut.length} columns not in this record:`, filteredOut);
+        }
+        
+        console.log(`[SelectedColumnsPage] ✅ Setting selectedColumns: ${filteredSelected.length} columns for record ${recordId}`);
+        setSelectedColumns(filteredSelected);
         // Load selectedForUnivariate from database for Classification checkboxes
-        setSelectedForUnivariate(recordData.selected_columns);
+        setSelectedForUnivariate(filteredSelected);
+      } else {
+        // If no selected_columns, clear it
+        setSelectedColumns([]);
+        setSelectedForUnivariate([]);
       }
 
       let modelReadySelections: string[] = [];
@@ -1256,8 +1290,10 @@ const SelectedColumnsPage = () => {
 
       setSelectedForModeling(modelReadySelections);
       setSelectedForFinalModeling(finalSelections);
+      
+      console.log(`[SelectedColumnsPage] ✅ Successfully loaded all data for record ${recordId}`);
     } catch (e) {
-
+      console.error(`[SelectedColumnsPage] ❌ Error loading saved data for record ${recordId}:`, e);
     }
   };
   const handleColumnClick = async (col: string) => {
@@ -2392,9 +2428,41 @@ const SelectedColumnsPage = () => {
         return false;
     }
   };
+  // CRITICAL: Clear all state when recordId changes to ensure complete isolation between records
+  // This runs BEFORE loadSavedData to prevent old data from persisting
+  const prevRecordIdRef = useRef<number | undefined>(recordId);
+  useEffect(() => {
+    // If recordId changed (including from undefined to a value, or from one record to another)
+    if (prevRecordIdRef.current !== recordId) {
+      console.log(`[SelectedColumnsPage] 🔄 Record ID changed: ${prevRecordIdRef.current} → ${recordId}`);
+      
+      // Clear all record-specific state when switching records
+      // This ensures old data from previous record doesn't persist
+      console.log('[SelectedColumnsPage] 🧹 Clearing all state before loading new record');
+      setTargetVariable('');
+      setDiscreteColumns([]);
+      setContinuousColumns([]);
+      setSelectedColumns([]);
+      setSelectedForUnivariate([]);
+      setUnivariateResults({});
+      setCoarseBinResults({});
+      setFineBinResults({});
+      setWoeIvResults({});
+      setSelectedForModeling([]);
+      setSelectedForFinalModeling([]);
+      setWoeReadyColumns(new Set());
+      
+      // Update ref for next comparison
+      prevRecordIdRef.current = recordId;
+    }
+  }, [recordId]);
+
   useEffect(() => {
     // Only fetch record when recordId changes, not in every render or loop
-    loadSavedData();
+    if (recordId) {
+      console.log(`[SelectedColumnsPage] 🔄 Loading data for record ${recordId}`);
+      loadSavedData();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordId]);
 

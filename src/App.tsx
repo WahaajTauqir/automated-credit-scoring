@@ -148,6 +148,9 @@ function App() {
   };
 
   const handleCSVUploaded = (headers: string[], _rows?: any[], uploadedPath?: string, datasetId?: number) => {
+    // CRITICAL: Clear ALL state when starting a new analysis
+    // This prevents old data from previous records mixing into new records
+    console.log('[App] 🧹 Clearing all state for new CSV upload');
     setColumns(headers);
     if (uploadedPath) setDatasetPath(uploadedPath);
     setExpectedColumnsForRecord(undefined);
@@ -160,14 +163,21 @@ function App() {
     setSelectedBinGroups({});
     setCurrentPage(1);
     setTargetCounts({});
+    setSelectedForUnivariate([]);
+    // CRITICAL: Clear activeRecordId when starting fresh (will be set after record is created)
+    // Only set it if datasetId is explicitly provided (from existing record)
     if (datasetId) {
       setActiveRecordId(datasetId);
+      console.log('[App] ✅ Using existing recordId:', datasetId);
+    } else {
+      setActiveRecordId(undefined);
+      console.log('[App] ✅ Cleared activeRecordId for new analysis');
     }
     navigate('/selected-columns', {
       state: {
         columns: headers,
         datasetPath: uploadedPath,
-        recordId: datasetId,
+        recordId: datasetId, // Will be undefined for new analysis
       }
     });
   };
@@ -346,9 +356,24 @@ function App() {
   const handleRecordView = async (id: number) => {
     try {
       setRestoring(true);
+      console.log(`[App] 🔄 Loading record ${id}`);
+      
+      // CRITICAL: Clear all state before loading new record to ensure complete isolation
+      console.log('[App] 🧹 Clearing all state before loading record');
+      setColumns([]);
+      setDiscreteColumns([]);
+      setContinuousColumns([]);
+      setTargetVariable('');
+      setUnivariateResults({});
+      setFineBinResults({});
+      setCrossTabResults({});
+      setSelectedForUnivariate([]);
+      setActiveRecordId(id);
+      
       // Fetch complete record
       const recResp = await fetch(`http://localhost:5000/api/record/${id}`);
       const data: AnalysisRecord = await recResp.json();
+      console.log(`[App] ✅ Loaded record ${id}: target_variable="${data.target_variable || ''}"`);
 
       // Infer columns from stored column arrays (much faster than loading entire CSV)
       const inferred = new Set<string>();
