@@ -8,7 +8,15 @@ This document describes the train/test split implementation to prevent data leak
 
 **TEST SET IS NEVER SEEN until final evaluation!**
 
-All learning (preprocessing, binning, WOE calculation, model training) happens on the TRAIN set only.
+**New Flow (Option 1):**
+- Preprocessing happens on FULL dataset first (cleaning, basic transformations)
+- Train/Test split happens on PREPROCESSED data
+- All learning (binning, WOE calculation, model training) happens on the TRAIN set only
+
+**Benefits:**
+- Split is done on clean, preprocessed data
+- Ensures consistent data quality before splitting
+- Preprocessed train/test files are saved for efficient loading
 
 ## Pipeline Flow
 
@@ -17,13 +25,16 @@ All learning (preprocessing, binning, WOE calculation, model training) happens o
    ↓
 2. Variable Classification (discrete/continuous, target)
    ↓
-3. ⚠️ TRAIN/TEST SPLIT (80/20, stratified) ⚠️
-   ├─ Train Set (80%) → Lock for learning
-   └─ Test Set (20%) → Lock until evaluation
+3. Preprocessing (FULL DATASET)
+   ├─ Clean: remove duplicates, handle missing values
+   ├─ Detect: column types (discrete/continuous)
+   └─ Prepare: data for splitting
    ↓
-4. Preprocessing (TRAIN ONLY)
-   ├─ Learn: missing value strategies, outlier thresholds
-   └─ Apply to TEST later
+4. ⚠️ TRAIN/TEST SPLIT (80/20, stratified) ⚠️
+   ├─ Split happens on PREPROCESSED data
+   ├─ Train Set (70%) → Lock for learning
+   ├─ Test Set (30%) → Lock until evaluation
+   └─ Save: preprocessed train/test files
    ↓
 5. Coarse Binning (TRAIN ONLY)
    ├─ Learn: bin boundaries (quantiles, frequency)
@@ -42,6 +53,7 @@ All learning (preprocessing, binning, WOE calculation, model training) happens o
    └─ Evaluate: on TRAIN set (for overfitting check)
    ↓
 9. Model Evaluation (FIRST TIME SEEING TEST!)
+   ├─ Load: preprocessed TEST set
    ├─ Apply: learned transformations to TEST
    ├─ Predict: using trained model on TEST
    └─ Evaluate: final metrics on TEST
@@ -148,7 +160,7 @@ Stratification ensures:
 
 ## Usage Example
 
-### 1. Create Split (after variable classification)
+### 1. Create Split (after preprocessing)
 ```python
 POST /api/train-test-split
 {

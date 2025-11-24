@@ -1384,29 +1384,72 @@ def save_train_test_split_metadata(dataset_id: int, split_info: Dict) -> bool:
         print(f"  Train bad: {split_info['train_bad']}")
         print(f"  Test bad: {split_info['test_bad']}")
         
+        # Check if train_path and test_path columns exist
         cur.execute("""
-            UPDATE records
-            SET train_test_split_seed = %s,
-                train_test_split_size = %s,
-                train_test_split_method = %s,
-                train_size = %s,
-                test_size = %s,
-                train_bad_count = %s,
-                test_bad_count = %s,
-                split_created_at = NOW(),
-                data_hash = %s
-            WHERE id = %s
-        """, (
-            split_info['seed'],
-            split_info['test_size'],  # Proportion (0.2 for 20%)
-            split_info['method'],
-            split_info['train_size'],
-            test_size_count,  # Count of test rows
-            split_info['train_bad'],
-            split_info['test_bad'],
-            split_info.get('data_hash'),
-            dataset_id
-        ))
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'records' 
+            AND column_name IN ('train_path', 'test_path')
+        """)
+        path_columns_exist = len(cur.fetchall()) == 2
+        
+        # Build UPDATE query with or without path columns
+        if path_columns_exist:
+            cur.execute("""
+                UPDATE records
+                SET train_test_split_seed = %s,
+                    train_test_split_size = %s,
+                    train_test_split_method = %s,
+                    train_size = %s,
+                    test_size = %s,
+                    train_bad_count = %s,
+                    test_bad_count = %s,
+                    split_created_at = NOW(),
+                    data_hash = %s,
+                    train_path = %s,
+                    test_path = %s
+                WHERE id = %s
+            """, (
+                split_info['seed'],
+                split_info['test_size'],  # Proportion (0.2 for 20%)
+                split_info['method'],
+                split_info['train_size'],
+                test_size_count,  # Count of test rows
+                split_info['train_bad'],
+                split_info['test_bad'],
+                split_info.get('data_hash'),
+                split_info.get('train_path'),
+                split_info.get('test_path'),
+                dataset_id
+            ))
+        else:
+            # Fallback if columns don't exist yet
+            cur.execute("""
+                UPDATE records
+                SET train_test_split_seed = %s,
+                    train_test_split_size = %s,
+                    train_test_split_method = %s,
+                    train_size = %s,
+                    test_size = %s,
+                    train_bad_count = %s,
+                    test_bad_count = %s,
+                    split_created_at = NOW(),
+                    data_hash = %s
+                WHERE id = %s
+            """, (
+                split_info['seed'],
+                split_info['test_size'],  # Proportion (0.2 for 20%)
+                split_info['method'],
+                split_info['train_size'],
+                test_size_count,  # Count of test rows
+                split_info['train_bad'],
+                split_info['test_bad'],
+                split_info.get('data_hash'),
+                dataset_id
+            ))
+            if split_info.get('train_path') or split_info.get('test_path'):
+                print(f"[DB] WARNING: train_path/test_path provided but columns don't exist in database")
+                print(f"[DB] Please add columns: ALTER TABLE records ADD COLUMN train_path TEXT, ADD COLUMN test_path TEXT;")
         
         # Verify the update worked
         rows_updated = cur.rowcount
@@ -1459,19 +1502,48 @@ def get_train_test_split_info(dataset_id: int) -> Optional[Dict]:
     cur = conn.cursor()
     
     try:
+        # Check if train_path and test_path columns exist
         cur.execute("""
-            SELECT train_test_split_seed,
-                   train_test_split_size,
-                   train_test_split_method,
-                   train_size,
-                   test_size,
-                   train_bad_count,
-                   test_bad_count,
-                   split_created_at,
-                   data_hash
-            FROM records
-            WHERE id = %s
-        """, (dataset_id,))
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'records' 
+            AND column_name IN ('train_path', 'test_path')
+        """)
+        path_columns_exist = len(cur.fetchall()) == 2
+        
+        # Build SELECT query with or without path columns
+        if path_columns_exist:
+            cur.execute("""
+                SELECT train_test_split_seed,
+                       train_test_split_size,
+                       train_test_split_method,
+                       train_size,
+                       test_size,
+                       train_bad_count,
+                       test_bad_count,
+                       split_created_at,
+                       data_hash,
+                       train_path,
+                       test_path
+                FROM records
+                WHERE id = %s
+            """, (dataset_id,))
+        else:
+            cur.execute("""
+                SELECT train_test_split_seed,
+                       train_test_split_size,
+                       train_test_split_method,
+                       train_size,
+                       test_size,
+                       train_bad_count,
+                       test_bad_count,
+                       split_created_at,
+                       data_hash,
+                       NULL as train_path,
+                       NULL as test_path
+                FROM records
+                WHERE id = %s
+            """, (dataset_id,))
         
         row = cur.fetchone()
         
@@ -1479,7 +1551,7 @@ def get_train_test_split_info(dataset_id: int) -> Optional[Dict]:
             # No split exists
             return None
         
-        return {
+        result = {
             'seed': row[0],
             'test_size': float(row[1]) if row[1] else None,  # Proportion (0.2 for 20%)
             'method': row[2],
@@ -1493,6 +1565,13 @@ def get_train_test_split_info(dataset_id: int) -> Optional[Dict]:
             'train_bad_rate': row[5] / row[3] if row[3] and row[5] else None,
             'test_bad_rate': row[6] / row[4] if row[4] and row[6] else None
         }
+        
+        # Add paths if columns exist
+        if path_columns_exist and len(row) > 9:
+            result['train_path'] = row[9]
+            result['test_path'] = row[10]
+        
+        return result
     except Exception as e:
         print(f"[DB] Error retrieving train/test split info: {e}")
         return None

@@ -9,7 +9,6 @@ import './App.css';
 import './components/Admin/AdminPanel.css';
 import { AnalysisRecord } from './types/analysis';
 import { buildBinningState, buildTypeLookup } from './utils/binning';
-import { DEFAULT_TEST_SIZE } from './config';
 
 function App() {
   const location = useLocation();
@@ -297,12 +296,11 @@ function App() {
   }, [targetVariable]);
 
   // Persist target variable to backend when user selects it (non-blocking)
-  // Then automatically create train/test split
   useEffect(() => {
     if (!targetVariable || !activeRecordId) return;
     (async () => {
       try {
-        // Step 1: Persist target variable
+        // Persist target variable
         await fetch('http://localhost:5000/api/upsert-single-record', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -315,34 +313,9 @@ function App() {
             record_id: activeRecordId
           })
         });
-
-        // Step 2: Automatically create train/test split (80/20 stratified)
-        console.log('[TTS] Creating train/test split after target variable selection...');
-        const ttsResponse = await fetch('http://localhost:5000/api/train-test-split', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dataset_id: activeRecordId,
-            test_size: DEFAULT_TEST_SIZE
-          })
-        });
-
-        if (ttsResponse.ok) {
-          const ttsData = await ttsResponse.json();
-          if (ttsData.success) {
-            console.log('[TTS] ✅ Train/test split created successfully:', ttsData.split_info);
-            if (!ttsData.is_existing) {
-              console.log(`[TTS] Split: ${ttsData.split_info.train_size} train, ${ttsData.split_info.test_size_count} test`);
-            }
-          } else {
-            console.warn('[TTS] ⚠️ Train/test split creation returned success=false:', ttsData);
-          }
-        } else {
-          const errorData = await ttsResponse.json();
-          console.error('[TTS] ❌ Failed to create train/test split:', errorData.error || 'Unknown error');
-        }
+        console.log('[TARGET] ✅ Target variable persisted to backend');
       } catch (err) {
-        console.error('Failed to persist target variable or create TTS:', err);
+        console.error('Failed to persist target variable:', err);
       }
     })();
   }, [targetVariable, activeRecordId]);
