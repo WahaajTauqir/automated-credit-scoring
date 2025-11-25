@@ -271,7 +271,7 @@ const StackingResults: React.FC<StackingResultsProps> = ({
         <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
           {/* Labels */}
           <text x={pad + cell} y={pad - 6} textAnchor="middle" fill={labelFill} fontSize={12}>Predicted</text>
-          <text x={pad + cell / 2} y={pad + size + 14} textAnchor="middle" fill={labelFill} fontSize={12} transform={`rotate(-90, ${pad + cell / 2}, ${pad + size / 2})`}>Actual</text>
+          <text x={pad - 8} y={pad + size / 2} textAnchor="start" fill={labelFill} fontSize={12} transform={`rotate(-90, ${pad - 8}, ${pad + size / 2})`}>Actual</text>
 
           {/* Grid cells */}
           {[0, 1].map((r) =>
