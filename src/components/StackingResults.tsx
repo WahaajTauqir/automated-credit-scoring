@@ -261,11 +261,11 @@ const StackingResults: React.FC<StackingResultsProps> = ({
       <div className="confusion-svg-panel">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '12px' }}>
           <button className="view-toggle-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
-            Counts
-          </button>
+              Counts
+            </button>
           <button className="view-toggle-btn" onClick={() => setConfusionView('percent')}>
-            Percent
-          </button>
+              Percent
+            </button>
         </div>
 
         <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
@@ -430,88 +430,88 @@ const StackingResults: React.FC<StackingResultsProps> = ({
               <h4>KS Statistics</h4>
               {renderKSCurve()}
             </div>
-          </div>
+      </div>
 
           {/* Bottom Section: All Details */}
           <div className="model-details-section">
             {/* Meta-Learner Weights */}
             <div className="detail-card">
-              <h4>Meta-Learner Weights (Logistic Regression)</h4>
+                  <h4>Meta-Learner Weights (Logistic Regression)</h4>
               <div className="table-container">
                 <table>
-                  <thead>
-                    <tr>
-                      <th>Base Model</th>
-                      <th>Weight (Coefficient)</th>
-                      <th>Interpretation</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td><strong>Logistic Regression</strong></td>
-                      <td>{formatNumber(results.meta_learner_weights.logistic_regression)}</td>
-                      <td>Contribution of LR predictions to ensemble</td>
-                    </tr>
-                    <tr>
-                      <td><strong>Random Forest</strong></td>
-                      <td>{formatNumber(results.meta_learner_weights.random_forest)}</td>
-                      <td>Contribution of RF predictions to ensemble</td>
-                    </tr>
-                    <tr>
-                      <td><strong>XGBoost</strong></td>
-                      <td>{formatNumber(results.meta_learner_weights.xgboost)}</td>
-                      <td>Contribution of XGB predictions to ensemble</td>
-                    </tr>
-                    {results.meta_learner_weights.intercept !== undefined && (
-                      <tr>
-                        <td><strong>Intercept</strong></td>
-                        <td>{formatNumber(results.meta_learner_weights.intercept)}</td>
-                        <td>Base probability adjustment</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                      <thead>
+                        <tr>
+                          <th>Base Model</th>
+                          <th>Weight (Coefficient)</th>
+                          <th>Interpretation</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td><strong>Logistic Regression</strong></td>
+                          <td>{formatNumber(results.meta_learner_weights.logistic_regression)}</td>
+                          <td>Contribution of LR predictions to ensemble</td>
+                        </tr>
+                        <tr>
+                          <td><strong>Random Forest</strong></td>
+                          <td>{formatNumber(results.meta_learner_weights.random_forest)}</td>
+                          <td>Contribution of RF predictions to ensemble</td>
+                        </tr>
+                        <tr>
+                          <td><strong>XGBoost</strong></td>
+                          <td>{formatNumber(results.meta_learner_weights.xgboost)}</td>
+                          <td>Contribution of XGB predictions to ensemble</td>
+                        </tr>
+                        {results.meta_learner_weights.intercept !== undefined && (
+                          <tr>
+                            <td><strong>Intercept</strong></td>
+                            <td>{formatNumber(results.meta_learner_weights.intercept)}</td>
+                            <td>Base probability adjustment</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
               <div style={{ marginTop: '20px', color: '#f0f6fc', fontSize: '13px' }}>
                 <h5 style={{ marginTop: 0, marginBottom: '8px' }}>How to Interpret Weights:</h5>
                 <ul style={{ margin: 0, paddingLeft: '20px' }}>
-                  <li>Weights are coefficients from the meta-learner (Logistic Regression)</li>
-                  <li>Final probability = sigmoid(intercept + LR_weight × LR_prob + RF_weight × RF_prob + XGB_weight × XGB_prob)</li>
-                  <li>Positive weights increase the probability of default</li>
-                  <li>Negative weights decrease the probability of default</li>
-                  <li>The meta-learner learns these weights to minimize prediction error</li>
-                </ul>
-              </div>
-            </div>
+                      <li>Weights are coefficients from the meta-learner (Logistic Regression)</li>
+                      <li>Final probability = sigmoid(intercept + LR_weight × LR_prob + RF_weight × RF_prob + XGB_weight × XGB_prob)</li>
+                      <li>Positive weights increase the probability of default</li>
+                      <li>Negative weights decrease the probability of default</li>
+                      <li>The meta-learner learns these weights to minimize prediction error</li>
+                    </ul>
+                  </div>
+                </div>
 
             {/* Base Models Performance */}
             <div className="detail-card">
-              <h4>Base Models Performance (Test Set)</h4>
+                  <h4>Base Models Performance (Test Set)</h4>
               <div className="table-container">
                 <table>
-                  <thead>
-                    <tr>
-                      <th>Model</th>
-                      <th>AUC</th>
-                      <th>Gini</th>
-                      <th>Recall</th>
-                      <th>Precision</th>
-                      <th>F1-Score</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {results.base_models_performance.map((model, idx) => (
-                      <tr key={idx}>
-                        <td><strong>{model.model}</strong></td>
-                        <td>{formatNumber(model.auc)}</td>
-                        <td>{formatNumber(model.gini)}</td>
-                        <td>{formatNumber(model.recall)}</td>
-                        <td>{formatNumber(model.precision)}</td>
-                        <td>{formatNumber(model.f1)}</td>
+                    <thead>
+                      <tr>
+                        <th>Model</th>
+                        <th>AUC</th>
+                        <th>Gini</th>
+                        <th>Recall</th>
+                        <th>Precision</th>
+                        <th>F1-Score</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {results.base_models_performance.map((model, idx) => (
+                        <tr key={idx}>
+                          <td><strong>{model.model}</strong></td>
+                          <td>{formatNumber(model.auc)}</td>
+                          <td>{formatNumber(model.gini)}</td>
+                          <td>{formatNumber(model.recall)}</td>
+                          <td>{formatNumber(model.precision)}</td>
+                          <td>{formatNumber(model.f1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
               </div>
             </div>
 
@@ -520,39 +520,39 @@ const StackingResults: React.FC<StackingResultsProps> = ({
               <h4>Ensemble Performance (Test Set)</h4>
               <div className="summary-grid">
                 <div className="summary-item">
-                  <label>AUC-ROC:</label>
-                  <span>{formatNumber(results.ensemble_performance.auc)}</span>
-                </div>
+                      <label>AUC-ROC:</label>
+                      <span>{formatNumber(results.ensemble_performance.auc)}</span>
+                    </div>
                 <div className="summary-item">
-                  <label>Gini Coefficient:</label>
-                  <span>{formatNumber(results.ensemble_performance.gini_coefficient)}</span>
-                </div>
+                      <label>Gini Coefficient:</label>
+                      <span>{formatNumber(results.ensemble_performance.gini_coefficient)}</span>
+                    </div>
                 <div className="summary-item">
-                  <label>Accuracy:</label>
-                  <span>{results.ensemble_performance.accuracy ? formatNumber(results.ensemble_performance.accuracy) : 'N/A'}</span>
-                </div>
+                      <label>Accuracy:</label>
+                      <span>{results.ensemble_performance.accuracy ? formatNumber(results.ensemble_performance.accuracy) : 'N/A'}</span>
+                    </div>
                 <div className="summary-item">
-                  <label>Precision:</label>
-                  <span>{results.ensemble_performance.precision ? formatNumber(results.ensemble_performance.precision) : 'N/A'}</span>
-                </div>
+                      <label>Precision:</label>
+                      <span>{results.ensemble_performance.precision ? formatNumber(results.ensemble_performance.precision) : 'N/A'}</span>
+                    </div>
                 <div className="summary-item">
-                  <label>Recall:</label>
-                  <span>{results.ensemble_performance.recall ? formatNumber(results.ensemble_performance.recall) : 'N/A'}</span>
-                </div>
+                      <label>Recall:</label>
+                      <span>{results.ensemble_performance.recall ? formatNumber(results.ensemble_performance.recall) : 'N/A'}</span>
+                    </div>
                 <div className="summary-item">
-                  <label>F1-Score:</label>
-                  <span>{results.ensemble_performance.f1 ? formatNumber(results.ensemble_performance.f1) : 'N/A'}</span>
-                </div>
+                      <label>F1-Score:</label>
+                      <span>{results.ensemble_performance.f1 ? formatNumber(results.ensemble_performance.f1) : 'N/A'}</span>
+                    </div>
                 <div className="summary-item">
-                  <label>KS Statistic:</label>
-                  <span>{results.ensemble_performance.ks_stat ? formatNumber(results.ensemble_performance.ks_stat) : 'N/A'}</span>
-                </div>
+                      <label>KS Statistic:</label>
+                      <span>{results.ensemble_performance.ks_stat ? formatNumber(results.ensemble_performance.ks_stat) : 'N/A'}</span>
+                    </div>
                 <div className="summary-item">
-                  <label>Optimal Threshold:</label>
-                  <span>{results.ensemble_performance.ks_threshold ? formatNumber(results.ensemble_performance.ks_threshold) : 'N/A'}</span>
+                      <label>Optimal Threshold:</label>
+                      <span>{results.ensemble_performance.ks_threshold ? formatNumber(results.ensemble_performance.ks_threshold) : 'N/A'}</span>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
 
             {/* Generate Score Card Button */}
             {onGenerateScoreCard && (
@@ -569,9 +569,9 @@ const StackingResults: React.FC<StackingResultsProps> = ({
                 >
                   {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                 </button>
-              </div>
-            )}
           </div>
+        )}
+      </div>
         </>
       )}
     </div>

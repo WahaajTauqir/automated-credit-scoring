@@ -746,7 +746,7 @@ def create_binning_step(feature_id: int, step_type: str, method: str = None,
         
         # FIX: Ensure is_monotonic is Python bool (not numpy.bool) for psycopg2 compatibility
         is_monotonic_python = bool(is_monotonic) if is_monotonic is not None else False
-        
+    
         cur.execute("""
             INSERT INTO binning_steps (feature_id, step_type, method, num_bins, 
                                       is_monotonic, monotonic_direction, iv_value)
@@ -759,8 +759,8 @@ def create_binning_step(feature_id: int, step_type: str, method: str = None,
                 monotonic_direction = EXCLUDED.monotonic_direction,
                 iv_value = EXCLUDED.iv_value
             RETURNING id;
-        """, (feature_id, step_type, method, num_bins, is_monotonic_python, monotonic_direction, iv_value))
-        
+            """, (feature_id, step_type, method, num_bins, is_monotonic_python, monotonic_direction, iv_value))
+    
         step_id = cur.fetchone()[0]
         conn.commit()
         return step_id
@@ -856,13 +856,13 @@ def update_binning_step(step_id: int, **kwargs) -> bool:
         
         set_clause = ", ".join([f"{key} = %s" for key in processed_kwargs.keys()])
         values = list(processed_kwargs.values()) + [step_id]
-        
+    
         cur.execute(f"""
             UPDATE binning_steps 
             SET {set_clause}
             WHERE id = %s
         """, values)
-        
+    
         conn.commit()
         return True
     except Exception as e:

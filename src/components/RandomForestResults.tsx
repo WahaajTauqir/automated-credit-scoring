@@ -282,11 +282,11 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
             <div className="confusion-svg-panel">
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '12px' }}>
                     <button className="view-toggle-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
-                        Counts
-                    </button>
+                            Counts
+                        </button>
                     <button className="view-toggle-btn" onClick={() => setConfusionView('percent')}>
-                        Percent
-                    </button>
+                            Percent
+                        </button>
                 </div>
 
                 <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
@@ -358,8 +358,8 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
                                 <KSChart ks_curve={results.ks_curve} ks_stat={results.ks_stat ?? 0} />
                             ) : (
                                 <div className="no-data-message">No KS data available</div>
-                            )}
-                        </div>
+                )}
+            </div>
                     </div>
 
                     {/* Bottom Section: All Details */}
@@ -446,9 +446,9 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
                                 >
                                     {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                                 </button>
-                            </div>
-                        )}
                     </div>
+                )}
+            </div>
                 </>
             )}
         </div>

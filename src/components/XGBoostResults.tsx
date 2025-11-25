@@ -357,11 +357,11 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
             <div className="confusion-svg-panel">
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '12px' }}>
                     <button className="view-toggle-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
-                        Counts
-                    </button>
+                            Counts
+                        </button>
                     <button className="view-toggle-btn" onClick={() => setConfusionView('percent')}>
-                        Percent
-                    </button>
+                            Percent
+                        </button>
                 </div>
 
                 <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
@@ -541,7 +541,7 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
                             <h4>KS Statistics</h4>
                             {renderKSCurve()}
                         </div>
-                    </div>
+            </div>
 
                     {/* Bottom Section: All Details */}
                     <div className="model-details-section">
@@ -561,48 +561,48 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
                         <div className="detail-card">
                             <h4>Model Summary</h4>
                             <div className="summary-grid">
-                                <div className="summary-item">
-                                    <label>Number of Trees:</label>
-                                    <span>{results.model_stats.n_estimators}</span>
-                                </div>
-                                <div className="summary-item">
-                                    <label>Max Depth:</label>
-                                    <span>{results.model_stats.max_depth}</span>
-                                </div>
-                                <div className="summary-item">
-                                    <label>Learning Rate:</label>
-                                    <span>{formatNumber(results.model_stats.learning_rate)}</span>
-                                </div>
-                                <div className="summary-item">
-                                    <label>Observations:</label>
-                                    <span>{results.model_stats.n_observations}</span>
-                                </div>
+                                        <div className="summary-item">
+                                            <label>Number of Trees:</label>
+                                            <span>{results.model_stats.n_estimators}</span>
+                                        </div>
+                                        <div className="summary-item">
+                                            <label>Max Depth:</label>
+                                            <span>{results.model_stats.max_depth}</span>
+                                        </div>
+                                        <div className="summary-item">
+                                            <label>Learning Rate:</label>
+                                            <span>{formatNumber(results.model_stats.learning_rate)}</span>
+                                        </div>
+                                        <div className="summary-item">
+                                            <label>Observations:</label>
+                                            <span>{results.model_stats.n_observations}</span>
+                                        </div>
                                 <div className="summary-item">
                                     <label>Features:</label>
                                     <span>{results.model_stats.n_features}</span>
-                                </div>
-                                <div className="summary-item">
-                                    <label>Gini Coefficient:</label>
-                                    <span>{formatNumber(results.gini_coefficient)}</span>
-                                </div>
-                                <div className="summary-item">
-                                    <label>AUC:</label>
-                                    <span>{formatNumber(results.auc)}</span>
-                                </div>
+                                    </div>
+                                        <div className="summary-item">
+                                            <label>Gini Coefficient:</label>
+                                            <span>{formatNumber(results.gini_coefficient)}</span>
+                                        </div>
+                                        <div className="summary-item">
+                                            <label>AUC:</label>
+                                            <span>{formatNumber(results.auc)}</span>
+                                        </div>
                                 {results.ks_stat !== undefined && (
                                     <div className="summary-item">
                                         <label>KS Statistic:</label>
                                         <span>{formatNumber(results.ks_stat)}</span>
                                     </div>
                                 )}
-                                {results.accuracy !== undefined && (
-                                    <>
-                                        <div className="summary-item">
-                                            <label>Accuracy:</label>
-                                            <span>{formatNumber(results.accuracy)}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Precision:</label>
+                                        {results.accuracy !== undefined && (
+                                            <>
+                                                <div className="summary-item">
+                                                    <label>Accuracy:</label>
+                                                    <span>{formatNumber(results.accuracy)}</span>
+                                                </div>
+                                                <div className="summary-item">
+                                                    <label>Precision:</label>
                                             <span>{formatNumber(results.precision ?? 0)}</span>
                                         </div>
                                         <div className="summary-item">
@@ -612,7 +612,7 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
                                         <div className="summary-item">
                                             <label>F1 Score:</label>
                                             <span>{formatNumber(results.f1 ?? 0)}</span>
-                                        </div>
+                                                </div>
                                     </>
                                 )}
                             </div>
@@ -633,9 +633,9 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
                                 >
                                     {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                                 </button>
-                            </div>
-                        )}
                     </div>
+                )}
+            </div>
                 </>
             )}
         </div>

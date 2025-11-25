@@ -313,11 +313,11 @@
   .model-results-container {
     padding: var(--spacing-xs);
   }
-
+  
   .summary-grid {
     grid-template-columns: 1fr;
   }
-
+  
   .graph-card,
   .detail-card {
     padding: var(--spacing-sm);

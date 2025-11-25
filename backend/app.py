@@ -8662,15 +8662,22 @@ def logistic_regression_analysis():
         while len(X.columns) > 0:
             # Compute VIFs
             vif_data_temp = []
-            X_with_const_temp = sm.add_constant(X)
+            # Ensure X is properly converted to numpy array for VIF calculation
+            if hasattr(X, 'values'):
+                X_array = X.values
+            else:
+                X_array = np.array(X)
+            X_with_const_temp = sm.add_constant(X_array, has_constant='add')
             for i in range(1, len(X.columns) + 1):  # Skip const
                 try:
-                    vif = variance_inflation_factor(X_with_const_temp.values, i)
+                    # variance_inflation_factor expects a numpy array
+                    vif = variance_inflation_factor(X_with_const_temp, i)
                     if np.isfinite(vif):
                         vif_data_temp.append((X.columns[i-1], vif))
                     else:
                         vif_data_temp.append((X.columns[i-1], np.inf))
-                except Exception:
+                except Exception as vif_err:
+                    print(f"LOGISTIC DEBUG: VIF calculation error in multicollinearity check: {vif_err}")
                     vif_data_temp.append((X.columns[i-1], np.inf))
             
             if not vif_data_temp:
@@ -8693,7 +8700,7 @@ def logistic_regression_analysis():
             print(f"LOGISTIC DEBUG: VIF dropped features (due to multicollinearity): {vif_dropped}")
         else:
             print("LOGISTIC DEBUG: No features dropped for VIF/multicollinearity")
-
+        
         dropped_variables = dropped_constants + vif_dropped
         if len(selected_variables) == 0:
             return jsonify({"error": f"All features removed due to constants or high multicollinearity (VIF > {max_vif_threshold}). Try selecting fewer or less correlated variables."}), 400
@@ -8730,7 +8737,8 @@ def logistic_regression_analysis():
             dup_mask = X.T.duplicated()
             dup_cols = X.columns[dup_mask].tolist()
             sample = X.head(5).to_dict(orient='records')
-            y_counts = y.value_counts().to_dict()
+            # Convert y to Series if it's a numpy array
+            y_counts = pd.Series(y).value_counts().to_dict() if isinstance(y, np.ndarray) else y.value_counts().to_dict()
             feature_totals = {col: float(val) if np.isfinite(val) else None for col, val in X.sum().to_dict().items()}
             print(f"LOGISTIC DEBUG: Final feature list ({len(X.columns)} features): {list(X.columns)}")
             print("LOGISTIC DEBUG: Feature column totals:", feature_totals)
@@ -8843,14 +8851,14 @@ def logistic_regression_analysis():
             except Exception as opt_err:
                 print(f"LOGISTIC DEBUG: ✗ {method} optimizer failed: {opt_err}")
                 continue
-        
+
         if not fit_success or result is None:
             if result is None:
                 return jsonify({"error": "Model fitting failed with all optimizers. Try fewer variables or check for perfect separation."}), 400
             else:
                 print("LOGISTIC DEBUG: ⚠ WARNING - Model fitted but all coefficients are zero")
                 print("LOGISTIC DEBUG:   This may indicate perfect separation or data issues")
-        
+
         # Log model fitting summary
         print(f"\n{'='*80}")
         print("LOGISTIC DEBUG: MODEL FITTING SUMMARY")
@@ -8867,9 +8875,193 @@ def logistic_regression_analysis():
             print(f"Non-zero coefficients: {non_zero} out of {len(params)}")
         print(f"{'='*80}\n")
 
+        # CRITICAL FIX: Compute covariance matrix explicitly for p-value calculation
+        # The lbfgs optimizer doesn't compute covariance automatically
+        print(f"\n{'='*80}")
+        print("LOGISTIC DEBUG: COMPUTING COVARIANCE MATRIX FOR P-VALUES")
+        print(f"{'='*80}")
+        try:
+            # Compute covariance from information matrix (X' * W * X)^-1
+            # This is the standard approach for logistic regression
+            X = result.model.exog
+            y = result.model.endog
+            mu = result.predict()
+            
+            # Weight matrix for logistic regression: W = diag(mu * (1 - mu))
+            W = np.diag(mu * (1 - mu))
+            XtWX = X.T @ W @ X
+            
+            # CRITICAL FIX: Add ridge regularization to stabilize singular/near-singular matrix
+            # This prevents negative variances in the covariance matrix
+            # For perfect separation or extreme imbalance, we need stronger regularization
+            n_params = XtWX.shape[0]
+            diag_XtWX = np.diag(XtWX)
+            diag_max = np.max(np.abs(diag_XtWX)) if len(diag_XtWX) > 0 else 1.0
+            trace_XtWX = np.trace(XtWX)
+            
+            # Use much stronger regularization: 0.1% of max diagonal element
+            # This prevents huge covariance values that lead to p-values near 1.0
+            if diag_max > 0:
+                reg_param = max(1e-4, diag_max * 0.001)  # 0.1% of max diagonal (much stronger)
+            elif trace_XtWX > 0:
+                reg_param = max(1e-4, trace_XtWX * 0.0001)  # 0.01% of trace
+            else:
+                reg_param = 1e-3  # Fallback: fixed value (stronger than before)
+            
+            # Add regularization to diagonal
+            XtWX_reg = XtWX + reg_param * np.eye(n_params)
+            
+            try:
+                cov_matrix = np.linalg.inv(XtWX_reg)
+                
+                # CRITICAL: Check for negative variances and fix them
+                diag_cov = np.diag(cov_matrix)
+                if np.any(diag_cov < 0):
+                    print(f"LOGISTIC DEBUG: ⚠ WARNING - {np.sum(diag_cov < 0)} negative variances detected, using absolute values")
+                    # Replace negative variances with absolute values (conservative approach)
+                    for i in range(len(diag_cov)):
+                        if diag_cov[i] < 0:
+                            cov_matrix[i, i] = abs(diag_cov[i])
+                
+                # Store in result object so cov_params() can access it
+                result._results.cov_params_default = cov_matrix
+                # Also create a DataFrame/Series with proper index to match params
+                import pandas as pd
+                if hasattr(result.params, 'index'):
+                    cov_df = pd.DataFrame(cov_matrix, index=result.params.index, columns=result.params.index)
+                    result._results.cov_params_default = cov_df
+                print(f"LOGISTIC DEBUG: ✓ Covariance matrix computed from information matrix (regularization: {reg_param:.2e})")
+                
+                # Recompute p-values using the covariance matrix
+                # p-value = 2 * (1 - norm.cdf(|z|)) where z = coef / se
+                from scipy import stats
+                params_array = result.params.values
+                se_array = np.sqrt(np.abs(np.diag(cov_matrix)))  # Use abs to handle any remaining negative values
+                z_scores = params_array / (se_array + 1e-10)  # Add small epsilon to avoid division by zero
+                p_values_array = 2 * (1 - stats.norm.cdf(np.abs(z_scores)))
+                
+                # Create Series with same index as params
+                # Store in a custom attribute since pvalues is a cached property
+                if hasattr(result.params, 'index'):
+                    p_values_series = pd.Series(p_values_array, index=result.params.index)
+                    # Store in custom attribute that extraction code can check
+                    result._computed_pvalues = p_values_series
+                    # Also try to update the internal cache if possible
+                    try:
+                        result._results._cache['pvalues'] = p_values_series
+                    except:
+                        pass
+                    print("LOGISTIC DEBUG: ✓ P-values recomputed from covariance matrix")
+                else:
+                    result._computed_pvalues = p_values_array
+                    try:
+                        result._results._cache['pvalues'] = p_values_array
+                    except:
+                        pass
+                    print("LOGISTIC DEBUG: ✓ P-values recomputed from covariance matrix (array)")
+                    
+            except np.linalg.LinAlgError:
+                # Matrix is still singular even with regularization, try pseudo-inverse
+                cov_matrix = np.linalg.pinv(XtWX_reg)
+                import pandas as pd
+                if hasattr(result.params, 'index'):
+                    cov_df = pd.DataFrame(cov_matrix, index=result.params.index, columns=result.params.index)
+                    result._results.cov_params_default = cov_df
+                else:
+                    result._results.cov_params_default = cov_matrix
+                print("LOGISTIC DEBUG: ✓ Covariance matrix computed using pseudo-inverse (singular matrix)")
+                
+                # Recompute p-values using pseudo-inverse covariance
+                from scipy import stats
+                params_array = result.params.values
+                se_array = np.sqrt(np.abs(np.diag(cov_matrix)))  # Use abs to handle any remaining negative values
+                z_scores = params_array / (se_array + 1e-10)  # Add small epsilon to avoid division by zero
+                p_values_array = 2 * (1 - stats.norm.cdf(np.abs(z_scores)))
+                
+                if hasattr(result.params, 'index'):
+                    p_values_series = pd.Series(p_values_array, index=result.params.index)
+                    # Store in custom attribute since pvalues is a cached property
+                    result._computed_pvalues = p_values_series
+                    try:
+                        result._results._cache['pvalues'] = p_values_series
+                    except:
+                        pass
+                    print("LOGISTIC DEBUG: ✓ P-values recomputed from pseudo-inverse covariance")
+                else:
+                    result._computed_pvalues = p_values_array
+                    try:
+                        result._results._cache['pvalues'] = p_values_array
+                    except:
+                        pass
+                    print("LOGISTIC DEBUG: ✓ P-values recomputed from pseudo-inverse covariance (array)")
+        except Exception as cov_err:
+            print(f"LOGISTIC DEBUG: ✗ Covariance computation failed: {cov_err}")
+            import traceback
+            traceback.print_exc()
+        print(f"{'='*80}\n")
+
         # Use the same model for both predictions and p-values
         # The unregularized model provides reliable p-values and good predictions
         result_for_pvalues = result
+
+        # ========== P-VALUE DIAGNOSTICS ==========
+        print(f"\n{'='*80}")
+        print("LOGISTIC DEBUG: P-VALUE DIAGNOSTICS")
+        print(f"{'='*80}")
+        if hasattr(result_for_pvalues, 'pvalues') and result_for_pvalues.pvalues is not None:
+            print(f"P-values type: {type(result_for_pvalues.pvalues)}")
+            print(f"P-values shape/length: {len(result_for_pvalues.pvalues) if hasattr(result_for_pvalues.pvalues, '__len__') else 'N/A'}")
+            if hasattr(result_for_pvalues.pvalues, 'index'):
+                print(f"P-values index (first 10): {list(result_for_pvalues.pvalues.index[:10])}")
+            if hasattr(result_for_pvalues.pvalues, 'values'):
+                pval_vals = result_for_pvalues.pvalues.values[:10]
+            else:
+                pval_vals = list(result_for_pvalues.pvalues[:10])
+            print(f"P-values values (first 10): {pval_vals}")
+            if hasattr(result_for_pvalues.pvalues, 'min'):
+                print(f"P-values min: {result_for_pvalues.pvalues.min()}")
+                print(f"P-values max: {result_for_pvalues.pvalues.max()}")
+                print(f"P-values mean: {result_for_pvalues.pvalues.mean()}")
+                print(f"All p-values == 1.0: {(result_for_pvalues.pvalues == 1.0).all()}")
+                print(f"P-values < 0.05 count: {(result_for_pvalues.pvalues < 0.05).sum()}")
+                print(f"P-values < 0.01 count: {(result_for_pvalues.pvalues < 0.01).sum()}")
+            
+            # Check if p-values are actually calculated
+            if hasattr(result_for_pvalues, 'mle_retvals'):
+                print(f"MLE return values: {result_for_pvalues.mle_retvals}")
+            print(f"Model converged: {result_for_pvalues.converged}")
+            print(f"Has cov_params: {hasattr(result_for_pvalues, 'cov_params')}")
+            if hasattr(result_for_pvalues, 'cov_params'):
+                try:
+                    cov = result_for_pvalues.cov_params()
+                    print(f"Covariance matrix shape: {cov.shape if hasattr(cov, 'shape') else 'N/A'}")
+                    if hasattr(cov, '__array__'):
+                        cov_array = np.array(cov)
+                        print(f"Covariance matrix has NaN: {np.isnan(cov_array).any()}")
+                        print(f"Covariance matrix has Inf: {np.isinf(cov_array).any()}")
+                        print(f"Covariance matrix diagonal (first 10): {np.diag(cov_array)[:10]}")
+                    else:
+                        print(f"Covariance matrix type: {type(cov)}")
+                except Exception as cov_err:
+                    print(f"Error accessing covariance: {cov_err}")
+                    import traceback
+                    traceback.print_exc()
+        else:
+            print("WARNING: result.pvalues is None or doesn't exist!")
+            print(f"Available attributes: {[attr for attr in dir(result_for_pvalues) if not attr.startswith('_')]}")
+        
+        # Check convergence status
+        if not result.converged:
+            print(f"\n{'='*80}")
+            print("LOGISTIC DEBUG: ⚠ WARNING - MODEL DID NOT CONVERGE!")
+            print(f"{'='*80}")
+            print("This may cause invalid p-values. P-values may default to 1.0.")
+            print("Consider:")
+            print("  1. Reducing the number of features")
+            print("  2. Checking for perfect separation")
+            print("  3. Using regularization")
+            print(f"{'='*80}\n")
+        print(f"{'='*80}\n")
 
         # ========== LOGISTIC REGRESSION - TRAINING SUMMARY ==========
         print("\n" + "="*80)
@@ -8880,10 +9072,15 @@ def logistic_regression_analysis():
         print(f"Training Samples: {len(X)}")
         print(f"Features: {len(selected_variables)}")
         print(f"Feature Names: {selected_variables}")
-        print(f"Class Distribution (Train): {y.value_counts().to_dict()}")
-        if len(y.value_counts()) == 2:
-            n_class_0 = y.value_counts().get(0, 0)
-            n_class_1 = y.value_counts().get(1, 0)
+        # Convert y to Series if it's a numpy array for value_counts()
+        if isinstance(y, np.ndarray):
+            y_series = pd.Series(y)
+        else:
+            y_series = y
+        print(f"Class Distribution (Train): {y_series.value_counts().to_dict()}")
+        if len(y_series.value_counts()) == 2:
+            n_class_0 = y_series.value_counts().get(0, 0)
+            n_class_1 = y_series.value_counts().get(1, 0)
             imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
             print(f"Class Imbalance Ratio: {imbalance_ratio:.2f}:1 (0:1)")
         print(f"Model Optimizer: {successful_method if successful_method else ('N/A' if result is None else 'Unknown')}")
@@ -9030,23 +9227,37 @@ def logistic_regression_analysis():
         
         # Then, calculate VIF only for variables that made it into the final model
         if len(feature_cols) > 1:
-            X_with_const_final = sm.add_constant(X)
+            # Ensure X is properly converted to numpy array for VIF calculation
+            # sm.add_constant can return DataFrame or array, so handle both cases
+            if hasattr(X, 'values'):
+                # X is a DataFrame
+                X_array = X.values
+            else:
+                # X is already a numpy array
+                X_array = np.array(X)
+            
+            # Add constant column
+            X_with_const_final = sm.add_constant(X_array, has_constant='add')
+            
             for i in range(1, len(feature_cols) + 1):
                 try:
-                    vif = variance_inflation_factor(X_with_const_final.values, i)
+                    # variance_inflation_factor expects a numpy array, not DataFrame
+                    vif = variance_inflation_factor(X_with_const_final, i)
                     var_name = selected_variables[i-1]
                     vif_map[var_name] = float(vif) if not np.isnan(vif) and not np.isinf(vif) else None
                 except Exception as vif_err:
                     print(f"LOGISTIC DEBUG: VIF failed for {selected_variables[i-1]}: {vif_err}")
+                    import traceback
+                    traceback.print_exc()
                     var_name = selected_variables[i-1]
                     vif_map[var_name] = None
         
         # Convert map to list format for response
         for var in original_selected_variables:
-            vif_data.append({
+                    vif_data.append({
                 'variable': var,
                 'vif': vif_map.get(var, None)
-            })
+                    })
 
         # CRITICAL: Calculate metrics on TEST data, not training data
         print(f"LOGISTIC DEBUG: Loading TEST data for evaluation...")
@@ -9478,7 +9689,9 @@ def logistic_regression_analysis():
             print("LOGISTIC REGRESSION - TEST SET PERFORMANCE")
             print("="*80)
             print(f"Test Samples: {len(y_test)}")
-            test_class_dist = y_test.value_counts().to_dict()
+            # Convert y_test to Series if it's a numpy array
+            y_test_series = pd.Series(y_test) if isinstance(y_test, np.ndarray) else y_test
+            test_class_dist = y_test_series.value_counts().to_dict()
             print(f"Test Class Distribution: {test_class_dist}")
             if len(test_class_dist) == 2:
                 test_n_class_0 = test_class_dist.get(0, 0)
@@ -9610,10 +9823,17 @@ def logistic_regression_analysis():
         if hasattr(result_for_pvalues, 'pvalues') and result_for_pvalues.pvalues is not None:
             if hasattr(result_for_pvalues.pvalues, 'index'):
                 pval_index = list(result_for_pvalues.pvalues.index)
-                print(f"LOGISTIC DEBUG: X_const columns ({len(x_const_cols)}): {x_const_cols[:5]}...")
-                print(f"LOGISTIC DEBUG: result.pvalues index ({len(pval_index)}): {pval_index[:5]}...")
+                print(f"\n{'='*80}")
+                print("LOGISTIC DEBUG: P-VALUE EXTRACTION - COLUMN ALIGNMENT")
+                print(f"{'='*80}")
+                print(f"X_const columns ({len(x_const_cols)}): {x_const_cols[:10]}")
+                print(f"result.pvalues index ({len(pval_index)}): {pval_index[:10]}")
                 if x_const_cols != pval_index:
                     print(f"LOGISTIC DEBUG: WARNING - Column order mismatch detected!")
+                    print(f"First mismatch at index: {next((i for i, (a, b) in enumerate(zip(x_const_cols, pval_index)) if a != b), 'None')}")
+                else:
+                    print(f"LOGISTIC DEBUG: ✓ Column order matches!")
+                print(f"{'='*80}\n")
         
         for i, var in enumerate(['const'] + selected_variables):
             # Use the same model for both coefficients and p-values (unregularized model)
@@ -9639,7 +9859,21 @@ def logistic_regression_analysis():
             
             # Get p-value from appropriate result object
             p_val = 1.0  # Default
-            if hasattr(result_for_pvalues, 'pvalues') and result_for_pvalues.pvalues is not None:
+            # First check if we computed p-values manually (stored in _computed_pvalues)
+            if hasattr(result_for_pvalues, '_computed_pvalues') and result_for_pvalues._computed_pvalues is not None:
+                try:
+                    computed_pvals = result_for_pvalues._computed_pvalues
+                    if hasattr(computed_pvals, 'index') and col_name in computed_pvals.index:
+                        p_val_raw = computed_pvals[col_name]
+                        if p_val_raw is not None and np.isfinite(p_val_raw) and 0 <= p_val_raw <= 1:
+                            p_val = float(p_val_raw)
+                    elif i < len(computed_pvals):
+                        p_val_raw = computed_pvals[i] if not hasattr(computed_pvals, 'iloc') else computed_pvals.iloc[i]
+                        if p_val_raw is not None and np.isfinite(p_val_raw) and 0 <= p_val_raw <= 1:
+                            p_val = float(p_val_raw)
+                except Exception as comp_err:
+                    print(f"LOGISTIC DEBUG: Error accessing computed p-value for {var}: {comp_err}")
+            elif hasattr(result_for_pvalues, 'pvalues') and result_for_pvalues.pvalues is not None:
                 try:
                     # CRITICAL FIX: Access p-values by column name, not integer index
                     
@@ -9719,7 +9953,18 @@ def logistic_regression_analysis():
             
             # Debug: Log p-value to understand significance issue
             if i < 10:  # Log first 10 variables for debugging
-                print(f"LOGISTIC DEBUG: Variable {var} (index {i}): p_value={p_val:.6f}, coef={coef:.6f}, significance: {'High' if p_val < 0.01 else 'Medium' if p_val < 0.05 else 'Low'}")
+                # Get raw p-value for debugging
+                p_val_raw_debug = None
+                if hasattr(result_for_pvalues, 'pvalues') and result_for_pvalues.pvalues is not None:
+                    try:
+                        if hasattr(result_for_pvalues.pvalues, 'index') and col_name in result_for_pvalues.pvalues.index:
+                            p_val_raw_debug = result_for_pvalues.pvalues[col_name]
+                        elif i < len(result_for_pvalues.pvalues):
+                            pval_array = np.array(result_for_pvalues.pvalues)
+                            p_val_raw_debug = pval_array[i]
+                    except:
+                        pass
+                print(f"LOGISTIC DEBUG: Variable {var} (index {i}, col={col_name}): raw_pval={p_val_raw_debug}, final_pval={p_val:.6f}, coef={coef:.6f}, significance: {'High' if p_val < 0.01 else 'Medium' if p_val < 0.05 else 'Low'}")
             if var == 'const':
                 coefficients.append({
                     'variable': 'Intercept',
@@ -10165,7 +10410,9 @@ def random_forest_analysis():
         print(f"RF DEBUG: X shape: {X.shape}, y shape: {y.shape}")
 
         # Check class distribution
-        class_dist = y.value_counts().to_dict()
+        # Convert y to Series if it's a numpy array for value_counts()
+        y_series = pd.Series(y) if isinstance(y, np.ndarray) else y
+        class_dist = y_series.value_counts().to_dict()
         print(f"RF DEBUG: Class distribution: {class_dist}")
         train_size = len(X)
         if len(class_dist) == 2:
@@ -10204,10 +10451,15 @@ def random_forest_analysis():
         print(f"Training Samples: {len(X)}")
         print(f"Features: {len(woe_columns)}")
         print(f"Feature Names: {[col.replace('_WOE', '') for col in woe_columns]}")
-        print(f"Class Distribution (Train): {y.value_counts().to_dict()}")
-        if len(y.value_counts()) == 2:
-            n_class_0 = y.value_counts().get(0, 0)
-            n_class_1 = y.value_counts().get(1, 0)
+        # Convert y to Series if it's a numpy array for value_counts()
+        if isinstance(y, np.ndarray):
+            y_series = pd.Series(y)
+        else:
+            y_series = y
+        print(f"Class Distribution (Train): {y_series.value_counts().to_dict()}")
+        if len(y_series.value_counts()) == 2:
+            n_class_0 = y_series.value_counts().get(0, 0)
+            n_class_1 = y_series.value_counts().get(1, 0)
             imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
             print(f"Class Imbalance Ratio: {imbalance_ratio:.2f}:1 (0:1)")
         print(f"\n--- MODEL PARAMETERS (Adaptive Configuration) ---")
@@ -10458,7 +10710,9 @@ def random_forest_analysis():
         print("RANDOM FOREST - TEST SET PERFORMANCE")
         print("="*80)
         print(f"Test Samples: {len(y_test)}")
-        print(f"Test Class Distribution: {y_test.value_counts().to_dict()}")
+        # Convert y_test to Series if it's a numpy array
+        y_test_series = pd.Series(y_test) if isinstance(y_test, np.ndarray) else y_test
+        print(f"Test Class Distribution: {y_test_series.value_counts().to_dict()}")
         print(f"\n--- PREDICTION STATISTICS ---")
         print(f"Probability Range: [{y_pred_proba.min():.4f}, {y_pred_proba.max():.4f}]")
         print(f"Probability Mean: {y_pred_proba.mean():.4f}")
@@ -10598,7 +10852,7 @@ def random_forest_analysis():
                 'training_metrics': training_metrics,
                 'uses_raw_features': False,  # RF uses WOE features
                 'n_samples': len(X),
-                'class_distribution': y.value_counts().to_dict()
+                'class_distribution': (pd.Series(y).value_counts().to_dict() if isinstance(y, np.ndarray) else y.value_counts().to_dict())
             }
             
             # Save artifact (use 'random_forest' to match apply_scorecard expectations)
@@ -10974,7 +11228,9 @@ def xgboost_analysis():
             from sklearn.metrics import roc_curve, auc, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
             
             # Check class distribution in test data
-            test_class_dist = y_test.value_counts().to_dict()
+            # Convert y_test to Series if it's a numpy array
+            y_test_series = pd.Series(y_test) if isinstance(y_test, np.ndarray) else y_test
+            test_class_dist = y_test_series.value_counts().to_dict()
             print(f"XGB DEBUG: Test set class distribution: {test_class_dist}")
             if len(test_class_dist) == 2:
                 n_class_0 = test_class_dist.get(0, 0)

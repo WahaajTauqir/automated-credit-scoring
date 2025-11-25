@@ -287,11 +287,11 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
       <div className="confusion-svg-panel">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '12px' }}>
           <button className="view-toggle-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
-            Counts
-          </button>
+              Counts
+            </button>
           <button className="view-toggle-btn" onClick={() => setConfusionView('percent')}>
-            Percent
-          </button>
+              Percent
+            </button>
         </div>
 
         <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
@@ -347,7 +347,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
       {!loading && !results && (
         <div className="no-results-message">
           <p>Click "Run Logistic Regression" to train the model</p>
-        </div>
+            </div>
       )}
 
       {results && (
@@ -370,75 +370,75 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                 <div className="no-data-message">No KS data available</div>
               )}
             </div>
-          </div>
+      </div>
 
           {/* Bottom Section: All Details */}
           <div className="model-details-section">
             {/* Model Coefficients */}
             <div className="detail-card">
-              <h4>Model Coefficients</h4>
+                  <h4>Model Coefficients</h4>
               <div className="table-container">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Variable</th>
-                      <th>Coefficient</th>
-                      <th>P-Value</th>
-                      <th>Significance</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(() => {
-                      const filtered = results.coefficients.filter(c => c.variable !== 'Intercept');
-                      return filtered.map((coef, index) => (
-                        <tr key={index}>
-                          <td>{coef.variable}</td>
-                          <td>{formatNumber(coef.coefficient)}</td>
-                          <td>
-                            {(() => {
-                              const pv = results.p_values.find(p => p.variable === coef.variable);
-                              return pv ? formatNumber(pv.p_value) : 'N/A';
-                            })()}
-                          </td>
-                          <td style={{ color: getSignificanceColor(coef.significance) }}>
-                            {(() => {
-                              const pv = results.p_values.find(p => p.variable === coef.variable);
-                              return pv ? pv.significance : coef.significance;
-                            })()}
-                          </td>
-                        </tr>
-                      ));
-                    })()}
-                  </tbody>
-                </table>
-              </div>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Variable</th>
+                        <th>Coefficient</th>
+                        <th>P-Value</th>
+                        <th>Significance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        const filtered = results.coefficients.filter(c => c.variable !== 'Intercept');
+                        return filtered.map((coef, index) => (
+                          <tr key={index}>
+                            <td>{coef.variable}</td>
+                            <td>{formatNumber(coef.coefficient)}</td>
+                            <td>
+                              {(() => {
+                                const pv = results.p_values.find(p => p.variable === coef.variable);
+                                return pv ? formatNumber(pv.p_value) : 'N/A';
+                              })()}
+                            </td>
+                            <td style={{ color: getSignificanceColor(coef.significance) }}>
+                              {(() => {
+                                const pv = results.p_values.find(p => p.variable === coef.variable);
+                                return pv ? pv.significance : coef.significance;
+                              })()}
+                            </td>
+                          </tr>
+                        ));
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
             </div>
 
             {/* Multicollinearity (VIF) */}
             <div className="detail-card">
-              <h4>Multicollinearity (VIF)</h4>
+                  <h4>Multicollinearity (VIF)</h4>
               <div className="table-container">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Variable</th>
-                      <th>VIF</th>
-                      <th>Multicollinearity</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {results.vif_data.map((vif, index) => (
-                      <tr key={index}>
-                        <td>{vif.variable}</td>
-                        <td>{formatNumber(vif.vif)}</td>
-                        <td style={{ color: getVIFColor(vif.vif) }}>
-                          {vif.vif < 5 ? 'Low' : vif.vif < 10 ? 'Moderate' : 'High'}
-                        </td>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Variable</th>
+                        <th>VIF</th>
+                        <th>Multicollinearity</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {results.vif_data.map((vif, index) => (
+                        <tr key={index}>
+                          <td>{vif.variable}</td>
+                          <td>{formatNumber(vif.vif)}</td>
+                          <td style={{ color: getVIFColor(vif.vif) }}>
+                            {vif.vif < 5 ? 'Low' : vif.vif < 10 ? 'Moderate' : 'High'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
             </div>
 
             {/* Model Summary */}
@@ -450,10 +450,10 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                   return (
                     <>
                       {intercept && (
-                        <div className="summary-item">
+                      <div className="summary-item">
                           <label>Intercept:</label>
                           <span>{formatNumber(intercept.coefficient)}</span>
-                        </div>
+                      </div>
                       )}
                       <div className="summary-item">
                         <label>AIC:</label>
@@ -463,22 +463,22 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                         <label>BIC:</label>
                         <span>{formatNumber(results.model_stats.bic)}</span>
                       </div>
-                      <div className="summary-item">
-                        <label>Log Likelihood:</label>
-                        <span>{formatNumber(results.model_stats.log_likelihood)}</span>
-                      </div>
-                      <div className="summary-item">
-                        <label>Pseudo R²:</label>
-                        <span>{formatNumber(results.model_stats.pseudo_r_squared)}</span>
-                      </div>
-                      <div className="summary-item">
-                        <label>Observations:</label>
-                        <span>{results.model_stats.n_observations}</span>
-                      </div>
-                      <div className="summary-item">
-                        <label>Gini Coefficient:</label>
-                        <span>{formatNumber(results.gini_coefficient)}</span>
-                      </div>
+                    <div className="summary-item">
+                      <label>Log Likelihood:</label>
+                      <span>{formatNumber(results.model_stats.log_likelihood)}</span>
+                    </div>
+                    <div className="summary-item">
+                      <label>Pseudo R²:</label>
+                      <span>{formatNumber(results.model_stats.pseudo_r_squared)}</span>
+                    </div>
+                    <div className="summary-item">
+                      <label>Observations:</label>
+                      <span>{results.model_stats.n_observations}</span>
+                    </div>
+                    <div className="summary-item">
+                      <label>Gini Coefficient:</label>
+                      <span>{formatNumber(results.gini_coefficient)}</span>
+                    </div>
                       <div className="summary-item">
                         <label>AUC:</label>
                         <span>{formatNumber(results.auc)}</span>
@@ -489,27 +489,27 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                           <span>{formatNumber(results.ks_stat)}</span>
                         </div>
                       )}
-                      {results.accuracy !== undefined && (
-                        <>
-                          <div className="summary-item">
-                            <label>Accuracy:</label>
-                            <span>{formatNumber(results.accuracy)}</span>
-                          </div>
-                          <div className="summary-item">
-                            <label>Precision:</label>
-                            <span>{formatNumber(results.precision ?? 0)}</span>
-                          </div>
-                          <div className="summary-item">
-                            <label>Recall:</label>
-                            <span>{formatNumber(results.recall ?? 0)}</span>
-                          </div>
-                          <div className="summary-item">
-                            <label>F1 Score:</label>
-                            <span>{formatNumber(results.f1 ?? 0)}</span>
-                          </div>
-                        </>
-                      )}
-                    </>
+                    {results.accuracy !== undefined && (
+                      <>
+                        <div className="summary-item">
+                          <label>Accuracy:</label>
+                          <span>{formatNumber(results.accuracy)}</span>
+                        </div>
+                        <div className="summary-item">
+                          <label>Precision:</label>
+                          <span>{formatNumber(results.precision ?? 0)}</span>
+                        </div>
+                        <div className="summary-item">
+                          <label>Recall:</label>
+                          <span>{formatNumber(results.recall ?? 0)}</span>
+                        </div>
+                        <div className="summary-item">
+                          <label>F1 Score:</label>
+                          <span>{formatNumber(results.f1 ?? 0)}</span>
+                        </div>
+                      </>
+                    )}
+                  </>
                   );
                 })()}
               </div>
@@ -530,9 +530,9 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                 >
                   {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                 </button>
-              </div>
-            )}
           </div>
+        )}
+      </div>
         </>
       )}
     </div>

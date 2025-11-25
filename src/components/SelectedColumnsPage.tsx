@@ -2601,22 +2601,74 @@ const SelectedColumnsPage = () => {
     }
   }, [currentStep]);
 
+  // Track if we've initialized selectedForFinalModeling for the current step 3 session
+  const hasInitializedFinalModelingRef = useRef<boolean>(false);
+  const lastStep3RecordIdRef = useRef<number | undefined>(undefined);
+
   // Initialize selectedForFinalModeling and calculate VIF when entering models section
   useEffect(() => {
     if (currentStep === 3 && targetVariable && recordId && selectedForModeling.length > 0) {
-      // Initialize selectedForFinalModeling with all model_ready features if it's empty
-      // This ensures checkboxes work correctly when toggling
-      if (selectedForFinalModeling.length === 0) {
-        console.log('[Models] Initializing selectedForFinalModeling with all model_ready features:', selectedForModeling);
-        setSelectedForFinalModeling([...selectedForModeling]);
+      // Reset initialization flag if recordId changed or we're entering step 3 for the first time
+      const isNewSession = lastStep3RecordIdRef.current !== recordId || !hasInitializedFinalModelingRef.current;
+      
+      if (isNewSession) {
+        hasInitializedFinalModelingRef.current = false;
+        lastStep3RecordIdRef.current = recordId;
+      }
+      
+      // Load final_selected from database when entering models section
+      // This preserves user's previous selections (checked/unchecked state)
+      const loadFinalSelected = async () => {
+        try {
+          const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
+          if (featuresResponse.ok) {
+            const featureList = await featuresResponse.json();
+            if (Array.isArray(featureList)) {
+              const finalSelectedFeatures = featureList
+                .filter((feature: any) => feature?.final_selected)
+                .map((feature: any) => String(feature.name).trim())
+                .filter(Boolean);
+              
+              if (finalSelectedFeatures.length > 0) {
+                // Use final_selected from database if available
+                console.log('[Models] Loaded final_selected from database:', finalSelectedFeatures);
+                setSelectedForFinalModeling(finalSelectedFeatures);
+                hasInitializedFinalModelingRef.current = true;
+              } else if (!hasInitializedFinalModelingRef.current) {
+                // Only initialize with all model_ready features if no final_selected in DB and not yet initialized
+                console.log('[Models] No final_selected in DB, initializing with all model_ready features:', selectedForModeling);
+                setSelectedForFinalModeling([...selectedForModeling]);
+                hasInitializedFinalModelingRef.current = true;
+              } else {
+                // Already initialized - preserve existing state (user's current selections)
+                console.log('[Models] Already initialized, preserving existing selectedForFinalModeling state');
+              }
+            }
+          }
+        } catch (err) {
+          console.error('[Models] Error loading final_selected:', err);
+          // Fallback: initialize with all model_ready features if loading fails and not yet initialized
+          if (!hasInitializedFinalModelingRef.current) {
+            console.log('[Models] Fallback: Initializing with all model_ready features:', selectedForModeling);
+            setSelectedForFinalModeling([...selectedForModeling]);
+            hasInitializedFinalModelingRef.current = true;
+          }
+        }
+      };
+      
+      if (!hasInitializedFinalModelingRef.current) {
+        loadFinalSelected();
       }
       
       // Always calculate VIF for all model_ready features (selectedForModeling)
       // This ensures VIF is shown for all features in the sidebar
       console.log('[VIF] Calculating VIF for all model_ready features:', selectedForModeling);
       calculateVIF();
+    } else if (currentStep !== 3) {
+      // Reset flag when leaving step 3
+      hasInitializedFinalModelingRef.current = false;
     }
-  }, [currentStep, targetVariable, selectedForModeling, recordId]);
+  }, [currentStep, targetVariable, recordId, selectedForModeling]);
 
   const calculateVIF = async () => {
     if (!targetVariable || !recordId) {
@@ -2706,6 +2758,7 @@ const SelectedColumnsPage = () => {
         });
         console.log('[Significance] Final significance map:', significanceMap);
         setSignificanceData(significanceMap);
+        await autoSelectFeaturesFromDiagnostics(vifMap, significanceMap);
       } else {
         console.log('[Significance] No p_values in response or request failed');
         // Still set the map with null values so UI shows something for all features
@@ -2724,6 +2777,68 @@ const SelectedColumnsPage = () => {
       console.error('[VIF] Error calculating VIF:', error);
     } finally {
       setIsCalculatingVIF(false);
+    }
+  };
+
+  const AUTO_VIF_THRESHOLD = 10;
+
+  const autoSelectFeaturesFromDiagnostics = async (
+    vifMap: Record<string, number | null>,
+    significanceMap: Record<string, { pValue: number | null; level: string }>
+  ) => {
+    if (selectedForModeling.length === 0) return;
+
+    const previousSelection =
+      selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling;
+
+    const recommendedSelection = selectedForModeling.filter((variable) => {
+      const vifValue = vifMap[variable];
+      const significanceInfo = significanceMap[variable];
+      const hasVif = typeof vifValue === 'number' && Number.isFinite(vifValue);
+      const isHighVif = hasVif && (vifValue ?? 0) >= AUTO_VIF_THRESHOLD;
+      const isLowSignificance =
+        !!significanceInfo &&
+        significanceInfo.pValue !== null &&
+        significanceInfo.pValue !== undefined &&
+        significanceInfo.level === 'Low';
+      return !(isHighVif || isLowSignificance);
+    });
+
+    if (recommendedSelection.length === 0) {
+      console.log('[Auto Selection] No features met quality criteria; preserving previous selections.');
+      return;
+    }
+
+    const prevSet = new Set(previousSelection);
+    const nextSet = new Set(recommendedSelection);
+    const hasLengthChange = previousSelection.length !== recommendedSelection.length;
+    const hasMembershipChange = previousSelection.some((col) => !nextSet.has(col)) || recommendedSelection.some((col) => !prevSet.has(col));
+    if (!hasLengthChange && !hasMembershipChange) {
+      console.log('[Auto Selection] Recommended selection matches current state; no changes applied.');
+      return;
+    }
+
+    setSelectedForFinalModeling(recommendedSelection);
+    showNotification(
+      `Auto-selected ${recommendedSelection.length} variable${recommendedSelection.length === 1 ? '' : 's'} based on VIF & P-Value diagnostics.`
+    );
+
+    const columnsToEvaluate = Array.from(new Set([...previousSelection, ...recommendedSelection]));
+    const persistPromises: Promise<void>[] = [];
+    columnsToEvaluate.forEach((col) => {
+      const shouldSelect = nextSet.has(col);
+      const wasSelected = prevSet.has(col);
+      if (shouldSelect === wasSelected) return;
+      persistPromises.push(queueFinalPersist(col, shouldSelect, recommendedSelection));
+    });
+
+    if (persistPromises.length > 0) {
+      try {
+        await Promise.all(persistPromises);
+        console.log('[Auto Selection] Final selection persisted to database.');
+      } catch (err) {
+        console.error('[Auto Selection] Failed to persist final selection:', err);
+      }
     }
   };
 
@@ -2895,6 +3010,11 @@ const SelectedColumnsPage = () => {
                   const isSelected = (currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).includes(variable);
                   const vif = vifData[variable] ?? null;
                   const vifStatus = getVIFStatus(vif);
+                  const pValue =
+                    significanceData[variable]?.pValue !== null && significanceData[variable]?.pValue !== undefined
+                      ? significanceData[variable].pValue
+                      : null;
+                  const significanceStatus = getSignificanceStatus(significanceData[variable]?.level || 'Low');
                   return (
                     <div
                       key={variable}
@@ -2921,22 +3041,17 @@ const SelectedColumnsPage = () => {
                         ) : (
                           <>
                             <div className="vif-info">
-                              <span className="vif-value">VIF: {vif !== null && vif !== undefined ? vif.toFixed(2) : 'N/A'}</span>
-                              <span className="vif-status" style={{ color: vifStatus.color }}>
+                              <span className="metric-label">Multicollinearity (VIF):&nbsp;</span>
+                              <span className="metric-value">{vif !== null && vif !== undefined ? vif.toFixed(2) : 'N/A'}</span>
+                              <span className="metric-status" style={{ color: vifStatus.color }}>
                                 {vifStatus.status}
                               </span>
                             </div>
                             <div className="significance-info">
-                              <span className="significance-value">
-                                P-Value: {significanceData[variable]?.pValue !== null && significanceData[variable]?.pValue !== undefined 
-                                  ? significanceData[variable].pValue.toFixed(4) 
-                                  : 'N/A'}
-                              </span>
-                              <span 
-                                className="significance-status" 
-                                style={{ color: getSignificanceStatus(significanceData[variable]?.level || 'Low').color }}
-                              >
-                                {getSignificanceStatus(significanceData[variable]?.level || 'Low').status}
+                              <span className="metric-label">Significance (P-Value):&nbsp;</span>
+                              <span className="metric-value">{pValue !== null ? pValue.toFixed(4) : 'N/A'}</span>
+                              <span className="metric-status" style={{ color: significanceStatus.color }}>
+                                {significanceStatus.status}
                               </span>
                             </div>
                           </>
