@@ -305,6 +305,13 @@ const SelectedColumnsPage = () => {
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
   const [selectedForModeling, setSelectedForModeling] = useState<string[]>(navModelReadyColumns || []); // For Column Selection & Binning (model_ready)
   const [selectedForFinalModeling, setSelectedForFinalModeling] = useState<string[]>(navFinalSelectedColumns || []); // For Model Training (final_selected)
+  const [vifData, setVifData] = useState<Record<string, number | null>>({}); // VIF values for each variable
+  const [significanceData, setSignificanceData] = useState<Record<string, { pValue: number | null; level: string }>>({}); // Significance data for each variable
+  const [isCalculatingVIF, setIsCalculatingVIF] = useState(false);
+  const [triggerLogisticRegression, setTriggerLogisticRegression] = useState(0);
+  const [triggerRandomForest, setTriggerRandomForest] = useState(0);
+  const [triggerXGBoost, setTriggerXGBoost] = useState(0);
+  const [triggerStacking, setTriggerStacking] = useState(0);
   const [preprocessSelectionSaved, setPreprocessSelectionSaved] = useState(false); // Whether preprocessing selection has been saved
   const [notification, setNotification] = useState<string | null>(null);
   const [scoreCardData, setScoreCardData] = useState<any>(null);
@@ -313,8 +320,9 @@ const SelectedColumnsPage = () => {
   const [testScoreKS, setTestScoreKS] = useState<number | null>(null);
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedModel, setSelectedModel] = useState<string>('logistic');
-  const [selectedModelForScorecard, setSelectedModelForScorecard] = useState<string>('logistic');
+  const [selectedModel, setSelectedModel] = useState<string>('stacking'); // Default to stacking ensemble
+  const [selectedModelForScorecard, setSelectedModelForScorecard] = useState<string>('stacking'); // Default to stacking ensemble
+  const [developerMode, setDeveloperMode] = useState<boolean>(false); // Developer mode toggle - off by default
   const [logisticResults, setLogisticResults] = useState<any>(null);
   const [randomForestResults, setRandomForestResults] = useState<any>(null);
   const [xgboostResults, setXgboostResults] = useState<any>(null);
@@ -789,7 +797,11 @@ const SelectedColumnsPage = () => {
       const res = await fetch('http://localhost:5000/api/target-distribution', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ column: col, record_id: recordId }),
+        body: JSON.stringify({
+          column: col,
+          record_id: recordId,
+          dataset_path: datasetPath || navDatasetPath || undefined,
+        }),
       });
       const data = await res.json();
       if (!data.error) setTargetCounts(data);
@@ -1891,18 +1903,15 @@ const SelectedColumnsPage = () => {
             .map((feature: any) => String(feature.name).trim())
             .filter(Boolean);
           
-          if (modelReadyFeatures.length > 0) {
-            // Replace selectedForModeling with all model_ready features (not just add to existing)
-            // This ensures checkboxes reflect the actual model_ready state from database
-            setSelectedForModeling((prev) => {
-              const newSet = new Set([...prev, ...modelReadyFeatures]);
-              const updated = Array.from(newSet);
-              console.log(`Synced ${modelReadyFeatures.length} model_ready features to checkboxes (total: ${updated.length}):`, modelReadyFeatures);
-              return updated;
-            });
-          } else {
-            console.log('No model_ready features found to sync');
-          }
+          // Replace selectedForModeling with exact model_ready set to mirror database
+          setSelectedForModeling(() => {
+            const unique = Array.from(new Set(modelReadyFeatures));
+            console.log(`[syncModelReadyCheckboxes] Updated checkbox state to ${unique.length} model_ready features:`, unique);
+            return unique;
+          });
+        } else {
+          setSelectedForModeling([]);
+          console.log('[syncModelReadyCheckboxes] Feature response not array; cleared selections');
         }
       }
     } catch (err) {
@@ -2283,15 +2292,36 @@ const SelectedColumnsPage = () => {
   };
 
   const toggleSelectedForFinalModeling = (col: string) => {
-    // This is for Model Training step (step 2) - updates final_selected
+    // This is for Model Training step (step 3) - updates final_selected only
+    // Does NOT affect selectedForModeling (model_ready) to keep features visible in binning section
     setSelectedForFinalModeling((prev) => {
-      const isCurrentlySelected = prev.includes(col);
-      const newSelection = isCurrentlySelected
-        ? prev.filter((c) => c !== col)
-        : [...prev, col];
+      // Determine current selection state: if prev is empty, fall back to selectedForModeling
+      // This matches the checkbox logic: (selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).includes(variable)
+      const effectiveSelection = prev.length > 0 ? prev : selectedForModeling;
+      const isCurrentlySelected = effectiveSelection.includes(col);
+      
+      // Build new selection based on current state
+      let newSelection: string[];
+      if (prev.length === 0) {
+        // Initializing from empty: start with all selectedForModeling, then toggle the clicked item
+        if (isCurrentlySelected) {
+          // Remove from selection
+          newSelection = selectedForModeling.filter((c) => c !== col);
+        } else {
+          // Add to selection (shouldn't happen if initialized correctly, but handle it)
+          newSelection = [...selectedForModeling, col];
+        }
+      } else {
+        // Normal toggle: add or remove from existing selection
+        if (isCurrentlySelected) {
+          newSelection = prev.filter((c) => c !== col);
+        } else {
+          newSelection = [...prev, col];
+        }
+      }
 
-      // Also update selectedForModeling for compatibility with existing code
-      setSelectedForModeling(newSelection);
+      // DO NOT update selectedForModeling - it should remain unchanged
+      // selectedForModeling represents model_ready features and should stay visible in binning section
 
       // Update UI immediately (optimistic update)
       showNotification(`${col} ${isCurrentlySelected ? 'deselected' : 'selected'} for final model training.`);
@@ -2571,6 +2601,152 @@ const SelectedColumnsPage = () => {
     }
   }, [currentStep]);
 
+  // Initialize selectedForFinalModeling and calculate VIF when entering models section
+  useEffect(() => {
+    if (currentStep === 3 && targetVariable && recordId && selectedForModeling.length > 0) {
+      // Initialize selectedForFinalModeling with all model_ready features if it's empty
+      // This ensures checkboxes work correctly when toggling
+      if (selectedForFinalModeling.length === 0) {
+        console.log('[Models] Initializing selectedForFinalModeling with all model_ready features:', selectedForModeling);
+        setSelectedForFinalModeling([...selectedForModeling]);
+      }
+      
+      // Always calculate VIF for all model_ready features (selectedForModeling)
+      // This ensures VIF is shown for all features in the sidebar
+      console.log('[VIF] Calculating VIF for all model_ready features:', selectedForModeling);
+      calculateVIF();
+    }
+  }, [currentStep, targetVariable, selectedForModeling, recordId]);
+
+  const calculateVIF = async () => {
+    if (!targetVariable || !recordId) {
+      console.log('[VIF] Missing targetVariable or recordId');
+      return;
+    }
+    
+    // Always calculate VIF for all model_ready features (selectedForModeling)
+    // This ensures VIF is available for all features shown in the sidebar
+    if (selectedForModeling.length === 0) {
+      console.log('[VIF] No model_ready features to calculate VIF for');
+      return;
+    }
+
+    console.log('[VIF] Starting VIF calculation for all model_ready features:', selectedForModeling);
+    setIsCalculatingVIF(true);
+    try {
+      const response = await fetch('http://localhost:5000/api/logistic-regression', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          selected_variables: selectedForModeling, // Use all model_ready features
+          target: targetVariable,
+          woe_transformed_data: Object.fromEntries(
+            Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
+          ),
+          record_id: recordId
+        })
+      });
+
+      const data = await response.json();
+      console.log('[VIF] Response received:', data);
+      
+      // Initialize maps with all requested features (set to null initially)
+      const vifMap: Record<string, number | null> = {};
+      const significanceMap: Record<string, { pValue: number | null; level: string }> = {};
+      
+      // Initialize all features with null values
+      selectedForModeling.forEach((varName: string) => {
+        vifMap[varName] = null;
+        significanceMap[varName] = { pValue: null, level: 'Low' };
+      });
+      
+      // Populate VIF data from response
+      if (data.success && data.vif_data) {
+        data.vif_data.forEach((item: { variable: string; vif: number | null }) => {
+          // Remove _WOE suffix if present
+          const varName = item.variable.replace('_WOE', '');
+          vifMap[varName] = item.vif;
+          console.log(`[VIF] Mapped ${item.variable} -> ${varName}: ${item.vif}`);
+        });
+        console.log('[VIF] Final VIF map:', vifMap);
+        setVifData(vifMap);
+      } else {
+        console.log('[VIF] No VIF data in response or request failed');
+        // Still set the map with null values so UI shows something
+        setVifData(vifMap);
+      }
+
+      // Extract and process significance data from p_values
+      if (data.success && data.p_values) {
+        data.p_values.forEach((item: { variable: string; p_value: number | null; significance: string }) => {
+          // Skip Intercept
+          if (item.variable === 'Intercept') return;
+          
+          // Remove _WOE suffix if present
+          const varName = item.variable.replace('_WOE', '');
+          const pValue = item.p_value;
+          
+          // Determine significance level: High (p < 0.01), Medium (0.01 ≤ p < 0.05), Low (p ≥ 0.05)
+          let level = 'Low';
+          if (pValue !== null && pValue !== undefined) {
+            if (pValue < 0.01) {
+              level = 'High';
+            } else if (pValue < 0.05) {
+              level = 'Medium';
+            } else {
+              level = 'Low';
+            }
+          }
+          
+          significanceMap[varName] = {
+            pValue: pValue,
+            level: level
+          };
+          console.log(`[Significance] Mapped ${item.variable} -> ${varName}: p=${pValue}, level=${level}`);
+        });
+        console.log('[Significance] Final significance map:', significanceMap);
+        setSignificanceData(significanceMap);
+      } else {
+        console.log('[Significance] No p_values in response or request failed');
+        // Still set the map with null values so UI shows something for all features
+        setSignificanceData(significanceMap);
+      }
+      
+      // Log summary
+      console.log(`[VIF] Processed ${Object.keys(vifMap).length} features for VIF`);
+      console.log(`[Significance] Processed ${Object.keys(significanceMap).length} features for significance`);
+      
+      // Log dropped variables if any
+      if (data.dropped_variables && data.dropped_variables.length > 0) {
+        console.log('[VIF] Some features were dropped and may not have VIF/p-values:', data.dropped_variables);
+      }
+    } catch (error) {
+      console.error('[VIF] Error calculating VIF:', error);
+    } finally {
+      setIsCalculatingVIF(false);
+    }
+  };
+
+  const getVIFStatus = (vif: number | null): { status: string; color: string } => {
+    if (vif === null || vif === undefined) return { status: 'N/A', color: '#8b949e' };
+    if (vif < 5) return { status: 'Low', color: '#52c41a' };
+    if (vif < 10) return { status: 'Moderate', color: '#fa8c16' };
+    return { status: 'High', color: '#ff4d4f' };
+  };
+
+  const getSignificanceStatus = (level: string): { status: string; color: string } => {
+    switch (level) {
+      case 'High':
+        return { status: 'High', color: '#52c41a' }; // Green
+      case 'Medium':
+        return { status: 'Medium', color: '#fa8c16' }; // Orange/Yellow
+      case 'Low':
+        return { status: 'Low', color: '#ff4d4f' }; // Red
+      default:
+        return { status: 'N/A', color: '#8b949e' };
+    }
+  };
+
   // Removed useEffect for auto binning mode - now handled by handleSwitchToAutoBinning
 
   // Add/remove no-scroll class on body/html when component mounts/unmounts
@@ -2594,7 +2770,7 @@ const SelectedColumnsPage = () => {
 
   return (
     <div className="selected-columns-page">
-      <Navbar />
+      <Navbar developerMode={developerMode} onDeveloperModeChange={setDeveloperMode} currentStep={currentStep} />
       <div className="page-container">
         <div className="progress-header">
           <div className="progress-bar" role="navigation" aria-label="Analysis steps">
@@ -2646,8 +2822,8 @@ const SelectedColumnsPage = () => {
           </div>
         </div>
         {notification && <div className="notification" role="alert">{notification}</div>}
-        <div className={`main-content-wrapper ${currentStep === 0 || currentStep === 1 || currentStep === 3 || currentStep === 4 || (currentStep === 2 && binningMode === 'auto') ? 'full-width' : ''}`}>
-          {/* Show sidebar only for Binning step (Step 2) in manual mode */}
+        <div className={`main-content-wrapper ${currentStep === 0 || currentStep === 1 || currentStep === 4 || (currentStep === 2 && binningMode === 'auto') ? 'full-width' : ''}`}>
+          {/* Show sidebar for Binning step (Step 2) in manual mode and Models step (Step 3) */}
           {(currentStep === 2 && binningMode === 'manual') && (
             <aside className="column-selection-section" aria-label="Scrollable column selection panel">
               <h3>Columns Dashboard</h3>
@@ -2706,6 +2882,115 @@ const SelectedColumnsPage = () => {
                     </div>
                   );
                 })}
+              </div>
+            </aside>
+          )}
+          
+          {/* Show sidebar for Models step (Step 3) */}
+          {currentStep === 3 && (
+            <aside className="column-selection-section" aria-label="Selected Variables panel">
+              <h3>Selected Variables</h3>
+              <div className="variables-list-sidebar">
+                {selectedForModeling.filter((col: string) => col !== targetVariable).map((variable: string) => {
+                  const isSelected = (currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).includes(variable);
+                  const vif = vifData[variable] ?? null;
+                  const vifStatus = getVIFStatus(vif);
+                  return (
+                    <div
+                      key={variable}
+                      className={`variable-item-sidebar ${activeColumn === variable ? 'active' : ''}`}
+                      onClick={() => setActiveColumn(variable)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => e.key === 'Enter' && setActiveColumn(variable)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          toggleSelectedForFinalModeling(variable);
+                        }}
+                        className="column-checkbox"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <div className="variable-info-sidebar">
+                        <span className="variable-name-sidebar">{variable}</span>
+                        {isCalculatingVIF ? (
+                          <span className="vif-loading">Calculating VIF...</span>
+                        ) : (
+                          <>
+                            <div className="vif-info">
+                              <span className="vif-value">VIF: {vif !== null && vif !== undefined ? vif.toFixed(2) : 'N/A'}</span>
+                              <span className="vif-status" style={{ color: vifStatus.color }}>
+                                {vifStatus.status}
+                              </span>
+                            </div>
+                            <div className="significance-info">
+                              <span className="significance-value">
+                                P-Value: {significanceData[variable]?.pValue !== null && significanceData[variable]?.pValue !== undefined 
+                                  ? significanceData[variable].pValue.toFixed(4) 
+                                  : 'N/A'}
+                              </span>
+                              <span 
+                                className="significance-status" 
+                                style={{ color: getSignificanceStatus(significanceData[variable]?.level || 'Low').color }}
+                              >
+                                {getSignificanceStatus(significanceData[variable]?.level || 'Low').status}
+                              </span>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="sidebar-action-buttons">
+                {selectedModel === 'logistic' && (
+                  <button
+                    className="run-regression-btn-sidebar"
+                    onClick={() => {
+                      setTriggerLogisticRegression(prev => prev + 1);
+                    }}
+                    disabled={isCalculatingVIF || (currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0}
+                  >
+                    {isCalculatingVIF ? 'Calculating VIF...' : 'Run Logistic Regression'}
+                  </button>
+                )}
+                {selectedModel === 'random_forest' && (
+                  <button
+                    className="run-regression-btn-sidebar"
+                    onClick={() => {
+                      setTriggerRandomForest(prev => prev + 1);
+                    }}
+                    disabled={(currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0}
+                  >
+                    Run Random Forest
+                  </button>
+                )}
+                {selectedModel === 'xgboost' && (
+                  <button
+                    className="run-regression-btn-sidebar"
+                    onClick={() => {
+                      setTriggerXGBoost(prev => prev + 1);
+                    }}
+                    disabled={(currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0}
+                  >
+                    Run XGBoost
+                  </button>
+                )}
+                {selectedModel === 'stacking' && (
+                  <button
+                    className="run-regression-btn-sidebar"
+                    onClick={() => {
+                      setTriggerStacking(prev => prev + 1);
+                    }}
+                    disabled={(currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0}
+                  >
+                    Run Stacking Ensemble
+                  </button>
+                )}
               </div>
             </aside>
           )}
@@ -3668,33 +3953,34 @@ const SelectedColumnsPage = () => {
             })()}
             {currentStep === 3 && (
               <div className="model-selection">
-                <h3>Model Selection</h3>
-                <div className="model-buttons">
-                  <button
-                    className={`model-btn ${selectedModel === 'logistic' ? 'active' : ''}`}
-                    onClick={() => setSelectedModel('logistic')}
-                  >
-                    Logistic Regression
-                  </button>
-                  <button
-                    className={`model-btn ${selectedModel === 'random_forest' ? 'active' : ''}`}
-                    onClick={() => setSelectedModel('random_forest')}
-                  >
-                    Random Forest
-                  </button>
-                  <button
-                    className={`model-btn ${selectedModel === 'xgboost' ? 'active' : ''}`}
-                    onClick={() => setSelectedModel('xgboost')}
-                  >
-                    XGBoost
-                  </button>
-                  <button
-                    className={`model-btn ${selectedModel === 'stacking' ? 'active' : ''}`}
-                    onClick={() => setSelectedModel('stacking')}
-                  >
-                    Stacking
-                  </button>
-                </div>
+                {developerMode && (
+                  <div className="model-buttons">
+                    <button
+                      className={`model-btn ${selectedModel === 'logistic' ? 'active' : ''}`}
+                      onClick={() => setSelectedModel('logistic')}
+                    >
+                      Logistic Regression
+                    </button>
+                    <button
+                      className={`model-btn ${selectedModel === 'random_forest' ? 'active' : ''}`}
+                      onClick={() => setSelectedModel('random_forest')}
+                    >
+                      Random Forest
+                    </button>
+                    <button
+                      className={`model-btn ${selectedModel === 'xgboost' ? 'active' : ''}`}
+                      onClick={() => setSelectedModel('xgboost')}
+                    >
+                      XGBoost
+                    </button>
+                    <button
+                      className={`model-btn ${selectedModel === 'stacking' ? 'active' : ''}`}
+                      onClick={() => setSelectedModel('stacking')}
+                    >
+                      Stacking
+                    </button>
+                  </div>
+                )}
 
                 {selectedModel === 'logistic' && (
                   <LogisticRegressionResults
@@ -3715,6 +4001,7 @@ const SelectedColumnsPage = () => {
                     onGotoScoreCard={gotoScoreCardAndGenerate}
                     onResultsUpdate={handleLogisticResults}
                     recordId={recordId}
+                    triggerRegression={triggerLogisticRegression}
                   />
                 )}
 
@@ -3737,6 +4024,7 @@ const SelectedColumnsPage = () => {
                     onGotoScoreCard={gotoScoreCardAndGenerate}
                     onResultsUpdate={handleRandomForestResults}
                     recordId={recordId}
+                    triggerRegression={triggerRandomForest}
                   />
                 )}
 
@@ -3759,6 +4047,7 @@ const SelectedColumnsPage = () => {
                     onGotoScoreCard={gotoScoreCardAndGenerate}
                     onResultsUpdate={handleXGBoostResults}
                     recordId={recordId}
+                    triggerRegression={triggerXGBoost}
                   />
                 )}
 
@@ -3781,6 +4070,7 @@ const SelectedColumnsPage = () => {
                     onGotoScoreCard={gotoScoreCardAndGenerate}
                     onResultsUpdate={handleStackingResults}
                     recordId={recordId}
+                    triggerRegression={triggerStacking}
                   />
                 )}
               </div>

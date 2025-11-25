@@ -104,7 +104,7 @@ body {
 .page-container {
   container-type: inline-size;
   /* reduce top spacing so the page gives more room to inner panels */
-  padding: var(--spacing-sm) 0 0 0;
+  padding: var(--spacing-sm) 0 8px 0; /* Minimal bottom padding for consistency */
   width: 100vw;
   max-width: none;
   margin: 0;
@@ -401,14 +401,15 @@ h4 { font-size: 0.95rem; }
   grid-template-columns: minmax(100px, 14%) 1fr;
   gap: var(--spacing-sm);
   /* make horizontal padding consistent and smaller */
-  padding: 0 var(--spacing-xs);
-  max-height: calc(100vh - 150px); /* Constrain to viewport */
+  padding: 0 var(--spacing-xs) 0 var(--spacing-xs); /* No bottom padding - handled by content-section */
+  max-height: calc(100vh - 180px); /* Constrain to viewport with space for header and bottom margin */
   overflow-y: hidden;
+  align-items: stretch; /* Ensure grid items have equal height */
 }
 
 .main-content-wrapper.full-width {
   grid-template-columns: 1fr;
-  max-height: calc(100vh - 150px);
+  max-height: calc(100vh - 180px);
   overflow-y: hidden;
 }
 
@@ -418,7 +419,12 @@ h4 { font-size: 0.95rem; }
   max-width: 100%;
   overflow-x: hidden;
   overflow-y: hidden;
-  max-height: calc(100vh - 150px);
+  max-height: calc(100vh - 180px);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px; /* Minimal consistent bottom padding across all sections */
+  box-sizing: border-box;
 }
 
 .column-selection-step {
@@ -429,34 +435,57 @@ h4 { font-size: 0.95rem; }
   overflow-x: visible;
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 200px); /* Constrain to viewport */
+  max-height: calc(100vh - 180px); /* Standardized to match other sections */
+  height: 100%;
 }
 
 .content-section:has(.column-selection-step) {
-  max-height: calc(100vh - 200px);
+  max-height: calc(100vh - 180px); /* Standardized to match other sections */
   overflow-y: hidden;
   overflow-x: hidden;
+  padding-bottom: 8px; /* Minimal consistent bottom padding */
 }
 
 .content-section:has(.preprocessing-step) {
-  max-height: calc(100vh - 150px - var(--spacing-sm));
-  height: calc(100vh - 150px - var(--spacing-sm));
+  max-height: calc(100vh - 180px); /* Standardized to match other sections */
+  height: calc(100vh - 180px);
   overflow-y: auto;
   overflow-x: visible;
-  margin-top: var(--spacing-sm);
+  margin-top: 0; /* Remove top margin for consistency */
   margin-bottom: 0;
-  padding-bottom: var(--spacing-md);
+  padding-bottom: 8px; /* Minimal consistent bottom padding */
+}
+
+.content-section:has(.model-selection) {
+  max-height: calc(100vh - 180px); /* Standardized to match other sections */
+  height: calc(100vh - 180px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--spacing-xs) var(--spacing-sm) 8px var(--spacing-sm); /* Reduced top padding */
+  display: flex;
+  flex-direction: column;
+}
+
+/* Score Card section - ensure consistency */
+.content-section:has(.scorecard-results),
+.content-section:has(.scorecard-container) {
+  max-height: calc(100vh - 180px); /* Standardized to match other sections */
+  height: calc(100vh - 180px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: 8px; /* Minimal consistent bottom padding */
 }
 
 .preprocessing-step {
   margin: 0;
   margin-bottom: 0;
   padding: 0;
-  padding-bottom: 0;
+  padding-bottom: 0; /* Parent content-section handles bottom padding */
   width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
+  box-sizing: border-box;
 }
 
 /* Column Selection Section (Sidebar) */
@@ -468,13 +497,17 @@ h4 { font-size: 0.95rem; }
   /* give a little extra left inset so the dashboard doesn't feel squeezed
     while keeping compact vertical padding. Use a slightly larger left
     padding but keep right padding small to preserve horizontal space. */
-  padding: 0.35rem 0.45rem 0.35rem 0.7rem; /* top right bottom left */
+  padding: 0.35rem 0.45rem 8px 0.7rem; /* top right bottom left - minimal bottom padding for consistency */
   position: sticky;
   top: var(--spacing-sm);
-  max-height: 80vh;
-  overflow-y: auto;
+  max-height: calc(100vh - 180px);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   box-shadow: var(--shadow-modern);
   min-width: 100px; /* narrower minimum to compress left block further */
+  box-sizing: border-box;
 }
 
 .column-selection-section h3 {
@@ -686,28 +719,64 @@ h4 { font-size: 0.95rem; }
   color: var(--fg-primary);
 }
 
-/* Content Section */
-.content-section {
+/* Content Section - Binning specific styling (when used inside main content wrapper) */
+.content-section:has(.binning-section),
+.content-section:has(.binning-mode-toggle) {
   background: var(--glass-bg);
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-large);
   /* reduce internal padding to give tables and charts more room */
-  padding: var(--spacing-xs);
-  overflow-y: auto;
-  max-height: 80vh;
+  padding: var(--spacing-xs) var(--spacing-xs) 8px var(--spacing-xs); /* Minimal bottom padding for consistency */
+  overflow-y: hidden; /* Let child handle scrolling */
+  max-height: calc(100vh - 180px); /* Standardized to match other sections */
+  height: calc(100vh - 180px); /* Standardized height */
   box-shadow: var(--shadow-modern);
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column; /* Enable flex layout for children */
+}
+
+/* Ensure last elements in binning section don't add extra bottom margin */
+.content-section:has(.binning-section) > *:last-child,
+.content-section:has(.binning-mode-toggle) > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Remove bottom margin from auto-binning grid and its last card */
+.auto-binning-grid:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.auto-binning-grid .auto-binning-card:last-child {
+  margin-bottom: 0;
+}
+
+/* Ensure preprocessing step last elements don't add extra bottom margin */
+.content-section:has(.preprocessing-step) > *:last-child {
+  margin-bottom: 0;
 }
 
 /* Binning Section */
+.binning-section {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: 100%;
+  flex: 1;
+  min-height: 0;
+}
+
 .binning-section h3 {
   margin-bottom: var(--spacing-md);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-shrink: 0;
 }
 
 /* Tighten vertical spacing when Univariate results are present so Coarse Binning sits closer */
@@ -717,6 +786,11 @@ h4 { font-size: 0.95rem; }
 
 .binning-section .results-container {
   margin-top: calc(var(--spacing-xs) / 2); /* pull the results container up slightly */
+  flex-shrink: 0;
+}
+
+.binning-section .woe-iv-embedded {
+  flex-shrink: 0;
 }
 
 .binning-section h3 {
@@ -1153,6 +1227,8 @@ tr[style*="21262d"]:hover {
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-large);
   padding: var(--spacing-lg);
+  margin-bottom: 0; /* Parent content-section handles bottom spacing */
+  box-sizing: border-box;
 }
 
 .scorecard-controls {
@@ -1223,7 +1299,8 @@ button[style*="cursor: pointer"]:hover {
 /* Scrollbar Styling - scoped to internal panels to avoid global bright green bars */
 .column-selection-section::-webkit-scrollbar,
 .content-section::-webkit-scrollbar,
-.table-container::-webkit-scrollbar {
+.table-container::-webkit-scrollbar,
+.binning-section::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
@@ -1231,7 +1308,8 @@ button[style*="cursor: pointer"]:hover {
 /* Scoped tracks for the panels */
 .column-selection-section::-webkit-scrollbar-track,
 .content-section::-webkit-scrollbar-track,
-.table-container::-webkit-scrollbar-track {
+.table-container::-webkit-scrollbar-track,
+.binning-section::-webkit-scrollbar-track {
   background: var(--bg-secondary);
   border-radius: 3px;
 }
@@ -1239,14 +1317,16 @@ button[style*="cursor: pointer"]:hover {
 /* Scoped thumbs keep the green accent only inside the panels */
 .column-selection-section::-webkit-scrollbar-thumb,
 .content-section::-webkit-scrollbar-thumb,
-.table-container::-webkit-scrollbar-thumb {
+.table-container::-webkit-scrollbar-thumb,
+.binning-section::-webkit-scrollbar-thumb {
   background: var(--fg-accent-green);
   border-radius: 3px;
 }
 
 .column-selection-section::-webkit-scrollbar-thumb:hover,
 .content-section::-webkit-scrollbar-thumb:hover,
-.table-container::-webkit-scrollbar-thumb:hover {
+.table-container::-webkit-scrollbar-thumb:hover,
+.binning-section::-webkit-scrollbar-thumb:hover {
   background: #26a641;
 }
 
@@ -1458,6 +1538,7 @@ select:focus {
   gap: var(--spacing-md);
   margin-bottom: var(--spacing-md);
   flex-wrap: wrap;
+  flex-shrink: 0; /* Don't shrink the toggle */
 }
 
 .mode-toggle-group {
@@ -1561,6 +1642,13 @@ select:focus {
 
 .auto-binning-container {
   padding: 0;
+  margin-bottom: 0; /* Remove bottom margin */
+  padding-bottom: 0; /* Remove bottom padding */
+  flex: 1; /* Fill available space */
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* Allow flex shrinking */
+  overflow: hidden; /* Prevent overflow */
 }
 
 .coarse-bins-loading {
@@ -1624,9 +1712,12 @@ select:focus {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: var(--spacing-md);
-  max-height: 70vh;
+  flex: 1; /* Fill available space in container */
+  min-height: 0; /* Allow flex shrinking */
   overflow-y: auto;
   padding-right: var(--spacing-xs);
+  padding-bottom: 0; /* Remove bottom padding */
+  margin-bottom: 0; /* Remove bottom margin */
   align-items: start;
 }
 
@@ -2149,4 +2240,202 @@ select:focus {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* Model Selection Styles - Matching Binning Section Theme */
+.model-selection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm); /* Reduced from var(--spacing-md) */
+  padding: var(--spacing-xs) 0 0 0; /* Reduced from var(--spacing-md) */
+  min-height: calc(100vh - 180px);
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.model-buttons {
+  display: inline-flex;
+  gap: 0;
+  padding: 4px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-primary);
+  margin-bottom: var(--spacing-xs); /* Reduced from var(--spacing-md) */
+  margin-top: 0; /* Ensure no top margin */
+}
+
+.model-btn {
+  padding: 0.5rem 1.5rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s var(--transition-smooth);
+  position: relative;
+  white-space: nowrap;
+}
+
+.model-btn:hover {
+  color: var(--fg-primary);
+}
+
+.model-btn.active {
+  background: var(--fg-accent-green);
+  color: var(--fg-primary);
+  box-shadow: 0 2px 8px rgba(46, 160, 67, 0.3);
+}
+
+/* Variables Sidebar for Models Section */
+.variables-list-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+  padding-right: 4px;
+  margin-top: var(--spacing-xs);
+}
+
+/* Custom scrollbar for variables list */
+.variables-list-sidebar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.variables-list-sidebar::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+  border-radius: 4px;
+}
+
+.variables-list-sidebar::-webkit-scrollbar-thumb {
+  background: var(--border-primary);
+  border-radius: 4px;
+}
+
+.variables-list-sidebar::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-accent-green);
+}
+
+.variable-item-sidebar {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: 0.5rem;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-medium);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--transition-smooth);
+}
+
+.variable-item-sidebar:hover {
+  background: var(--highlight-bg);
+  border-color: var(--border-accent-green);
+  transform: translateX(2px);
+}
+
+.variable-item-sidebar.active {
+  background: var(--highlight-bg);
+  border-color: var(--border-accent-green);
+  box-shadow: 0 0 0 1px var(--border-accent-green);
+}
+
+.variable-name-sidebar {
+  font-size: 13px;
+  color: var(--fg-primary);
+  font-weight: 500;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.variable-info-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.vif-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.vif-value {
+  color: var(--fg-tertiary);
+  font-weight: 500;
+}
+
+.vif-status {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.vif-loading {
+  font-size: 11px;
+  color: var(--fg-tertiary);
+  font-style: italic;
+}
+
+.significance-info {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.significance-value {
+  color: var(--fg-secondary);
+  font-size: 10px;
+}
+
+.significance-status {
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.sidebar-action-buttons {
+  margin-top: auto;
+  padding-top: var(--spacing-sm);
+  border-top: 1px solid var(--border-primary);
+}
+
+.run-regression-btn-sidebar {
+  width: 100%;
+  background: var(--fg-accent-green);
+  color: var(--fg-primary);
+  border: none;
+  padding: 12px;
+  border-radius: var(--radius-medium);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all var(--duration-fast) var(--transition-smooth);
+  margin-top: var(--spacing-xs);
+}
+
+.run-regression-btn-sidebar:hover:not(:disabled) {
+  background: #26a641;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(46, 160, 67, 0.3);
+}
+
+.run-regression-btn-sidebar:disabled {
+  background: var(--bg-quaternary);
+  color: var(--fg-tertiary);
+  cursor: not-allowed;
+  opacity: 0.6;
 }

@@ -3901,29 +3901,47 @@ def upload_csv():
 def target_distribution():
     """
     Computes and returns the value counts for a specified target column.
+    Accepts either record_id/dataset_id or a dataset_path for legacy records.
     """
     try:
         data = request.get_json(silent=True) or {}
+        dataset_path = data.get('dataset_path') or data.get('datasetPath')
         dataset_id = (
             data.get('record_id')
             or data.get('dataset_id')
             or data.get('recordId')
             or data.get('datasetId')
         )
-        try:
-            csv_path = get_csv_path(dataset_id)
-        except FileNotFoundError as fe:
-            return jsonify({"error": str(fe)}), 400
+
+        csv_path = None
+        # Prefer explicitly provided dataset_path (helps for older records missing DB path)
+        if dataset_path:
+            resolved = _resolve_dataset_file_path(dataset_path)
+            if resolved and os.path.exists(resolved):
+                csv_path = resolved
+            else:
+                print(f"[target_distribution] WARNING: Provided dataset_path {dataset_path} could not be resolved")
+
+        if not csv_path:
+            try:
+                csv_path = get_csv_path(dataset_id)
+            except FileNotFoundError as fe:
+                return jsonify({"error": str(fe)}), 400
+
         try:
             df = pd.read_csv(csv_path)
         except FileNotFoundError as fe:
             return jsonify({"error": str(fe)}), 400
         except Exception as e:
             return jsonify({"error": str(e)}), 500
-        col = data.get('column')
-        if not col or col not in df.columns:
+
+        col = (data.get('column') or '').strip()
+        if not col:
+            return jsonify({"error": "column is required"}), 400
+        if col not in df.columns:
             return jsonify({"error": f"Column '{col}' not found in dataset"}), 400
-        counts = df[col].value_counts().to_dict()
+
+        counts = df[col].value_counts(dropna=False).to_dict()
         return jsonify(counts)
     except Exception as e:
         return jsonify({"error": f"Failed to compute target distribution: {str(e)}"}), 500
@@ -5453,7 +5471,6 @@ def auto_monotonic_binning_api():
         
         # DEBUG: Check if result is actually monotonic (with strict check)
         final_woe_array = np.array(result['woe_values'])
-        is_increasing = result['direction'] == 'increasing'
         from auto_monotonic_binning import is_monotonic
         
         # Strict monotonicity check (no tolerance)
@@ -5469,8 +5486,15 @@ def auto_monotonic_binning_api():
                         return False
             return True
         
-        actual_monotonic = is_monotonic(final_woe_array, is_increasing)
-        strict_monotonic = is_strictly_monotonic(final_woe_array, is_increasing)
+        actual_monotonic_inc = is_monotonic(final_woe_array, True)
+        actual_monotonic_dec = is_monotonic(final_woe_array, False)
+        actual_monotonic = actual_monotonic_inc or actual_monotonic_dec
+        detected_direction = 'increasing' if actual_monotonic_inc else ('decreasing' if actual_monotonic_dec else None)
+
+        strict_monotonic_inc = is_strictly_monotonic(final_woe_array, True)
+        strict_monotonic_dec = is_strictly_monotonic(final_woe_array, False)
+        strict_monotonic = strict_monotonic_inc or strict_monotonic_dec
+
         print(f"[DEBUG] Actual monotonicity check (with tolerance): {actual_monotonic} (expected: {result['is_monotonic']})")
         print(f"[DEBUG] Strict monotonicity check (no tolerance): {strict_monotonic}")
         if not strict_monotonic:
@@ -5482,6 +5506,14 @@ def auto_monotonic_binning_api():
             if result['num_merges'] == 0:
                 print(f"[DEBUG] ERROR: No merges were performed, but WOE is not monotonic!")
                 print(f"[DEBUG] The algorithm should have merged bins to achieve monotonicity.")
+
+        # Ensure final metadata reflects the actual monotonicity of the resulting WOE curve
+        if actual_monotonic != result['is_monotonic']:
+            print(f"[DEBUG] Overriding result['is_monotonic'] from {result['is_monotonic']} to {actual_monotonic} based on final WOE trend")
+        result['is_monotonic'] = actual_monotonic
+        if detected_direction and result.get('direction') != detected_direction:
+            print(f"[DEBUG] Updating monotonic direction from {result.get('direction')} to {detected_direction}")
+            result['direction'] = detected_direction
         
         # Convert merge mapping to format expected by fine_bin API
         # merge_mapping maps new labels to list of original labels
@@ -5641,14 +5673,16 @@ def auto_monotonic_binning_api():
         num_bins = len(tab) if hasattr(tab, 'shape') else (len(tab) if isinstance(tab, list) else 0)
         print(f"[auto_monotonic_binning] DEBUG: Creating fine step for {var}, num_bins={num_bins}, iv={iv}")
         # Update fine step with is_monotonic and monotonic_direction from result
-        monotonic_dir = result['direction'] if result['is_monotonic'] else None
+        # FIX: Convert numpy.bool to Python bool for psycopg2 compatibility
+        is_monotonic_python = bool(result.get('is_monotonic', False))
+        monotonic_dir = result['direction'] if is_monotonic_python else None
         fine_step_id = create_binning_step(
             feature_id=feature['id'], 
             step_type='fine', 
             method='merged' if adjusted_merges else 'auto_monotonic', 
             num_bins=num_bins, 
             iv_value=iv,
-            is_monotonic=result['is_monotonic'],
+            is_monotonic=is_monotonic_python,
             monotonic_direction=monotonic_dir
         )
         print(f"[auto_monotonic_binning] DEBUG: Created fine_step_id={fine_step_id}, is_monotonic={result['is_monotonic']}")
@@ -5780,7 +5814,7 @@ def auto_monotonic_binning_api():
             "success": True,
             "stats": tab.to_dict(orient='records'),
             "bin_merges": adjusted_merges,
-            "is_monotonic": result['is_monotonic'],
+            "is_monotonic": bool(result.get('is_monotonic', False)),  # Convert numpy.bool to Python bool for JSON
             "direction": result['direction'],
             "num_merges": result['num_merges'],
             "num_bins_original": result['num_bins_original'],
@@ -7913,35 +7947,145 @@ def get_dataset_features_sorted(dataset_id):
 @app.route('/api/dataset/<int:dataset_id>/mark-monotonic-as-model-ready', methods=['POST'])
 def mark_monotonic_as_model_ready(dataset_id):
     """
-    Mark all features with monotonic fine binning as model_ready (regardless of IV value).
+    Mark all features with monotonic fine binning and IV >= threshold as model_ready.
+    After all auto-binning is complete, this function verifies monotonicity from actual WOE values
+    stored in the database and updates the is_monotonic flag if needed.
     """
     try:
-        features = get_features_with_fine_binning_metadata(dataset_id)
-        # Filter: only monotonic features (no IV requirement)
-        monotonic_features = [
-            f for f in features 
-            if f.get('is_monotonic', False)
-        ]
+        from auto_monotonic_binning import is_monotonic
         
-        if not monotonic_features:
+        payload = request.get_json(silent=True) or {}
+        try:
+            iv_threshold = float(payload.get('iv_threshold', 0.09))
+        except (TypeError, ValueError):
+            iv_threshold = 0.09
+        
+        features = get_features_with_fine_binning_metadata(dataset_id)
+        
+        # Helper function to extract IV
+        def extract_iv(feature):
+            iv_candidates = [
+                feature.get('iv'),
+                feature.get('iv_value'),
+                feature.get('iv_total'),
+            ]
+            for candidate in iv_candidates:
+                try:
+                    return float(candidate)
+                except (TypeError, ValueError):
+                    continue
+            return 0.0
+        
+        # Verify monotonicity from actual WOE values in database
+        verified_features = []
+        monotonicity_updates = []
+        
+        for feature in features:
+            feature_id = feature.get('id')
+            feature_name = feature.get('name')
+            
+            if not feature_id:
+                continue
+            
+            # Get fine binning step
+            fine_step = get_binning_step_by_type(feature_id, 'fine')
+            if not fine_step:
+                # No fine binning, skip
+                continue
+            
+            # Get all bins for this step
+            bins = get_bins_by_step(fine_step['id'])
+            if not bins or len(bins) < 2:
+                # Need at least 2 bins to check monotonicity
+                continue
+            
+            # Extract WOE values in bin_number order
+            woe_values = []
+            for bin_row in sorted(bins, key=lambda x: x.get('bin_number', 0)):
+                woe = bin_row.get('woe')
+                if woe is not None:
+                    try:
+                        woe_values.append(float(woe))
+                    except (TypeError, ValueError):
+                        pass
+            
+            if len(woe_values) < 2:
+                continue
+            
+            # Check monotonicity from actual WOE values
+            woe_array = np.array(woe_values)
+            
+            # Try both directions
+            is_monotonic_inc = is_monotonic(woe_array, increasing=True, tolerance=0.1)
+            is_monotonic_dec = is_monotonic(woe_array, increasing=False, tolerance=0.1)
+            actual_monotonic = is_monotonic_inc or is_monotonic_dec
+            
+            # Determine direction
+            if actual_monotonic:
+                direction = 'increasing' if is_monotonic_inc else 'decreasing'
+            else:
+                direction = None
+            
+            # Get stored monotonicity from database
+            stored_monotonic = bool(feature.get('is_monotonic', False))
+            stored_direction = feature.get('monotonic_direction')
+            
+            # Update database if monotonicity status changed
+            if actual_monotonic != stored_monotonic or direction != stored_direction:
+                print(f"[mark_monotonic_as_model_ready] Updating monotonicity for {feature_name}: "
+                      f"stored={stored_monotonic} -> actual={actual_monotonic}, "
+                      f"direction={stored_direction} -> {direction}")
+                
+                # Update binning_steps table
+                update_binning_step(
+                    fine_step['id'],
+                    is_monotonic=actual_monotonic,
+                    monotonic_direction=direction
+                )
+                monotonicity_updates.append({
+                    'feature': feature_name,
+                    'old_monotonic': stored_monotonic,
+                    'new_monotonic': actual_monotonic,
+                    'direction': direction
+                })
+            
+            # Update feature dict with verified monotonicity
+            feature['is_monotonic'] = actual_monotonic
+            feature['monotonic_direction'] = direction
+            
+            # Check if feature qualifies (monotonic AND IV >= threshold)
+            iv = extract_iv(feature)
+            if actual_monotonic and iv >= iv_threshold:
+                verified_features.append(feature)
+        
+        if monotonicity_updates:
+            print(f"[mark_monotonic_as_model_ready] Updated monotonicity for {len(monotonicity_updates)} features")
+        
+        # Filter: only monotonic features meeting IV threshold
+        qualified_features = verified_features
+        
+        if not qualified_features:
+            update_features_model_ready(dataset_id, [])
             return jsonify({
                 "success": True,
-                "message": "No monotonic features found",
+                "message": f"No monotonic features met IV >= {iv_threshold}",
                 "count": 0,
-                "features": []
+                "features": [],
+                "monotonicity_updates": monotonicity_updates
             })
         
-        # Update model_ready for all monotonic features
-        monotonic_feature_names = [f['name'] for f in monotonic_features]
-        success = update_features_model_ready(dataset_id, monotonic_feature_names)
+        qualified_names = [f['name'] for f in qualified_features]
+        success = update_features_model_ready(dataset_id, qualified_names)
         
         if success:
-            print(f"[mark_monotonic_as_model_ready] Marked {len(monotonic_feature_names)} monotonic features as model_ready: {monotonic_feature_names}")
+            print(f"[mark_monotonic_as_model_ready] Marked {len(qualified_names)} monotonic features (IV >= {iv_threshold}) as model_ready: {qualified_names}")
             return jsonify({
                 "success": True,
-                "message": f"Marked {len(monotonic_feature_names)} monotonic features as model_ready",
-                "count": len(monotonic_feature_names),
-                "features": monotonic_feature_names
+                "message": f"Marked {len(qualified_names)} monotonic features (IV >= {iv_threshold}) as model_ready",
+                "count": len(qualified_names),
+                "features": qualified_names,
+                "iv_threshold": iv_threshold,
+                "monotonicity_updates": monotonicity_updates
             })
         else:
             return jsonify({"error": "Failed to update model_ready"}), 500
@@ -8307,6 +8451,7 @@ def logistic_regression_analysis():
     try:
         data = request.get_json()
         selected_variables = data.get('selected_variables', [])
+        original_selected_variables = selected_variables.copy()  # Save original list for response
         target = data.get('target')
         woe_transformed_data = data.get('woe_transformed_data', {})
         if not isinstance(woe_transformed_data, dict):
@@ -8403,50 +8548,88 @@ def logistic_regression_analysis():
                 print(f"LOGISTIC DEBUG: no bin definitions found for '{var}' in woe_transformed_data")
                 continue  # Skip if no bins
 
+            # Debug: Show sample data values for this variable
+            if var in df.columns:
+                sample_values = df[var].dropna().head(5).tolist()
+                unique_count = df[var].nunique()
+                null_count = df[var].isna().sum()
+                print(f"LOGISTIC DEBUG: Variable '{var}' - Sample values: {sample_values}, Unique: {unique_count}, Null: {null_count}")
+
             woe_df[f'{var}_WOE'] = np.nan
-            for bin_info in bins_list:
-                bin_range = bin_info.get('range') or bin_info.get('Range') or bin_info.get('Bin') or bin_info.get('bin')
+            total_matched = 0
+            for idx, bin_info in enumerate(bins_list):
+                # CRITICAL FIX: Extract bin_range from multiple possible fields (same as other endpoints)
+                # Check range_text first (database format), then fall back to other fields
+                bin_range = (
+                    bin_info.get('range_text') or
+                    bin_info.get('range') or
+                    bin_info.get('Range') or
+                    bin_info.get('Bin') or
+                    bin_info.get('bin_label') or
+                    bin_info.get('bin')
+                )
+                
+                # If no range_text but we have min_value/max_value, construct it (for continuous variables)
+                if not bin_range:
+                    min_val = bin_info.get('min_value')
+                    max_val = bin_info.get('max_value')
+                    if min_val is not None and max_val is not None:
+                        # Format as "(min, max]" to match database format
+                        bin_range = f"({min_val}, {max_val}]"
+                    elif min_val is not None:
+                        bin_range = f"({min_val}, inf)"
+                    elif max_val is not None:
+                        bin_range = f"(-inf, {max_val}]"
+                
                 woe_value = bin_info.get('woe') or bin_info.get('WOE')
                 if woe_value is None:
+                    print(f"LOGISTIC DEBUG: Bin {idx+1} for '{var}' has no WOE value, skipping")
                     continue
                 try:
                     woe_value = float(woe_value)
                 except Exception:
+                    print(f"LOGISTIC DEBUG: Bin {idx+1} for '{var}' has invalid WOE value: {bin_info.get('woe')}, skipping")
                     continue
-                if isinstance(bin_range, (list, tuple)):
-                    mask = df[var].isin(bin_range)
-                    woe_df.loc[mask, f'{var}_WOE'] = woe_value
-                    continue
-                if isinstance(bin_range, str):
-                    br = bin_range.strip()
-                    if ' to ' in br:
-                        parts = [p.strip() for p in br.split(' to ')]
-                    elif '-' in br and any(ch.isdigit() for ch in br):
-                        parts = [p.strip() for p in re.split(r"-", br, maxsplit=1)]
-                    else:
-                        parts = None
-                    if parts and len(parts) == 2:
-                        try:
-                            min_val = float(parts[0])
-                            max_val = float(parts[1])
-                            mask = (pd.to_numeric(df[var], errors='coerce') >= min_val) & (pd.to_numeric(df[var], errors='coerce') <= max_val)
-                            woe_df.loc[mask.fillna(False), f'{var}_WOE'] = woe_value
-                            continue
-                        except Exception:
-                            pass
-                    cats = re.split(r'[\,\|;]', br)
-                    cats = [c.strip() for c in cats if c.strip() != '']
-                    if len(cats) > 1:
-                        mask = df[var].astype(str).isin(cats)
-                        woe_df.loc[mask, f'{var}_WOE'] = woe_value
-                        continue
-                    mask = df[var].astype(str) == br
-                    woe_df.loc[mask, f'{var}_WOE'] = woe_value
+                
+                # Use the robust _create_woe_mask function which handles all formats correctly
+                if bin_range is not None:
+                    try:
+                        mask = _create_woe_mask(df, var, bin_range)
+                        matches = int(mask.sum())
+                        if matches > 0:
+                            woe_df.loc[mask, f'{var}_WOE'] = woe_value
+                            total_matched += matches
+                            print(f"LOGISTIC DEBUG: Bin {idx+1} for '{var}': range='{bin_range}', WOE={woe_value}, matched {matches} rows")
+                        else:
+                            print(f"LOGISTIC DEBUG: Bin {idx+1} for '{var}': range='{bin_range}', WOE={woe_value}, matched 0 rows (NO MATCH)")
+                    except Exception as mask_err:
+                        print(f"LOGISTIC DEBUG: Error creating WOE mask for {var} bin {idx+1} with bin_range '{bin_range}': {mask_err}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fallback to simple matching
+                        if isinstance(bin_range, (list, tuple)):
+                            mask = df[var].isin(bin_range)
+                            matches = int(mask.sum())
+                            woe_df.loc[mask, f'{var}_WOE'] = woe_value
+                            total_matched += matches
+                            print(f"LOGISTIC DEBUG: Fallback list matching for '{var}': matched {matches} rows")
+                        elif isinstance(bin_range, str):
+                            mask = df[var].astype(str) == bin_range
+                            matches = int(mask.sum())
+                            woe_df.loc[mask, f'{var}_WOE'] = woe_value
+                            total_matched += matches
+                            print(f"LOGISTIC DEBUG: Fallback string matching for '{var}': matched {matches} rows")
                 else:
-                    mask = df[var].astype(str) == str(bin_range)
-                    woe_df.loc[mask, f'{var}_WOE'] = woe_value
+                    # No bin_range found - log warning with full bin_info
+                    print(f"LOGISTIC DEBUG: WARNING - Bin {idx+1} for '{var}' has no bin_range. Full bin_info: {bin_info}")
+            
             non_null = int(woe_df[f'{var}_WOE'].notna().sum())
-            print(f"LOGISTIC DEBUG: mapped WOE rows for '{var}':", non_null, "of", len(df))
+            print(f"LOGISTIC DEBUG: mapped WOE rows for '{var}':", non_null, "of", len(df), f"(total matched across all bins: {total_matched})")
+            if non_null == 0:
+                print(f"LOGISTIC DEBUG: CRITICAL - '{var}' has 0 mapped rows. Checking bin definitions...")
+                print(f"LOGISTIC DEBUG: Number of bins: {len(bins_list)}")
+                for idx, bin_info in enumerate(bins_list):
+                    print(f"LOGISTIC DEBUG:   Bin {idx+1}: {bin_info}")
             woe_df[f'{var}_WOE'] = woe_df[f'{var}_WOE'].fillna(0)
 
         feature_cols = [f'{var}_WOE' for var in selected_variables]
@@ -8506,6 +8689,11 @@ def logistic_regression_analysis():
             selected_variables = [var for var in selected_variables if f'{var}_WOE' not in [max_vif_col]]
             vif_dropped.append(max_vif_col.replace('_WOE', ''))
         
+        if vif_dropped:
+            print(f"LOGISTIC DEBUG: VIF dropped features (due to multicollinearity): {vif_dropped}")
+        else:
+            print("LOGISTIC DEBUG: No features dropped for VIF/multicollinearity")
+
         dropped_variables = dropped_constants + vif_dropped
         if len(selected_variables) == 0:
             return jsonify({"error": f"All features removed due to constants or high multicollinearity (VIF > {max_vif_threshold}). Try selecting fewer or less correlated variables."}), 400
@@ -8565,15 +8753,16 @@ def logistic_regression_analysis():
         if n_features > n_obs / 10:  # Stricter: 10 obs per feature
             print(f"LOGISTIC DEBUG: Warning - Very high dimensionality: {n_features} features vs {n_obs} observations. Model may be unstable.")
 
-        # Now fit the model with robust optimizer and regularization
-        # Use L1/L2 regularization to prevent perfect separation and extreme coefficients
+        # Fit a simple unregularized Logistic Regression model
+        # This model will be used for both predictions and p-values
         logit_model = sm.Logit(y, X_const)
         result = None
-        methods_to_try = ['lbfgs', 'bfgs', 'newton', 'nm']  # Fallback optimizers
         
         # Calculate class weights for imbalanced data (improves recall)
         from sklearn.utils.class_weight import compute_class_weight
         sample_weights = None
+        train_size = len(X)
+        imbalance_ratio = 1.0
         try:
             y_classes = np.unique(y)
             if len(y_classes) == 2:
@@ -8585,12 +8774,13 @@ def logistic_regression_analysis():
                 n_class_0 = (y == 0).sum()
                 n_class_1 = (y == 1).sum()
                 total_samples = len(y)
+                imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
                 print(f"\n{'='*80}")
                 print("LOGISTIC DEBUG: CLASS WEIGHT CALCULATION")
                 print(f"{'='*80}")
                 print(f"Class 0 (Good): {n_class_0} samples ({n_class_0/total_samples*100:.2f}%)")
                 print(f"Class 1 (Bad):  {n_class_1} samples ({n_class_1/total_samples*100:.2f}%)")
-                print(f"Imbalance Ratio: {n_class_0/n_class_1:.2f}:1 (Good:Bad)")
+                print(f"Imbalance Ratio: {imbalance_ratio:.2f}:1 (Good:Bad)")
                 print(f"Class Weights: {class_weight_dict}")
                 print(f"Sample Weights - Min: {sample_weights.min():.4f}, Max: {sample_weights.max():.4f}, Mean: {sample_weights.mean():.4f}")
                 print(f"Sample Weights - Std: {sample_weights.std():.4f}")
@@ -8601,109 +8791,85 @@ def logistic_regression_analysis():
             print(f"LOGISTIC DEBUG: Warning - Failed to calculate class weights: {weight_err}")
             sample_weights = None
         
-        # Try with regularization first (prevents perfect separation)
-        # Start with lighter regularization and try different types
-        regularization_success = False  # Track if regularization was successfully applied
-        regularization_type = None
-        regularization_alpha = None
+        # Try multiple optimizers with starting values to avoid zero coefficients
+        optimizers_to_try = [
+            ('newton', None),  # Newton's method (often more robust)
+            ('lbfgs', None),   # LBFGS
+            ('bfgs', None),    # BFGS
+        ]
         
-        # Try L1 regularization with lighter penalty first
-        for alpha in [0.01, 0.05, 0.1]:  # Try lighter to heavier regularization
-            for method in methods_to_try:
-                try:
-                    print(f"LOGISTIC DEBUG: Trying fit with method='{method}' and L1 regularization (alpha={alpha})")
-                    fit_kwargs = {
-                        'method': method,
-                        'alpha': alpha,
-                        'L1_wt': 1.0,  # Pure L1 (Lasso)
-                        'maxiter': 1000,
-                        'disp': 0
-                    }
-                    # Add sample weights if available (for class imbalance)
-                    if sample_weights is not None:
-                        fit_kwargs['weights'] = sample_weights
-                    result = logit_model.fit_regularized(**fit_kwargs)
-                    print(f"LOGISTIC DEBUG: L1 regularized fit succeeded with {method}, alpha={alpha}")
-                    regularization_success = True
-                    regularization_type = 'L1'
-                    regularization_alpha = alpha
-                    break
-                except Exception as fit_err:
-                    print(f"LOGISTIC DEBUG: L1 regularized fit failed with {method}, alpha={alpha}: {fit_err}")
-                    continue
-            if regularization_success:
-                break
+        fit_success = False
+        successful_method = None  # Track which optimizer succeeded
         
-        # If L1 fails, try L2 regularization (Ridge)
-        if not regularization_success:
-            for alpha in [0.01, 0.05, 0.1]:
-                for method in methods_to_try:
-                    try:
-                        print(f"LOGISTIC DEBUG: Trying fit with method='{method}' and L2 regularization (alpha={alpha})")
-                        fit_kwargs = {
-                            'method': method,
-                            'alpha': alpha,
-                            'L1_wt': 0.0,  # Pure L2 (Ridge)
-                            'maxiter': 1000,
-                            'disp': 0
-                        }
-                        # Add sample weights if available (for class imbalance)
-                        if sample_weights is not None:
-                            fit_kwargs['weights'] = sample_weights
-                        result = logit_model.fit_regularized(**fit_kwargs)
-                        print(f"LOGISTIC DEBUG: L2 regularized fit succeeded with {method}, alpha={alpha}")
-                        regularization_success = True
-                        regularization_type = 'L2'
-                        regularization_alpha = alpha
+        print(f"\n{'='*80}")
+        print("LOGISTIC DEBUG: FITTING MODEL (FOR PREDICTIONS AND P-VALUES)")
+        print(f"{'='*80}")
+        
+        for method, start_params in optimizers_to_try:
+            try:
+                print(f"LOGISTIC DEBUG: Trying optimizer: {method}")
+                fit_kwargs = {
+                    'method': method,
+                    'maxiter': 2000,
+                    'disp': 0
+                }
+                
+                # CRITICAL: Use small random starting values to avoid getting stuck at zero
+                if start_params is None:
+                    n_params = X_const.shape[1]
+                    # Small random starting values near zero
+                    start_params = np.random.normal(0, 0.01, n_params)
+                    fit_kwargs['start_params'] = start_params
+                
+                # Optionally use sample weights if available (for class imbalance)
+                if sample_weights is not None:
+                    fit_kwargs['weights'] = sample_weights
+                
+                result = logit_model.fit(**fit_kwargs)
+                
+                # Check if we got non-zero coefficients
+                if hasattr(result, 'params'):
+                    params = result.params
+                    non_zero_coefs = np.sum(np.abs(params.values) > 1e-10)
+                    if non_zero_coefs > 0:
+                        print(f"LOGISTIC DEBUG: ✓ Success with {method} - {non_zero_coefs} non-zero coefficients")
+                        fit_success = True
+                        successful_method = method
                         break
-                    except Exception as fit_err:
-                        print(f"LOGISTIC DEBUG: L2 regularized fit failed with {method}, alpha={alpha}: {fit_err}")
-                        continue
-                if regularization_success:
-                    break
-        
-        # Fallback to non-regularized if regularization fails
-        if not regularization_success:
-            print(f"LOGISTIC DEBUG: Regularization failed, trying non-regularized fit...")
-            for method in methods_to_try:
-                try:
-                    print(f"LOGISTIC DEBUG: Trying non-regularized fit with method='{method}'")
-                    fit_kwargs = {
-                        'disp': 0,
-                        'method': method,
-                        'maxiter': 1000
-                    }
-                    # Add sample weights if available (for class imbalance)
-                    if sample_weights is not None:
-                        fit_kwargs['weights'] = sample_weights
-                    result = logit_model.fit(**fit_kwargs)
-                    print(f"LOGISTIC DEBUG: Non-regularized fit succeeded with {method}")
-                    break
-                except Exception as fit_err2:
-                    print(f"LOGISTIC DEBUG: Non-regularized fit also failed with {method}: {fit_err2}")
-                if method == methods_to_try[-1]:  # Last one
-                        return jsonify({"error": f"Model fitting failed with all optimizers. Try fewer variables or check for perfect separation. Error: {str(fit_err2)}"}), 400
+                    else:
+                        print(f"LOGISTIC DEBUG: ✗ {method} produced all zero coefficients, trying next optimizer...")
+                else:
+                    print(f"LOGISTIC DEBUG: ✗ {method} failed to produce parameters")
+            except Exception as opt_err:
+                print(f"LOGISTIC DEBUG: ✗ {method} optimizer failed: {opt_err}")
                 continue
-
-        if result is None:
-            return jsonify({"error": "Model fitting failed unexpectedly."}), 500
-
-        # Log whether regularization was used
+        
+        if not fit_success or result is None:
+            if result is None:
+                return jsonify({"error": "Model fitting failed with all optimizers. Try fewer variables or check for perfect separation."}), 400
+            else:
+                print("LOGISTIC DEBUG: ⚠ WARNING - Model fitted but all coefficients are zero")
+                print("LOGISTIC DEBUG:   This may indicate perfect separation or data issues")
+        
+        # Log model fitting summary
         print(f"\n{'='*80}")
         print("LOGISTIC DEBUG: MODEL FITTING SUMMARY")
         print(f"{'='*80}")
-        if regularization_success:
-            print(f"✓ Model fitted with {regularization_type} regularization (alpha={regularization_alpha})")
-            print(f"  Purpose: Prevent perfect separation and extreme coefficients")
-        else:
-            print(f"⚠ WARNING: Model fitted without regularization - may have perfect separation issues")
-        print(f"Optimizer Used: {methods_to_try[0] if result else 'FAILED'}")
+        print(f"Model Type: Unregularized (for both predictions and p-values)")
         print(f"Convergence Status: {'✓ Converged' if result.converged else '✗ Not Converged'}")
         if hasattr(result, 'mle_retvals') and result.mle_retvals:
             iterations = result.mle_retvals.get('iterations', 'N/A')
             print(f"Iterations: {iterations}")
         print(f"Log-Likelihood: {result.llf:.6f}")
+        if hasattr(result, 'params'):
+            params = result.params
+            non_zero = np.sum(np.abs(params.values) > 1e-10)
+            print(f"Non-zero coefficients: {non_zero} out of {len(params)}")
         print(f"{'='*80}\n")
+
+        # Use the same model for both predictions and p-values
+        # The unregularized model provides reliable p-values and good predictions
+        result_for_pvalues = result
 
         # ========== LOGISTIC REGRESSION - TRAINING SUMMARY ==========
         print("\n" + "="*80)
@@ -8720,13 +8886,10 @@ def logistic_regression_analysis():
             n_class_1 = y.value_counts().get(1, 0)
             imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
             print(f"Class Imbalance Ratio: {imbalance_ratio:.2f}:1 (0:1)")
-        print(f"Model Optimizer: {methods_to_try[0] if result else 'FAILED'}")
+        print(f"Model Optimizer: {successful_method if successful_method else ('N/A' if result is None else 'Unknown')}")
         print(f"Model Convergence: {result.converged if result else 'N/A'}")
         print(f"Log-Likelihood: {result.llf if result else 'N/A':.4f}")
-        if regularization_success:
-            print(f"Regularization: {regularization_type} (alpha={regularization_alpha}) - Applied to prevent perfect separation")
-        else:
-            print(f"Regularization: None - WARNING: May have perfect separation issues")
+        print(f"Model Type: Unregularized (for both predictions and p-values)")
         print("="*80 + "\n")
 
         # ========== LOGISTIC REGRESSION - MODEL DIAGNOSTICS ==========
@@ -8857,22 +9020,33 @@ def logistic_regression_analysis():
             print(f"{'='*80}\n")
 
         # VIF on final model (calculated on training data)
+        # IMPORTANT: Include ALL originally requested variables, even if dropped
+        # This ensures frontend can display VIF for all features
+        # Use the original list saved at the beginning of the function
         vif_data = []
+        
+        # First, create entries for all originally requested variables with None
+        vif_map = {var: None for var in original_selected_variables}
+        
+        # Then, calculate VIF only for variables that made it into the final model
         if len(feature_cols) > 1:
             X_with_const_final = sm.add_constant(X)
             for i in range(1, len(feature_cols) + 1):
                 try:
                     vif = variance_inflation_factor(X_with_const_final.values, i)
-                    vif_data.append({
-                        'variable': selected_variables[i-1],
-                        'vif': float(vif) if not np.isnan(vif) and not np.isinf(vif) else None
-                    })
+                    var_name = selected_variables[i-1]
+                    vif_map[var_name] = float(vif) if not np.isnan(vif) and not np.isinf(vif) else None
                 except Exception as vif_err:
                     print(f"LOGISTIC DEBUG: VIF failed for {selected_variables[i-1]}: {vif_err}")
-                    vif_data.append({
-                        'variable': selected_variables[i-1],
-                        'vif': None
-                    })
+                    var_name = selected_variables[i-1]
+                    vif_map[var_name] = None
+        
+        # Convert map to list format for response
+        for var in original_selected_variables:
+            vif_data.append({
+                'variable': var,
+                'vif': vif_map.get(var, None)
+            })
 
         # CRITICAL: Calculate metrics on TEST data, not training data
         print(f"LOGISTIC DEBUG: Loading TEST data for evaluation...")
@@ -9042,19 +9216,32 @@ def logistic_regression_analysis():
                 tpr = np.array([])
                 thresholds = np.array([])
         
-        # Calculate AUC only if we have valid ROC data
-        if len(fpr) > 0 and len(tpr) > 0:
-            roc_auc = auc(fpr, tpr)
-            
-            # Fix: Handle case where AUC < 0.5 (model worse than random)
-            if roc_auc < 0.5:
-                print(f"LOGISTIC DEBUG: WARNING - AUC < 0.5 ({roc_auc:.4f}), model performing worse than random")
-                roc_auc = 1 - roc_auc  # Flip AUC
-                print(f"LOGISTIC DEBUG: Flipped AUC to {roc_auc:.4f}")
-            
-            gini_coefficient = 2 * roc_auc - 1
+        # Calculate AUC only if we have valid ROC data (need at least 2 points)
+        if len(fpr) >= 2 and len(tpr) >= 2 and len(fpr) == len(tpr):
+            try:
+                roc_auc = auc(fpr, tpr)
+                
+                # Fix: Handle case where AUC < 0.5 (model worse than random)
+                if roc_auc < 0.5:
+                    print(f"LOGISTIC DEBUG: WARNING - AUC < 0.5 ({roc_auc:.4f}), model performing worse than random")
+                    roc_auc = 1 - roc_auc  # Flip AUC
+                    print(f"LOGISTIC DEBUG: Flipped AUC to {roc_auc:.4f}")
+                
+                gini_coefficient = 2 * roc_auc - 1
+            except ValueError as e:
+                print(f"LOGISTIC DEBUG: ERROR - Cannot calculate AUC: {e}")
+                print(f"LOGISTIC DEBUG: fpr shape: {fpr.shape}, tpr shape: {tpr.shape}")
+                print(f"LOGISTIC DEBUG: fpr values: {fpr}")
+                print(f"LOGISTIC DEBUG: tpr values: {tpr}")
+                roc_auc = None
+                gini_coefficient = None
         else:
             print(f"LOGISTIC DEBUG: ERROR - Cannot calculate AUC/ROC metrics - insufficient valid data")
+            print(f"LOGISTIC DEBUG: fpr length: {len(fpr)}, tpr length: {len(tpr)}")
+            if len(fpr) > 0:
+                print(f"LOGISTIC DEBUG: fpr values: {fpr}")
+            if len(tpr) > 0:
+                print(f"LOGISTIC DEBUG: tpr values: {tpr}")
             roc_auc = None
             gini_coefficient = None
 
@@ -9412,12 +9599,127 @@ def logistic_regression_analysis():
 
         coefficients = []
         p_values = []
+        
+        # Process coefficients and p-values for variables in the final model
+        # CRITICAL: Get the actual column names from X_const to match result.pvalues index
+        # X_const columns are: ['const', 'var1_WOE', 'var2_WOE', ...]
+        # result.pvalues is a pandas Series indexed by these column names
+        x_const_cols = list(X_const.columns) if hasattr(X_const, 'columns') else ['const'] + [f'{v}_WOE' for v in selected_variables]
+        
+        # Debug: Log column alignment
+        if hasattr(result_for_pvalues, 'pvalues') and result_for_pvalues.pvalues is not None:
+            if hasattr(result_for_pvalues.pvalues, 'index'):
+                pval_index = list(result_for_pvalues.pvalues.index)
+                print(f"LOGISTIC DEBUG: X_const columns ({len(x_const_cols)}): {x_const_cols[:5]}...")
+                print(f"LOGISTIC DEBUG: result.pvalues index ({len(pval_index)}): {pval_index[:5]}...")
+                if x_const_cols != pval_index:
+                    print(f"LOGISTIC DEBUG: WARNING - Column order mismatch detected!")
+        
         for i, var in enumerate(['const'] + selected_variables):
-            coef = result.params[i] if i < len(result.params) else 0
-            p_val = result.pvalues[i] if i < len(result.pvalues) else 1
+            # Use the same model for both coefficients and p-values (unregularized model)
+            # CRITICAL FIX: Access coefficients by column name, not integer index (same as p-values)
+            # Determine the column name for this variable (used for both coefficients and p-values)
+            if var == 'const':
+                col_name = 'const'
+            else:
+                col_name = f'{var}_WOE'
+            
+            # Try to access coefficient by column name first (if it's a pandas Series with named index)
+            coef = 0.0
+            if hasattr(result.params, 'index') and col_name in result.params.index:
+                coef = result.params[col_name]
+            elif hasattr(result.params, 'iloc') and i < len(result.params):
+                # Fallback to integer index if column name not found
+                coef = result.params.iloc[i]
+            elif i < len(result.params):
+                # Last resort: direct integer indexing
+                coef = result.params[i] if not hasattr(result.params, 'iloc') else 0.0
+            else:
+                coef = 0.0
+            
+            # Get p-value from appropriate result object
+            p_val = 1.0  # Default
+            if hasattr(result_for_pvalues, 'pvalues') and result_for_pvalues.pvalues is not None:
+                try:
+                    # CRITICAL FIX: Access p-values by column name, not integer index
+                    
+                    # Try to access by column name first (if it's a pandas Series with named index)
+                    p_val_raw = None
+                    if hasattr(result_for_pvalues.pvalues, 'index'):
+                        # It's a pandas Series - access by column name
+                        if col_name in result_for_pvalues.pvalues.index:
+                            p_val_raw = result_for_pvalues.pvalues[col_name]
+                        elif i < len(result_for_pvalues.pvalues):
+                            # Fallback to integer index if column name not found
+                            pvals_array = np.array(result_for_pvalues.pvalues)
+                            p_val_raw = pvals_array[i]
+                    else:
+                        # Not a Series, use integer index
+                        pvals_array = np.array(result_for_pvalues.pvalues)
+                        if i < len(pvals_array):
+                            p_val_raw = pvals_array[i]
+                    
+                    # Validate p-value
+                    if p_val_raw is not None and np.isfinite(p_val_raw) and 0 <= p_val_raw <= 1:
+                        p_val = float(p_val_raw)
+                    else:
+                        # Invalid p-value, will try covariance below
+                        p_val = 1.0
+                except (KeyError, IndexError) as key_err:
+                    # Column name or index not found, try integer index as fallback
+                    try:
+                        pvals_array = np.array(result_for_pvalues.pvalues)
+                        if i < len(pvals_array):
+                            p_val_raw = pvals_array[i]
+                            if np.isfinite(p_val_raw) and 0 <= p_val_raw <= 1:
+                                p_val = float(p_val_raw)
+                            else:
+                                p_val = 1.0
+                        else:
+                            p_val = 1.0
+                    except Exception:
+                        p_val = 1.0
+                except Exception as pval_extract_err:
+                    print(f"LOGISTIC DEBUG: Error extracting p-value for {var} (col={col_name}, idx={i}): {pval_extract_err}")
+                    p_val = 1.0
+            else:
+                # No pvalues available, try to calculate from covariance matrix
+                try:
+                    if hasattr(result_for_pvalues, 'cov_params'):
+                        cov = result_for_pvalues.cov_params()
+                        if cov is not None:
+                            if hasattr(cov, 'iloc'):
+                                # DataFrame
+                                if i < cov.shape[0]:
+                                    se = np.sqrt(cov.iloc[i, i]) if np.isfinite(cov.iloc[i, i]) else np.inf
+                                else:
+                                    se = np.inf
+                            else:
+                                # Array
+                                if i < cov.shape[0]:
+                                    se = np.sqrt(cov[i, i]) if np.isfinite(cov[i, i]) else np.inf
+                                else:
+                                    se = np.inf
+                            
+                            if se > 0 and np.isfinite(se) and np.isfinite(coef):
+                                z_score = coef / se
+                                from scipy import stats
+                                p_val = 2 * (1 - stats.norm.cdf(abs(z_score)))
+                                if not np.isfinite(p_val) or p_val < 0 or p_val > 1:
+                                    p_val = 1.0
+                            else:
+                                p_val = 1.0
+                        else:
+                            p_val = 1.0
+                    else:
+                        p_val = 1.0
+                except Exception as cov_err:
+                    print(f"LOGISTIC DEBUG: Failed to calculate p-value from covariance for {var}: {cov_err}")
+                    p_val = 1.0
+            
             # Debug: Log p-value to understand significance issue
-            if i < 5:  # Log first 5 variables for debugging
-                print(f"LOGISTIC DEBUG: Variable {var}: p_value={p_val}, coef={coef}, significance check: p_val < 0.01={p_val < 0.01}, p_val < 0.05={p_val < 0.05}")
+            if i < 10:  # Log first 10 variables for debugging
+                print(f"LOGISTIC DEBUG: Variable {var} (index {i}): p_value={p_val:.6f}, coef={coef:.6f}, significance: {'High' if p_val < 0.01 else 'Medium' if p_val < 0.05 else 'Low'}")
             if var == 'const':
                 coefficients.append({
                     'variable': 'Intercept',
@@ -9439,6 +9741,21 @@ def logistic_regression_analysis():
                     'variable': var,
                     'p_value': float(p_val) if np.isfinite(p_val) else None,
                     'significance': 'Highly Significant' if p_val < 0.01 else 'Significant' if p_val < 0.05 else 'Not Significant'
+                })
+        
+        # Add entries for all originally requested variables that were dropped
+        for var in original_selected_variables:
+            if var not in selected_variables:
+                # Variable was dropped - add with None values
+                coefficients.append({
+                    'variable': var,
+                    'coefficient': None,
+                    'significance': 'Not Significant'
+                })
+                p_values.append({
+                    'variable': var,
+                    'p_value': None,
+                    'significance': 'Not Significant'
                 })
 
         def _sanitize_number(x):
@@ -9470,6 +9787,14 @@ def logistic_regression_analysis():
             print('LOGISTIC DEBUG: This may occur with extreme class imbalance or invalid predictions')
             # Return empty ROC data - no synthetic data
             roc_data = []
+        elif min_len == 1:
+            print('LOGISTIC DEBUG: WARNING - Only 1 ROC data point available (need at least 2 for AUC)')
+            print('LOGISTIC DEBUG: Creating fallback ROC data (diagonal line - random classifier)')
+            # Create minimal fallback ROC data (diagonal line - random classifier)
+            roc_data = [
+                {'fpr': 0.0, 'tpr': 0.0, 'threshold': 1.0},
+                {'fpr': 1.0, 'tpr': 1.0, 'threshold': 0.0}
+            ]
         else:
             fpr = fpr[:min_len]
             tpr = tpr[:min_len]
@@ -9550,8 +9875,8 @@ def logistic_regression_analysis():
             'coefficients': coefficients,
             'p_values': p_values,
             'vif_data': vif_data,
-            'gini_coefficient': float(gini_coefficient) if np.isfinite(gini_coefficient) else None,
-            'auc': float(roc_auc) if np.isfinite(roc_auc) else None,
+            'gini_coefficient': float(gini_coefficient) if (gini_coefficient is not None and np.isfinite(gini_coefficient)) else None,
+            'auc': float(roc_auc) if (roc_auc is not None and np.isfinite(roc_auc)) else None,
             'roc_data': roc_data,
             'model_stats': model_stats,
             'confusion_matrix': (cm.tolist() if isinstance(cm, (list, np.ndarray)) else None),
@@ -9842,35 +10167,30 @@ def random_forest_analysis():
         # Check class distribution
         class_dist = y.value_counts().to_dict()
         print(f"RF DEBUG: Class distribution: {class_dist}")
+        train_size = len(X)
         if len(class_dist) == 2:
             n_class_0 = class_dist.get(0, 0)
             n_class_1 = class_dist.get(1, 0)
             imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
             print(f"RF DEBUG: Class imbalance ratio: {imbalance_ratio:.2f}:1 (0:1)")
+        else:
+            imbalance_ratio = 1.0
 
-        # Calculate custom class weights based on actual imbalance (no synthetic data)
-        from sklearn.utils.class_weight import compute_class_weight
+        # Get adaptive configuration from stacking config (same as stacking ensemble)
+        config = get_stacking_config(train_size, imbalance_ratio)
+        rf_config = config['rf'].copy()
         
-        y_classes = np.unique(y)
-        class_weights = compute_class_weight('balanced', classes=y_classes, y=y)
-        class_weight_dict = dict(zip(y_classes, class_weights))
+        print(f"RF DEBUG: Using adaptive configuration:")
+        print(f"  - Dataset type: {'small' if train_size < 1000 else 'medium' if train_size < 10000 else 'large'}")
+        print(f"  - Imbalance level: {'extreme' if imbalance_ratio > 100 else 'high' if imbalance_ratio > 10 else 'moderate'}")
+        print(f"  - n_estimators: {rf_config.get('n_estimators', 200)}")
+        print(f"  - max_depth: {rf_config.get('max_depth', 12)}")
+        print(f"  - min_samples_split: {rf_config.get('min_samples_split', 5)}")
+        print(f"  - min_samples_leaf: {rf_config.get('min_samples_leaf', 2)}")
+        print(f"  - class_weight: {rf_config.get('class_weight', 'balanced')}")
         
-        print(f"RF DEBUG: Class weights: {class_weight_dict}")
-        
-        # Train Random Forest on TRAIN data with improved parameters
-        rf_model = RandomForestClassifier(
-            n_estimators=200,  # More trees for better performance
-            max_depth=12,  # Slightly deeper (but not too deep to prevent overfitting)
-            min_samples_split=5,
-            min_samples_leaf=2,
-            max_features='sqrt',  # Use sqrt of features for each tree
-            bootstrap=True,  # Bootstrap sampling (uses real data, no synthetic)
-            oob_score=True,  # Calculate out-of-bag score for validation
-            random_state=42,
-            n_jobs=-1,
-            class_weight=class_weight_dict  # Custom weights based on real data
-        )
-        
+        # Train Random Forest on TRAIN data with adaptive parameters (same as stacking)
+        rf_model = RandomForestClassifier(**rf_config)
         rf_model.fit(X, y)
         print(f"RF DEBUG: Model trained on {len(X)} training samples")
         print(f"RF DEBUG: Out-of-bag score: {rf_model.oob_score_:.4f}")
@@ -9890,13 +10210,13 @@ def random_forest_analysis():
             n_class_1 = y.value_counts().get(1, 0)
             imbalance_ratio = n_class_0 / n_class_1 if n_class_1 > 0 else float('inf')
             print(f"Class Imbalance Ratio: {imbalance_ratio:.2f}:1 (0:1)")
-        print(f"\n--- MODEL PARAMETERS ---")
+        print(f"\n--- MODEL PARAMETERS (Adaptive Configuration) ---")
         print(f"n_estimators: {rf_model.n_estimators}")
         print(f"max_depth: {rf_model.max_depth}")
         print(f"min_samples_split: {rf_model.min_samples_split}")
         print(f"min_samples_leaf: {rf_model.min_samples_leaf}")
         print(f"max_features: {rf_model.max_features}")
-        print(f"class_weight: {class_weight_dict}")
+        print(f"class_weight: {rf_config.get('class_weight', 'balanced')}")
         print(f"oob_score: {rf_model.oob_score_:.4f}")
         print(f"random_state: {rf_model.random_state}")
         print("="*80 + "\n")
@@ -10219,8 +10539,8 @@ def random_forest_analysis():
         resp = {
             'success': True,
             'feature_importance': feature_importance,
-            'gini_coefficient': float(gini_coefficient) if np.isfinite(gini_coefficient) else None,
-            'auc': float(roc_auc) if np.isfinite(roc_auc) else None,
+            'gini_coefficient': float(gini_coefficient) if (gini_coefficient is not None and np.isfinite(gini_coefficient)) else None,
+            'auc': float(roc_auc) if (roc_auc is not None and np.isfinite(roc_auc)) else None,
             'roc_data': roc_data,
             'model_stats': model_stats,
             'confusion_matrix': cm.tolist(),
@@ -11352,8 +11672,8 @@ def xgboost_analysis():
         resp = {
             'success': True,
             'feature_importance': feature_importance,
-            'gini_coefficient': float(gini_coefficient) if np.isfinite(gini_coefficient) else None,
-            'auc': float(roc_auc) if np.isfinite(roc_auc) else None,
+            'gini_coefficient': float(gini_coefficient) if (gini_coefficient is not None and np.isfinite(gini_coefficient)) else None,
+            'auc': float(roc_auc) if (roc_auc is not None and np.isfinite(roc_auc)) else None,
             'roc_data': roc_data,
             'model_stats': model_stats,
             'confusion_matrix': cm.tolist(),
@@ -13035,34 +13355,54 @@ def stacking_analysis():
             print(f"STACKING DEBUG: Error calculating KS: {e}")
         
         # Build KS curve (sanitize infinity/NaN)
+        # Recalculate ROC curve to ensure we have fresh data for ks_curve
         ks_curve = []
         try:
-            # Re-ensure arrays are arrays (defensive programming)
-            tpr_array = np.atleast_1d(tpr).flatten()
-            fpr_array = np.atleast_1d(fpr).flatten()
-            thresholds_array = np.atleast_1d(thresholds).flatten()
+            print("STACKING DEBUG: Recalculating ROC curve for ks_curve")
+            fpr_ks, tpr_ks, thresholds_ks = roc_curve(y_test, ensemble_test_pred)
+            
+            # Ensure arrays are 1D
+            fpr_ks = np.atleast_1d(fpr_ks).flatten()
+            tpr_ks = np.atleast_1d(tpr_ks).flatten()
+            thresholds_ks = np.atleast_1d(thresholds_ks).flatten()
+            
+            print(f"STACKING DEBUG: KS curve arrays - fpr: {len(fpr_ks)}, tpr: {len(tpr_ks)}, thresholds: {len(thresholds_ks)}")
             
             # Ensure all arrays have the same length
-            min_len = min(len(tpr_array), len(fpr_array), len(thresholds_array))
+            min_len = min(len(tpr_ks), len(fpr_ks), len(thresholds_ks))
             if min_len > 0:
+                valid_count = 0
                 for i in range(min_len):
-                    thresh = float(thresholds_array[i])
-                    tpr_val = float(tpr_array[i])
-                    fpr_val = float(fpr_array[i])
+                    thresh = float(thresholds_ks[i])
+                    tpr_val = float(tpr_ks[i])
+                    fpr_val = float(fpr_ks[i])
                     if np.isfinite(thresh) and np.isfinite(tpr_val) and np.isfinite(fpr_val):
                         ks_curve.append({
                             'threshold': safe_float(thresh),
                             'tpr': safe_float(tpr_val),
                             'fpr': safe_float(fpr_val),
-                            'diff': safe_float(tpr_val - fpr_val)
+                            'diff': safe_float(abs(tpr_val - fpr_val))
                         })
+                        valid_count += 1
+                print(f"STACKING DEBUG: KS curve built - {valid_count} valid points out of {min_len} total")
             else:
                 print("STACKING DEBUG: WARNING - Empty ROC curve data, skipping KS curve")
+                # Fallback: create minimal KS curve data
+                ks_curve = [
+                    {'threshold': 1.0, 'tpr': 0.0, 'fpr': 0.0, 'diff': 0.0},
+                    {'threshold': 0.0, 'tpr': 1.0, 'fpr': 1.0, 'diff': 0.0}
+                ]
+                print("STACKING DEBUG: Created fallback KS curve data")
         except Exception as ks_curve_err:
             print(f"STACKING DEBUG: Error building KS curve: {ks_curve_err}")
             import traceback
             traceback.print_exc()
-            ks_curve = []
+            # Fallback: create minimal KS curve data
+            ks_curve = [
+                {'threshold': 1.0, 'tpr': 0.0, 'fpr': 0.0, 'diff': 0.0},
+                {'threshold': 0.0, 'tpr': 1.0, 'fpr': 1.0, 'diff': 0.0}
+            ]
+            print("STACKING DEBUG: Created fallback KS curve data after error")
         
         # Confusion matrix (convert to list and ensure all values are finite)
         cm = confusion_matrix(y_test, y_pred)
@@ -13087,32 +13427,52 @@ def stacking_analysis():
         }
         
         # ROC data (sanitize infinity/NaN)
+        # Recalculate ROC curve to ensure we have fresh data for roc_data
         roc_data = []
         try:
-            # Re-ensure arrays are arrays (defensive programming)
-            tpr_array = np.atleast_1d(tpr).flatten()
-            fpr_array = np.atleast_1d(fpr).flatten()
-            thresholds_array = np.atleast_1d(thresholds).flatten()
+            print("STACKING DEBUG: Recalculating ROC curve for roc_data")
+            fpr_roc, tpr_roc, thresholds_roc = roc_curve(y_test, ensemble_test_pred)
             
-            min_len = min(len(fpr_array), len(tpr_array), len(thresholds_array))
+            # Ensure arrays are 1D
+            fpr_roc = np.atleast_1d(fpr_roc).flatten()
+            tpr_roc = np.atleast_1d(tpr_roc).flatten()
+            thresholds_roc = np.atleast_1d(thresholds_roc).flatten()
+            
+            print(f"STACKING DEBUG: ROC data arrays - fpr: {len(fpr_roc)}, tpr: {len(tpr_roc)}, thresholds: {len(thresholds_roc)}")
+            
+            min_len = min(len(fpr_roc), len(tpr_roc), len(thresholds_roc))
             if min_len > 0:
+                valid_count = 0
                 for i in range(min_len):
-                    fpr_val = float(fpr_array[i])
-                    tpr_val = float(tpr_array[i])
-                    thresh_val = float(thresholds_array[i])
+                    fpr_val = float(fpr_roc[i])
+                    tpr_val = float(tpr_roc[i])
+                    thresh_val = float(thresholds_roc[i])
                     if (np.isfinite(fpr_val) and np.isfinite(tpr_val) and np.isfinite(thresh_val)):
                         roc_data.append({
                             'fpr': safe_float(fpr_val),
                             'tpr': safe_float(tpr_val),
                             'threshold': safe_float(thresh_val)
                         })
+                        valid_count += 1
+                print(f"STACKING DEBUG: ROC data built - {valid_count} valid points out of {min_len} total")
             else:
                 print("STACKING DEBUG: WARNING - Empty ROC curve data, skipping ROC data")
+                # Fallback: create minimal ROC data
+                roc_data = [
+                    {'fpr': 0.0, 'tpr': 0.0, 'threshold': 1.0},
+                    {'fpr': 1.0, 'tpr': 1.0, 'threshold': 0.0}
+                ]
+                print("STACKING DEBUG: Created fallback ROC data")
         except Exception as roc_data_err:
             print(f"STACKING DEBUG: Error building ROC data: {roc_data_err}")
             import traceback
             traceback.print_exc()
-            roc_data = []
+            # Fallback: create minimal ROC data
+            roc_data = [
+                {'fpr': 0.0, 'tpr': 0.0, 'threshold': 1.0},
+                {'fpr': 1.0, 'tpr': 1.0, 'threshold': 0.0}
+            ]
+            print("STACKING DEBUG: Created fallback ROC data after error")
         
         print(f"STACKING DEBUG: Ensemble AUC: {roc_auc:.4f}, Gini: {gini:.4f}, Recall: {ensemble_performance['recall']:.4f}")
         
@@ -13794,14 +14154,30 @@ def _create_woe_mask(df, var, bin_range):
                 print(f"LOGISTIC DEBUG: Error parsing bin_range '{bin_range}' for variable '{var}': {e}")
                 pass
     
-    # Hyphen-separated ranges
-    hyphen_match = re.match(r'^\s*-?\d+(?:\.\d+)?\s*-\s*-?\d+(?:\.\d+)?\s*$', str(bin_range))
+    # Hyphen-separated ranges (e.g., "-0.5 - 1.5" or "1.0 - 2.0")
+    # CRITICAL FIX: Split on " - " (with spaces) to avoid splitting negative numbers
+    if isinstance(bin_range, str) and ' - ' in bin_range:
+        try:
+            # Split on " - " (space-hyphen-space) to preserve negative signs
+            parts = [p.strip() for p in bin_range.split(' - ')]
+            if len(parts) == 2:
+                lower, upper = float(parts[0]), float(parts[1])
+                var_series = pd.to_numeric(df[var], errors='coerce')
+                return (var_series >= lower) & (var_series <= upper)
+        except (ValueError, TypeError) as e:
+            print(f"LOGISTIC DEBUG: Error parsing hyphen range '{bin_range}' for variable '{var}': {e}")
+            pass
+    
+    # Fallback: Try regex-based hyphen matching (for formats without spaces)
+    hyphen_match = re.match(r'^\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*-\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*$', str(bin_range))
     if isinstance(bin_range, str) and hyphen_match:
         try:
-            parts = [p.strip() for p in bin_range.split('-')]
-            lower, upper = float(parts[0]), float(parts[1])
-            return (df[var].astype(float) >= lower) & (df[var].astype(float) <= upper)
-        except (ValueError, TypeError):
+            lower_str, upper_str = hyphen_match.groups()
+            lower, upper = float(lower_str), float(upper_str)
+            var_series = pd.to_numeric(df[var], errors='coerce')
+            return (var_series >= lower) & (var_series <= upper)
+        except (ValueError, TypeError) as e:
+            print(f"LOGISTIC DEBUG: Error parsing regex hyphen range '{bin_range}' for variable '{var}': {e}")
             pass
     
     # Categorical values

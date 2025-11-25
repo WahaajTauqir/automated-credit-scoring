@@ -79,3 +79,85 @@
   transform: translateY(-1px);
   box-shadow: 0 4px 8px rgba(46, 160, 67, 0.3);
 }
+
+/* Developer Mode Toggle */
+.developer-mode-container {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-medium);
+  margin-right: var(--spacing-xs);
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  margin: 0;
+}
+
+.toggle-text {
+  font-size: 13px;
+  color: var(--fg-secondary);
+  font-weight: 500;
+  transition: color var(--duration-fast) var(--transition-smooth);
+  order: 1; /* Text appears first (left side) */
+}
+
+.toggle-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  order: 2;
+}
+
+.toggle-slider {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: var(--bg-quaternary);
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  transition: all var(--duration-fast) var(--transition-smooth);
+  order: 3; /* Toggle appears last (right side) */
+  flex-shrink: 0;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 2px;
+  top: 2px;
+  background: var(--fg-secondary);
+  border-radius: 50%;
+  transition: all var(--duration-fast) var(--transition-smooth);
+}
+
+.toggle-input:checked + .toggle-slider {
+  background: var(--fg-accent-green);
+  border-color: var(--fg-accent-green);
+}
+
+.toggle-input:checked + .toggle-slider::before {
+  transform: translateX(20px);
+  background: var(--fg-primary);
+}
+
+.toggle-label:hover .toggle-slider {
+  border-color: var(--fg-accent-green);
+}
+
+.toggle-label:hover .toggle-text {
+  color: var(--fg-primary);
+}
+
+.developer-mode-container:hover {
+  border-color: var(--fg-accent-green);
+}

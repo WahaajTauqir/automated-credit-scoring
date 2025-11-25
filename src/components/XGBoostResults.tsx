@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './ModelResults.css';
 
 // ✅ Add this prop to enable callback to parent
@@ -16,6 +16,7 @@ interface XGBoostResultsProps {
     // ✅ New prop to notify parent with model results
     onResultsUpdate?: (results: any) => void;
     recordId?: number;
+    triggerRegression?: number; // Trigger count to run regression from sidebar
 }
 
 interface FeatureImportance {
@@ -74,13 +75,20 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
     generatingScoreCard,
     onGotoScoreCard,
     onResultsUpdate,
-    recordId
+    recordId,
+    triggerRegression
 }) => {
     const [results, setResults] = useState<XGBoostResults | null>(null);
     const [loading, setLoading] = useState(false);
-    const [showLegend, setShowLegend] = useState(false);
     const [confusionView, setConfusionView] = useState<'counts' | 'percent'>('counts');
-    const [activeTab, setActiveTab] = useState<'importance' | 'roc' | 'confusion' | 'ks' | 'parameters'>('importance');
+
+    // Watch for trigger from sidebar button
+    useEffect(() => {
+        if (triggerRegression && triggerRegression > 0) {
+            runXGBoost();
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [triggerRegression]);
 
     // ✅ Updated to trigger parent callback when model runs
     const runXGBoost = async () => {
@@ -138,8 +146,7 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
         }
 
         return (
-            <div className="feature-importance-table">
-                <h4>Feature Importance (Gain)</h4>
+            <div className="table-container">
                 <table>
                     <thead>
                         <tr>
@@ -242,7 +249,6 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
 
         return (
             <div className="roc-curve-container">
-                <h4>ROC Curve</h4>
                 <svg width={svgWidth} height={svgHeight} className="roc-svg">
                     {/* Grid lines */}
                     {[0, 0.2, 0.4, 0.6, 0.8, 1.0].map(val => (
@@ -349,16 +355,13 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
 
         return (
             <div className="confusion-svg-panel">
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <h4 style={{ margin: 0 }}>Confusion Matrix</h4>
-                    <div>
-                        <button className="tab-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
-                            Counts
-                        </button>
-                        <button className="tab-btn" onClick={() => setConfusionView('percent')}>
-                            Percent
-                        </button>
-                    </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '12px' }}>
+                    <button className="view-toggle-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
+                        Counts
+                    </button>
+                    <button className="view-toggle-btn" onClick={() => setConfusionView('percent')}>
+                        Percent
+                    </button>
                 </div>
 
                 <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
@@ -509,144 +512,90 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
 
     return (
         <div className="model-results-container">
-            <div className="model-header">
-                <div className="model-title">
-                    <h3>XGBoost Analysis</h3>
-                    <button
-                        className="legend-toggle"
-                        onClick={() => setShowLegend(!showLegend)}
-                    >
-                        {showLegend ? 'Hide Legend' : 'Show Legend'}
-                    </button>
+            {loading && (
+                <div className="loading-container">
+                    <div className="loading-spinner"></div>
+                    <p>Running XGBoost...</p>
                 </div>
+            )}
 
-                {showLegend && (
-                    <div className="legend-panel">
-                        <h4>XGBoost Legend</h4>
-                        <div className="legend-section">
-                            <h5>Feature Importance (Gain):</h5>
-                            <ul>
-                                <li>Measures average improvement in accuracy when using the feature</li>
-                                <li>Higher values indicate more important features</li>
-                                <li>Cumulative % shows total importance covered by top features</li>
-                                <li>Top 3 features are highlighted in green</li>
-                            </ul>
+            {!loading && !results && (
+                <div className="no-results-message">
+                    <p>Click "Run XGBoost" to train the model</p>
+                </div>
+            )}
+
+            {results && (
+                <>
+                    {/* Top Section: 3 Graphs Side by Side */}
+                    <div className="model-graphs-section">
+                        <div className="graph-card">
+                            <h4>ROC Curve</h4>
+                            {renderROCCurve()}
                         </div>
-                        <div className="legend-section">
-                            <h5>Model Parameters:</h5>
-                            <ul>
-                                <li><strong>Number of Trees:</strong> More trees = more complex model</li>
-                                <li><strong>Max Depth:</strong> Deeper trees = more complex, risk of overfitting</li>
-                                <li><strong>Learning Rate:</strong> Lower = more robust, needs more trees</li>
-                            </ul>
+                        <div className="graph-card">
+                            <h4>Confusion Matrix</h4>
+                            {renderConfusionMatrix()}
                         </div>
-                        <div className="legend-section">
-                            <h5>Performance Metrics:</h5>
-                            <ul>
-                                <li><strong>Gini &gt; 0.6:</strong> Excellent model</li>
-                                <li><strong>Gini 0.4-0.6:</strong> Good model</li>
-                                <li><strong>Gini &lt; 0.4:</strong> Poor model</li>
-                                <li><strong>KS &gt; 0.4:</strong> Excellent separation</li>
-                                <li><strong>KS 0.2-0.4:</strong> Good separation</li>
-                                <li><strong>KS &lt; 0.2:</strong> Weak separation</li>
-                            </ul>
+                        <div className="graph-card">
+                            <h4>KS Statistics</h4>
+                            {renderKSCurve()}
                         </div>
                     </div>
-                )}
-            </div>
 
-            <div className="model-content">
-                <div className="selected-variables-panel">
-                    <h4>Selected Variables ({(allSelectedVariables || selectedVariables).length})</h4>
-                    <div className="variables-list">
-                        {(allSelectedVariables || selectedVariables).map((variable) => (
-                            <div
-                                key={variable}
-                                className={`variable-item ${selectedColumn === variable ? 'selected' : ''}`}
-                            >
-                                <span className="variable-name" onClick={(e) => { e.stopPropagation(); onColumnSelect(variable); }}>{variable}</span>
-                                <input
-                                    type="checkbox"
-                                    checked={selectedVariables.includes(variable)}
-                                    onClick={(e) => e.stopPropagation()}
-                                    onChange={() => onToggleSelect ? onToggleSelect(variable) : undefined}
-                                />
-                            </div>
-                        ))}
-                    </div>
-
-                    <button
-                        className="run-model-btn"
-                        onClick={runXGBoost}
-                        disabled={loading || selectedVariables.length === 0}
-                    >
-                        {loading ? 'Running XGBoost...' : 'Run XGBoost'}
-                    </button>
-
-                    {results && onGenerateScoreCard && (
-                        <button
-                            className="run-model-btn"
-                            onClick={() => {
-                                try {
-                                    if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
-                                } catch (e) { }
-                                onGenerateScoreCard('xgboost');
-                            }}
-                            disabled={generatingScoreCard || selectedVariables.length === 0}
-                            style={{ marginTop: '10px', background: '#d46b08' }}
-                        >
-                            {generatingScoreCard ? 'Generating...' : 'Generate Score Card (XGBoost)'}
-                        </button>
-                    )}
-                </div>
-
-                {results && (
-                    <div className="results-panel">
-                        <div className="results-tabs">
-                            <button
-                                className={`tab-btn ${activeTab === 'importance' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('importance')}
-                            >
-                                Feature Importance
-                            </button>
-                            <button
-                                className={`tab-btn ${activeTab === 'parameters' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('parameters')}
-                            >
-                                Model Parameters
-                            </button>
-                            <button
-                                className={`tab-btn ${activeTab === 'roc' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('roc')}
-                            >
-                                ROC Curve
-                            </button>
-                            <button
-                                className={`tab-btn ${activeTab === 'confusion' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('confusion')}
-                            >
-                                Confusion Matrix
-                            </button>
-                            <button
-                                className={`tab-btn ${activeTab === 'ks' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('ks')}
-                            >
-                                KS Statistic
-                            </button>
+                    {/* Bottom Section: All Details */}
+                    <div className="model-details-section">
+                        {/* Feature Importance */}
+                        <div className="detail-card">
+                            <h4>Feature Importance (Gain)</h4>
+                            {renderFeatureImportance()}
                         </div>
 
-                        <div className="tab-content">
-                            {activeTab === 'importance' && renderFeatureImportance()}
-                            {activeTab === 'parameters' && renderModelParameters()}
-                            {activeTab === 'roc' && renderROCCurve()}
-                            {activeTab === 'confusion' && renderConfusionMatrix()}
-                            {activeTab === 'ks' && renderKSCurve()}
+                        {/* Model Parameters */}
+                        <div className="detail-card">
+                            <h4>Model Parameters</h4>
+                            {renderModelParameters()}
                         </div>
 
-                        <div className="model-summary">
+                        {/* Model Summary */}
+                        <div className="detail-card">
                             <h4>Model Summary</h4>
                             <div className="summary-grid">
-                                {activeTab === 'confusion' && results.accuracy !== undefined ? (
+                                <div className="summary-item">
+                                    <label>Number of Trees:</label>
+                                    <span>{results.model_stats.n_estimators}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Max Depth:</label>
+                                    <span>{results.model_stats.max_depth}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Learning Rate:</label>
+                                    <span>{formatNumber(results.model_stats.learning_rate)}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Observations:</label>
+                                    <span>{results.model_stats.n_observations}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Features:</label>
+                                    <span>{results.model_stats.n_features}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Gini Coefficient:</label>
+                                    <span>{formatNumber(results.gini_coefficient)}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>AUC:</label>
+                                    <span>{formatNumber(results.auc)}</span>
+                                </div>
+                                {results.ks_stat !== undefined && (
+                                    <div className="summary-item">
+                                        <label>KS Statistic:</label>
+                                        <span>{formatNumber(results.ks_stat)}</span>
+                                    </div>
+                                )}
+                                {results.accuracy !== undefined && (
                                     <>
                                         <div className="summary-item">
                                             <label>Accuracy:</label>
@@ -654,102 +603,41 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
                                         </div>
                                         <div className="summary-item">
                                             <label>Precision:</label>
-                                            <span>{formatNumber(results.precision)}</span>
+                                            <span>{formatNumber(results.precision ?? 0)}</span>
                                         </div>
                                         <div className="summary-item">
                                             <label>Recall:</label>
-                                            <span>{formatNumber(results.recall)}</span>
+                                            <span>{formatNumber(results.recall ?? 0)}</span>
                                         </div>
                                         <div className="summary-item">
                                             <label>F1 Score:</label>
-                                            <span>{formatNumber(results.f1)}</span>
+                                            <span>{formatNumber(results.f1 ?? 0)}</span>
                                         </div>
-                                    </>
-                                ) : activeTab === 'roc' ? (
-                                    <div style={{ color: '#f0f6fc', padding: 12 }}>
-                                        <h5 style={{ marginTop: 0 }}>Gini Coefficient:</h5>
-                                        <div>Ranges from 0 to 1 (higher is better)</div>
-                                        <ul style={{ marginTop: 8 }}>
-                                            <li>{'> 0.6'}: Excellent model</li>
-                                            <li>0.4 - 0.6: Good model</li>
-                                            <li>{'< 0.4'}: Poor model</li>
-                                        </ul>
-                                    </div>
-                                ) : activeTab === 'importance' ? (
-                                    <>
-                                        <div className="summary-item">
-                                            <label>Top Feature:</label>
-                                            <span>{results.feature_importance[0]?.variable || 'N/A'}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Top Feature Importance:</label>
-                                            <span>{results.feature_importance[0] ? formatNumber(results.feature_importance[0].importance_percentage, 2) + '%' : 'N/A'}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Features &gt; 5%:</label>
-                                            <span>{results.feature_importance.filter(f => f.importance_percentage > 5).length}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Total Features:</label>
-                                            <span>{results.feature_importance.length}</span>
-                                        </div>
-                                    </>
-                                ) : activeTab === 'parameters' ? (
-                                    <>
-                                        <div className="summary-item">
-                                            <label>Number of Trees:</label>
-                                            <span>{results.model_stats.n_estimators}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Max Depth:</label>
-                                            <span>{results.model_stats.max_depth}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Learning Rate:</label>
-                                            <span>{formatNumber(results.model_stats.learning_rate)}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Observations:</label>
-                                            <span>{results.model_stats.n_observations}</span>
-                                        </div>
-                                    </>
-                                ) : activeTab === 'ks' ? (
-                                    <div style={{ color: '#f0f6fc', padding: 12 }}>
-                                        <div><strong>KS statistic:</strong> {formatNumber(results.ks_stat)}</div>
-                                        <div><strong>KS threshold:</strong> {formatNumber(results.ks_threshold)}</div>
-                                        <div style={{ marginTop: 8, fontSize: 12, color: '#8b949e' }}>
-                                            <strong>Interpretation:</strong> {getKSInterpretation(results.ks_stat)}
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <>
-                                        <div className="summary-item">
-                                            <label>Gini Coefficient:</label>
-                                            <span>{formatNumber(results.gini_coefficient)}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>AUC:</label>
-                                            <span>{formatNumber(results.auc)}</span>
-                                        </div>
-                                        {results.accuracy !== undefined && (
-                                            <>
-                                                <div className="summary-item">
-                                                    <label>Accuracy:</label>
-                                                    <span>{formatNumber(results.accuracy)}</span>
-                                                </div>
-                                                <div className="summary-item">
-                                                    <label>Precision:</label>
-                                                    <span>{formatNumber(results.precision)}</span>
-                                                </div>
-                                            </>
-                                        )}
                                     </>
                                 )}
                             </div>
                         </div>
+
+                        {/* Generate Score Card Button */}
+                        {onGenerateScoreCard && (
+                            <div className="detail-card">
+                                <button
+                                    className="generate-scorecard-btn"
+                                    onClick={() => {
+                                        try {
+                                            if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
+                                        } catch (e) { }
+                                        onGenerateScoreCard('xgboost');
+                                    }}
+                                    disabled={generatingScoreCard || selectedVariables.length === 0}
+                                >
+                                    {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
+                                </button>
+                            </div>
+                        )}
                     </div>
-                )}
-            </div>
+                </>
+            )}
         </div>
     );
 };

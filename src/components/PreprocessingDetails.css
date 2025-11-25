@@ -29,14 +29,14 @@
   width: 100%;
   max-width: 100%;
   margin: 0;
-  margin-bottom: var(--spacing-md);
-  padding-bottom: 0;
+  margin-bottom: 0; /* Remove bottom margin - parent handles spacing */
+  padding-bottom: 0; /* Parent content-section handles bottom padding */
   background: var(--bg-primary);
   color: var(--fg-secondary);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   box-sizing: border-box;
-  height: calc(100vh - 150px - var(--spacing-sm) - var(--spacing-md));
-  max-height: calc(100vh - 150px - var(--spacing-sm) - var(--spacing-md));
+  height: 100%; /* Use 100% to fill parent container */
+  max-height: 100%; /* Use 100% to fill parent container */
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -53,6 +53,7 @@
   padding-bottom: 0;
   align-items: stretch;
   overflow: hidden;
+  flex: 1; /* Take up available space */
 }
 
 .stats-panel {

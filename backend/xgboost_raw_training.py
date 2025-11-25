@@ -101,16 +101,99 @@ def train_xgboost_on_raw_features(df, selected_variables, target):
     print(f"[XGBoost RAW] Training data: {X.shape[0]} rows, {X.shape[1]} features")
     print(f"[XGBoost RAW] Target distribution: {y.value_counts().to_dict()}")
     
-    # Calculate class imbalance for scale_pos_weight
+    # Calculate class imbalance for adaptive configuration
     n_negative = (y == 0).sum()
     n_positive = (y == 1).sum()
-    base_ratio = n_negative / n_positive if n_positive > 0 else 1.0
+    imbalance_ratio = n_negative / n_positive if n_positive > 0 else float('inf')
+    train_size = len(X)
     
-    # For extreme imbalance, use more aggressive weighting (2x the ratio)
-    # This helps the model learn from the minority class better
-    scale_pos_weight = 2.0 * base_ratio if n_positive > 0 else 1.0
     print(f"[XGBoost RAW] Class imbalance - Negatives: {n_negative}, Positives: {n_positive}")
-    print(f"[XGBoost RAW] Base ratio: {base_ratio:.2f}, Adjusted scale_pos_weight: {scale_pos_weight:.2f} (2x for extreme imbalance)")
+    print(f"[XGBoost RAW] Imbalance ratio: {imbalance_ratio:.2f}:1, Train size: {train_size}")
+    
+    # Get adaptive configuration from stacking config (same as stacking ensemble)
+    # Use lazy import to avoid circular dependency
+    def get_stacking_config(train_size, imbalance_ratio):
+        """Adaptive configuration based on dataset characteristics (same as stacking)."""
+        config = {}
+        
+        # Determine dataset category
+        if train_size < 1000:
+            dataset_type = 'small'
+        elif train_size < 10000:
+            dataset_type = 'medium'
+        else:
+            dataset_type = 'large'
+        
+        if imbalance_ratio > 100:
+            imbalance_level = 'extreme'
+        elif imbalance_ratio > 10:
+            imbalance_level = 'high'
+        else:
+            imbalance_level = 'moderate'
+        
+        # Base model configurations
+        if dataset_type == 'small' and imbalance_level == 'extreme':
+            config['xgb'] = {
+                'n_estimators': 200,
+                'max_depth': 4,
+                'learning_rate': 0.05,
+                'min_child_weight': 5,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'reg_alpha': 0.1,
+                'reg_lambda': 1.0,
+                'random_state': 42,
+                'eval_metric': 'logloss',
+                'use_label_encoder': False
+            }
+        elif dataset_type == 'large' and imbalance_level == 'extreme':
+            config['xgb'] = {
+                'n_estimators': 100,
+                'max_depth': 6,
+                'learning_rate': 0.1,
+                'min_child_weight': 1,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'reg_alpha': 0.0,
+                'reg_lambda': 1.0,
+                'random_state': 42,
+                'eval_metric': 'logloss',
+                'use_label_encoder': False
+            }
+        else:
+            # Default: Per paper standard
+            config['xgb'] = {
+                'n_estimators': 100,
+                'max_depth': 6,
+                'learning_rate': 0.1,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'reg_alpha': 0.0,
+                'reg_lambda': 1.0,
+                'random_state': 42,
+                'eval_metric': 'logloss',
+                'use_label_encoder': False
+            }
+        
+        return config
+    
+    config = get_stacking_config(train_size, imbalance_ratio)
+    xgb_config = config['xgb'].copy()
+    
+    # Calculate scale_pos_weight explicitly (same as stacking)
+    if n_positive > 0 and n_negative > 0:
+        scale_pos_weight = n_negative / n_positive
+    else:
+        scale_pos_weight = 1.0
+    xgb_config['scale_pos_weight'] = scale_pos_weight
+    
+    print(f"[XGBoost RAW] Using adaptive configuration:")
+    print(f"  - Dataset type: {'small' if train_size < 1000 else 'medium' if train_size < 10000 else 'large'}")
+    print(f"  - Imbalance level: {'extreme' if imbalance_ratio > 100 else 'high' if imbalance_ratio > 10 else 'moderate'}")
+    print(f"  - scale_pos_weight: {scale_pos_weight:.2f}")
+    print(f"  - n_estimators: {xgb_config.get('n_estimators', 100)}")
+    print(f"  - max_depth: {xgb_config.get('max_depth', 6)}")
+    print(f"  - learning_rate: {xgb_config.get('learning_rate', 0.1)}")
     
     # Split training data for validation (using real data only, no synthetic data)
     from sklearn.model_selection import train_test_split
@@ -128,32 +211,18 @@ def train_xgboost_on_raw_features(df, selected_variables, target):
         )
         print(f"[XGBoost RAW] Training split: {len(X_train)} train, {len(X_val)} validation (non-stratified)")
     
-    # Train XGBoost on RAW features with early stopping and regularization
-    # XGBoost 3.0+ requires early_stopping_rounds in constructor, not in fit()
-    # Optimized for extreme class imbalance and better recall
-    xgb_model = xgb.XGBClassifier(
-        n_estimators=1000,  # Increase max trees for better learning
-        max_depth=6,  # Increase depth slightly to capture more patterns (was 4)
-        learning_rate=0.03,  # Lower learning rate for more stable training (was 0.05)
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.01,  # Reduce L1 regularization to allow more learning (was 0.1)
-        reg_lambda=0.5,  # Reduce L2 regularization to allow more learning (was 1.0)
-        min_child_weight=1,  # Lower to allow splits on minority class (was 3)
-        gamma=0.05,  # Lower gamma to allow more splits (was 0.1)
-        random_state=42,
-        eval_metric='auc',  # Use AUC for early stopping (better for imbalanced data than logloss)
-        scale_pos_weight=scale_pos_weight,  # Handle class imbalance (real data only)
-        use_label_encoder=False,
-        early_stopping_rounds=30  # Increase patience for better convergence (was 20)
-    )
+    # Train XGBoost on RAW features with adaptive configuration (same as stacking)
+    xgb_model = xgb.XGBClassifier(**xgb_config)
     
-    # Train with early stopping (XGBoost 3.0+ - early_stopping_rounds already in constructor)
-    xgb_model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        verbose=False
-    )
+    # Train with early stopping if specified in config
+    if 'early_stopping_rounds' in xgb_config:
+        xgb_model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            verbose=False
+        )
+    else:
+        xgb_model.fit(X_train, y_train)
     
     if hasattr(xgb_model, 'best_iteration') and xgb_model.best_iteration is not None:
         print(f"[XGBoost RAW] Training stopped at {xgb_model.best_iteration} iterations (best score: {xgb_model.best_score:.4f})")

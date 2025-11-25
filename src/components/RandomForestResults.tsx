@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './ModelResults.css'; // We'll create this shared CSS
 
 interface RandomForestResultsProps {
@@ -14,6 +14,7 @@ interface RandomForestResultsProps {
     onGotoScoreCard?: () => void;
     onResultsUpdate?: (results: any) => void;
     recordId?: number;
+    triggerRegression?: number; // Trigger count to run regression from sidebar
 }
 
 interface FeatureImportance {
@@ -72,13 +73,20 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
     generatingScoreCard,
     onGotoScoreCard,
     onResultsUpdate,
-    recordId
+    recordId,
+    triggerRegression
 }) => {
     const [results, setResults] = useState<RandomForestResults | null>(null);
     const [loading, setLoading] = useState(false);
-    const [showLegend, setShowLegend] = useState(false);
     const [confusionView, setConfusionView] = useState<'counts' | 'percent'>('counts');
-    const [activeTab, setActiveTab] = useState<'importance' | 'roc' | 'confusion' | 'ks'>('importance');
+
+    // Watch for trigger from sidebar button
+    useEffect(() => {
+        if (triggerRegression && triggerRegression > 0) {
+            runRandomForest();
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [triggerRegression]);
 
     const runRandomForest = async () => {
         if (selectedVariables.length === 0) {
@@ -125,8 +133,7 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
         if (!results?.feature_importance) return null;
 
         return (
-            <div className="feature-importance-table">
-                <h4>Feature Importance</h4>
+            <div className="table-container">
                 <table>
                     <thead>
                         <tr>
@@ -169,7 +176,6 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
 
         return (
             <div className="roc-curve-container">
-                <h4>ROC Curve</h4>
                 <svg width={svgWidth} height={svgHeight} className="roc-svg">
                     {/* Grid lines */}
                     {[0, 0.2, 0.4, 0.6, 0.8, 1.0].map(val => (
@@ -274,16 +280,13 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
 
         return (
             <div className="confusion-svg-panel">
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <h4 style={{ margin: 0 }}>Confusion Matrix</h4>
-                    <div>
-                        <button className="tab-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
-                            Counts
-                        </button>
-                        <button className="tab-btn" onClick={() => setConfusionView('percent')}>
-                            Percent
-                        </button>
-                    </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '12px' }}>
+                    <button className="view-toggle-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
+                        Counts
+                    </button>
+                    <button className="view-toggle-btn" onClick={() => setConfusionView('percent')}>
+                        Percent
+                    </button>
                 </div>
 
                 <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
@@ -324,131 +327,88 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
 
     return (
         <div className="model-results-container">
-            <div className="model-header">
-                <div className="model-title">
-                    <h3>Random Forest Analysis</h3>
-                    <button
-                        className="legend-toggle"
-                        onClick={() => setShowLegend(!showLegend)}
-                    >
-                        {showLegend ? 'Hide Legend' : 'Show Legend'}
-                    </button>
+            {loading && (
+                <div className="loading-container">
+                    <div className="loading-spinner"></div>
+                    <p>Running Random Forest...</p>
                 </div>
+            )}
 
-                {showLegend && (
-                    <div className="legend-panel">
-                        <h4>Random Forest Legend</h4>
-                        <div className="legend-section">
-                            <h5>Feature Importance:</h5>
-                            <ul>
-                                <li>Shows relative importance of each variable</li>
-                                <li>Higher percentage = more important for predictions</li>
-                                <li>Sum of all importances = 100%</li>
-                            </ul>
-                        </div>
-                        <div className="legend-section">
-                            <h5>Gini Coefficient:</h5>
-                            <ul>
-                                <li>Ranges from 0 to 1 (higher is better)</li>
-                                <li>&gt; 0.6: Excellent model</li>
-                                <li>0.4 - 0.6: Good model</li>
-                                <li>&lt; 0.4: Poor model</li>
-                            </ul>
-                        </div>
-                    </div>
-                )}
-            </div>
-
-            <div className="model-content">
-                <div className="selected-variables-panel">
-                    <h4>Selected Variables ({(allSelectedVariables || selectedVariables).length})</h4>
-                    <div className="variables-list">
-                        {(allSelectedVariables || selectedVariables).map((variable) => (
-                            <div
-                                key={variable}
-                                className={`variable-item ${selectedColumn === variable ? 'selected' : ''}`}
-                            >
-                                <span className="variable-name" onClick={(e) => { e.stopPropagation(); onColumnSelect(variable); }}>{variable}</span>
-                                <input
-                                    type="checkbox"
-                                    checked={selectedVariables.includes(variable)}
-                                    onClick={(e) => e.stopPropagation()}
-                                    onChange={() => onToggleSelect ? onToggleSelect(variable) : undefined}
-                                />
-                            </div>
-                        ))}
-                    </div>
-
-                    <button
-                        className="run-model-btn"
-                        onClick={runRandomForest}
-                        disabled={loading || selectedVariables.length === 0}
-                    >
-                        {loading ? 'Running...' : 'Run Random Forest'}
-                    </button>
-
-                    {results && onGenerateScoreCard && (
-                        <button
-                            className="run-model-btn"
-                            onClick={() => {
-                                try {
-                                    if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
-                                } catch (e) { }
-                                onGenerateScoreCard('random_forest');
-                            }}
-                            disabled={generatingScoreCard || selectedVariables.length === 0}
-                            style={{ marginTop: '10px' }}
-                        >
-                            {generatingScoreCard ? 'Generating...' : 'Generate Score Card (RF)'}
-                        </button>
-                    )}
+            {!loading && !results && (
+                <div className="no-results-message">
+                    <p>Click "Run Random Forest" to train the model</p>
                 </div>
+            )}
 
-                {results && (
-                    <div className="results-panel">
-                        <div className="results-tabs">
-                            <button
-                                className={`tab-btn ${activeTab === 'importance' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('importance')}
-                            >
-                                Feature Importance
-                            </button>
-                            <button
-                                className={`tab-btn ${activeTab === 'roc' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('roc')}
-                            >
-                                ROC Curve
-                            </button>
-                            <button
-                                className={`tab-btn ${activeTab === 'confusion' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('confusion')}
-                            >
-                                Confusion Matrix
-                            </button>
-                            <button
-                                className={`tab-btn ${activeTab === 'ks' ? 'active' : ''}`}
-                                onClick={() => setActiveTab('ks')}
-                            >
-                                KS Statistic
-                            </button>
+            {results && (
+                <>
+                    {/* Top Section: 3 Graphs Side by Side */}
+                    <div className="model-graphs-section">
+                        <div className="graph-card">
+                            <h4>ROC Curve</h4>
+                            {renderROCCurve()}
                         </div>
-
-                        <div className="tab-content">
-                            {activeTab === 'importance' && renderFeatureImportance()}
-                            {activeTab === 'roc' && renderROCCurve()}
-                            {activeTab === 'confusion' && renderConfusionMatrix()}
-                            {activeTab === 'ks' && results.ks_curve && (
-                                <div className="ks-panel">
-                                    <h4>KS Curve</h4>
-                                    <KSChart ks_curve={results.ks_curve} ks_stat={results.ks_stat ?? 0} />
-                                </div>
+                        <div className="graph-card">
+                            <h4>Confusion Matrix</h4>
+                            {renderConfusionMatrix()}
+                        </div>
+                        <div className="graph-card">
+                            <h4>KS Statistics</h4>
+                            {results.ks_curve ? (
+                                <KSChart ks_curve={results.ks_curve} ks_stat={results.ks_stat ?? 0} />
+                            ) : (
+                                <div className="no-data-message">No KS data available</div>
                             )}
                         </div>
+                    </div>
 
-                        <div className="model-summary">
+                    {/* Bottom Section: All Details */}
+                    <div className="model-details-section">
+                        {/* Feature Importance */}
+                        <div className="detail-card">
+                            <h4>Feature Importance</h4>
+                            {renderFeatureImportance()}
+                        </div>
+
+                        {/* Model Summary */}
+                        <div className="detail-card">
                             <h4>Model Summary</h4>
                             <div className="summary-grid">
-                                {activeTab === 'confusion' && results.accuracy !== undefined ? (
+                                <div className="summary-item">
+                                    <label>Number of Trees:</label>
+                                    <span>{results.model_stats.n_estimators}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Max Depth:</label>
+                                    <span>{results.model_stats.max_depth}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>OOB Score:</label>
+                                    <span>{results.model_stats.oob_score ? formatNumber(results.model_stats.oob_score) : 'N/A'}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Observations:</label>
+                                    <span>{results.model_stats.n_observations}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Features:</label>
+                                    <span>{results.model_stats.n_features}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>Gini Coefficient:</label>
+                                    <span>{formatNumber(results.gini_coefficient)}</span>
+                                </div>
+                                <div className="summary-item">
+                                    <label>AUC:</label>
+                                    <span>{formatNumber(results.auc)}</span>
+                                </div>
+                                {results.ks_stat !== undefined && (
+                                    <div className="summary-item">
+                                        <label>KS Statistic:</label>
+                                        <span>{formatNumber(results.ks_stat)}</span>
+                                    </div>
+                                )}
+                                {results.accuracy !== undefined && (
                                     <>
                                         <div className="summary-item">
                                             <label>Accuracy:</label>
@@ -467,69 +427,30 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
                                             <span>{formatNumber(results.f1 ?? 0)}</span>
                                         </div>
                                     </>
-                                ) : activeTab === 'roc' ? (
-                                    <div style={{ color: '#f0f6fc', padding: 12 }}>
-                                        <h5 style={{ marginTop: 0 }}>Gini Coefficient:</h5>
-                                        <div>Ranges from 0 to 1 (higher is better)</div>
-                                        <ul style={{ marginTop: 8 }}>
-                                            <li>{'> 0.6'}: Excellent model</li>
-                                            <li>0.4 - 0.6: Good model</li>
-                                            <li>{'< 0.4'}: Poor model</li>
-                                        </ul>
-                                    </div>
-                                ) : activeTab === 'importance' ? (
-                                    <>
-                                        <div className="summary-item">
-                                            <label>Number of Trees:</label>
-                                            <span>{results.model_stats.n_estimators}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Max Depth:</label>
-                                            <span>{results.model_stats.max_depth}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>OOB Score:</label>
-                                            <span>{results.model_stats.oob_score ? formatNumber(results.model_stats.oob_score) : 'N/A'}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>Observations:</label>
-                                            <span>{results.model_stats.n_observations}</span>
-                                        </div>
-                                    </>
-                                ) : activeTab === 'ks' ? (
-                                    <div style={{ color: '#f0f6fc', padding: 12 }}>
-                                        <div><strong>KS statistic:</strong> {results.ks_stat !== undefined ? formatNumber(results.ks_stat) : 'N/A'} at threshold {results.ks_threshold !== undefined && results.ks_threshold !== null ? formatNumber(results.ks_threshold) : 'N/A'}</div>
-                                        <div style={{ marginTop: 8, fontSize: 12, color: '#8b949e' }}>Higher KS (closer to 1) indicates better separation; &gt;0.4 excellent, 0.2–0.4 good, &lt;0.2 weak.</div>
-                                    </div>
-                                ) : (
-                                    <>
-                                        <div className="summary-item">
-                                            <label>Gini Coefficient:</label>
-                                            <span>{formatNumber(results.gini_coefficient)}</span>
-                                        </div>
-                                        <div className="summary-item">
-                                            <label>AUC:</label>
-                                            <span>{formatNumber(results.auc)}</span>
-                                        </div>
-                                        {results.accuracy !== undefined && (
-                                            <>
-                                                <div className="summary-item">
-                                                    <label>Accuracy:</label>
-                                                    <span>{formatNumber(results.accuracy)}</span>
-                                                </div>
-                                                <div className="summary-item">
-                                                    <label>Precision:</label>
-                                                    <span>{formatNumber(results.precision ?? 0)}</span>
-                                                </div>
-                                            </>
-                                        )}
-                                    </>
                                 )}
                             </div>
                         </div>
+
+                        {/* Generate Score Card Button */}
+                        {onGenerateScoreCard && (
+                            <div className="detail-card">
+                                <button
+                                    className="generate-scorecard-btn"
+                                    onClick={() => {
+                                        try {
+                                            if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
+                                        } catch (e) { }
+                                        onGenerateScoreCard('random_forest');
+                                    }}
+                                    disabled={generatingScoreCard || selectedVariables.length === 0}
+                                >
+                                    {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
+                                </button>
+                            </div>
+                        )}
                     </div>
-                )}
-            </div>
+                </>
+            )}
         </div>
     );
 };

@@ -292,7 +292,11 @@ function App() {
       const res = await fetch('http://localhost:5000/api/target-distribution', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ column: col, record_id: activeRecordId }),
+        body: JSON.stringify({
+          column: col,
+          record_id: activeRecordId,
+          dataset_path: datasetPath || undefined,
+        }),
       });
       const data = await res.json();
       if (!data.error) setTargetCounts(data);
