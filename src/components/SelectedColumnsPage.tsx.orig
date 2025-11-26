@@ -317,6 +317,7 @@ const SelectedColumnsPage = () => {
   const [scoreCardData, setScoreCardData] = useState<any>(null);
   const [testScoreLoading, setTestScoreLoading] = useState(false);
   const [testScoreResults, setTestScoreResults] = useState<any[] | null>(null);
+  const [testScoreKS, setTestScoreKS] = useState<number | null>(null);
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedModel, setSelectedModel] = useState<string>('stacking'); // Default to stacking ensemble
@@ -872,9 +873,6 @@ const SelectedColumnsPage = () => {
         return;
       }
 
-      // Map frontend model type to backend model type
-      const backendModelType = modelType === 'stacking' ? 'stacking_ensemble' : modelType;
-
       const response = await fetch('http://localhost:5000/api/apply-scorecard', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -885,7 +883,7 @@ const SelectedColumnsPage = () => {
             Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
           ),
           model_results: modelResults,
-          model_type: backendModelType,
+          model_type: modelType,
           record_id: recordId
         })
       });
@@ -893,6 +891,7 @@ const SelectedColumnsPage = () => {
       const data = await response.json();
       if (data.success && data.results) {
         setTestScoreResults(data.results);
+        setTestScoreKS(typeof data.ks_stat === 'number' ? data.ks_stat : null);
         showNotification(`Score card tested using ${modelType} model`);
       } else {
         alert('Error applying score card: ' + (data.error || 'Unknown error'));
@@ -4215,7 +4214,6 @@ const SelectedColumnsPage = () => {
                     <option value="logistic">Logistic Regression</option>
                     <option value="random_forest">Random Forest</option>
                     <option value="xgboost">XGBoost</option>
-                    <option value="stacking">Stacking Ensemble</option>
                   </select>
                 </div>
 
@@ -4255,7 +4253,7 @@ const SelectedColumnsPage = () => {
                             <th>Bin Range</th>
                             <th>WOE</th>
                             <th>
-                              {(selectedModelForScorecard === 'logistic' || selectedModelForScorecard === 'stacking')
+                              {selectedModelForScorecard === 'logistic'
                                 ? 'Coefficient (β)'
                                 : 'Feature Importance'}
                             </th>
@@ -4291,7 +4289,7 @@ const SelectedColumnsPage = () => {
                                     <td>{bin.bin_range}</td>
                                     <td>{formatToFourDecimals(bin.woe)}</td>
                                     <td>
-                                      {(selectedModelForScorecard === 'logistic' || selectedModelForScorecard === 'stacking')
+                                      {selectedModelForScorecard === 'logistic'
                                         ? formatToFourDecimals(bin.coefficient)
                                         : formatToFourDecimals(bin.feature_importance)
                                       }
@@ -4349,7 +4347,11 @@ const SelectedColumnsPage = () => {
                       {testScoreResults && (
                         <div className="scorecard-test-results">
                           <h5>Score Card Test Results - {selectedModelForScorecard.toUpperCase()} Model (Sorted by Score)</h5>
-
+                          {testScoreKS !== null && (
+                            <div style={{ marginBottom: '12px', fontWeight: 'bold' }}>
+                              Separation Number (KS Statistic): {testScoreKS.toFixed(4)}
+                            </div>
+                          )}
                           <div className="table-container">
                             <table className="scorecard-table" aria-label="Score card test results">
                               <thead>

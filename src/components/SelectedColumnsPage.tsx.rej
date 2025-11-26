@@ -1,0 +1,10 @@
+--- src/components/SelectedColumnsPage.tsx
++++ src/components/SelectedColumnsPage.tsx
+@@ -4214,6 +4214,7 @@
+                    <option value="logistic">Logistic Regression</option>
+                    <option value="random_forest">Random Forest</option>
+                    <option value="xgboost">XGBoost</option>
++                    <option value="stacking">Stacking Ensemble</option>
+                  </select>
+                </div>
+ 
