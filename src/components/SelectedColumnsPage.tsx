@@ -303,6 +303,7 @@ const SelectedColumnsPage = () => {
   const [woeIvResults, setWoeIvResults] = useState<Record<string, { iv?: number; stats: NormalizedBin[] }>>({});
   const woeIvResultsRef = useRef<Record<string, { iv?: number; stats: NormalizedBin[] }>>({});
   const [woeReadyColumns, setWoeReadyColumns] = useState<Set<string>>(new Set());
+  const [isAiLoading, setIsAiLoading] = useState(false); // AI classification loading state
   const [selectedForModeling, setSelectedForModeling] = useState<string[]>(navModelReadyColumns || []); // For Column Selection & Binning (model_ready)
   const [selectedForFinalModeling, setSelectedForFinalModeling] = useState<string[]>(navFinalSelectedColumns || []); // For Model Training (final_selected)
   const [vifData, setVifData] = useState<Record<string, number | null>>({}); // VIF values for each variable
@@ -3124,9 +3125,17 @@ const SelectedColumnsPage = () => {
             {/* Step 0: Classification */}
             {currentStep === 0 && (
               <div className="column-selection-step" style={{ width: '100%' }}>
+                {/* AI Classification Loading Overlay */}
+                {isAiLoading && (
+                  <div className="loading-overlay">
+                    <div className="loading-spinner"></div>
+                    <p>AI is analyzing {columns.length} columns...</p>
+                  </div>
+                )}
                 <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginTop: '24px', marginBottom: '16px' }}>
                   <button
                     className="progress-action-btn"
+                    disabled={isAiLoading}
                     onClick={async () => {
                       try {
                         const colsToClassify = columns;
@@ -3135,7 +3144,8 @@ const SelectedColumnsPage = () => {
                           return;
                         }
 
-                        alert(`Starting AI classification for ${colsToClassify.length} columns...`);
+                        // Start loading
+                        setIsAiLoading(true);
 
                         let sampleData: Record<string, any[]> = {};
                         try {
@@ -3179,10 +3189,13 @@ const SelectedColumnsPage = () => {
                         }
                       } catch (e) {
                         alert('AI classification failed. See console for details.');
+                      } finally {
+                        // Stop loading regardless of success/failure
+                        setIsAiLoading(false);
                       }
                     }}
                   >
-                    <span className="btn-text">AI Enabled Classification of Discrete and Continuous</span>
+                    <span className="btn-text">AI Recommendation of Discrete and Continuous</span>
                   </button>
                 </div>
                 <div style={{ width: '100%', flex: 1, display: 'flex', flexDirection: 'column' }}>

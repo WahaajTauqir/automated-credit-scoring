@@ -27,6 +27,9 @@ import base64
 from io import BytesIO
 from decimal import Decimal
 from typing import Optional, Dict, Any, Tuple, List
+from huggingface_hub import InferenceClient
+from openai import OpenAI
+from dotenv import load_dotenv
 
 # Import XGBoost raw training module
 from xgboost_raw_training import train_xgboost_on_raw_features, apply_xgboost_scorecard
@@ -6409,100 +6412,155 @@ def get_csv_samples():
         return jsonify({"error": str(e)}), 500
 
 
+HF_TOKEN = os.environ.get("HF_TOKEN")
+client = InferenceClient(api_key=HF_TOKEN)
+
+MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct:novita"
+
+# List of allowed domains (credit scoring related)
+ALLOWED_KEYWORDS = [
+    "credit", "credit score", "loan", "scorecard", "risk", "default",
+    "repayment", "probability of default", "pd", "kmeans", "clustering",
+    "binning", "coarse", "fine", "woe", "weight of evidence",
+    "information value", "iv", "logistic regression", "univariate",
+    "multivariate", "data preparation", "feature", "pca", "bad rate",
+    "good rate", "model", "predict", "customer", "bank", "dataset",
+    "python", "flask", "django", "react", "api", "improve score",
+    "increase score", "risk factors", "score system"
+]
+
+ALLOWED_PATTERNS = [
+    r"\bcredit\b",
+    r"\bcredit scoring\b",
+    r"\bcredit score\b",
+    r"\bloan\b",
+    r"\bscorecard\b",
+    r"\brisk\b",
+    r"\bdefault\b",
+    r"\brepayment\b",
+    r"probability of default",
+    r"\bpd\b",
+    r"\bbad rate\b",
+    r"\bgood rate\b",
+    r"\bwoe\b",
+    r"weight of evidence",
+    r"\binformation value\b",
+    r"\biv\b",
+    r"\bbinning\b",
+    r"\blogistic regression\b",
+    r"\bunivariate\b",
+    r"\bmultivariate\b",
+    r"data preparation",
+    r"\bscore system\b",
+    r"improve credit score",
+    r"increase score"
+]
+
+def is_relevant(message: str) -> bool:
+    """Hybrid Keyword + Regex guardrail."""
+    msg = message.lower()
+
+    # keyword match
+    if any(keyword in msg for keyword in ALLOWED_KEYWORDS):
+        return True
+
+    # regex match
+    if any(re.search(pattern, msg) for pattern in ALLOWED_PATTERNS):
+        return True
+
+    return False
+
+
+# ----------------------------------------
+# CHAT ROUTE
+# ----------------------------------------
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    try:
+        data = request.get_json()
+        user_message = data.get("message", "")
+
+        if not user_message.strip():
+            return jsonify({"error": "Message is required"}), 400
+
+        # ---------- GUARDRAIL ----------
+        if not is_relevant(user_message):
+            return jsonify({
+                "reply": (
+                    "⚠ I can only answer questions related to **Credit Scoring, Loan Risk Analysis, "
+                    "Binning, WOE/IV, Scorecards, and Risk Modelling**.\n\n"
+                    "Please ask something related to the **Credit Scoring System**."
+                )
+            })
+
+        # ---------- SYSTEM PROMPT ----------
+        system_prompt = """
+You are a **Credit Scoring Expert AI Assistant**.
+
+Your answers MUST strictly follow this pipeline:
+1. Data Preparation
+2. Univariate Analysis
+3. Coarse Binning
+4. Fine Binning
+5. WOE & IV Calculation
+6. Handle Multicollinearity
+7. Multivariate Analysis
+8. Model Evaluation
+9. Scorecard Development
+10. KS-Statistics
+
+RULES:
+• Always connect your answer to credit scoring logic.
+• NEVER provide generic financial advice.
+• If asked “how to improve score”, answer using:
+    - Better WOE bins
+    - Lowering bad-rate drivers
+    - Improving variable distribution
+    - Scorecard interval improvements
+• Stay technical, concise, and model-focused.
+"""
+
+        # ---------- CALL LLAMA ----------
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            temperature=0.2,
+            max_tokens=350
+        )
+
+        ai_reply = response.choices[0].message["content"]
+
+        return jsonify({"reply": ai_reply})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/ai-classify-columns', methods=['POST'])
 def ai_classify_columns():
     """
-    Classify columns as 'discrete' or 'continuous' using GitHub Models inference endpoint.
-    Expects JSON: { columns: [...], sampleData: { col: [samples...] }, model: <optional model name> }
+    Classify columns as 'discrete' or 'continuous' using Hugging Face LLaMA 3.1-8B Instruct via OpenAI-compatible API.
+    Expects JSON: { columns: [...], sampleData: { col: [samples...] } }
     """
-    
-    # --- Local Helper Heuristic Function ---
-    # This logic is used for large datasets and as a fallback.
-    def _classify_with_heuristics(col, samples):
-        col_name_lower = col.lower()
-        
-        # --- Heuristic Keywords ---
-        # Priority 1: Continuous Keywords (Monetary, Measurements, Proportions)
-        continuous_keywords = ['sales', 'turnover', 'margin', 'perc', 'rate', 'ratio', 'amount', 'price', 'cost', 'salary', 'income', 'revenue', 'balance', 'weight', 'height', 'length', 'width', 'depth', 'distance', 'time', 'duration', 'age', 'years']
-        # Priority 2: Discrete Keywords (IDs, Codes, Counts, Categories)
-        discrete_keywords = ['id', 'no', 'keyt','_CD', 'cd', 'form', 'relation', 'auth', 'group', 'family', 'branch', 'visit', 'invcount', 'customer', 'status', 'level', 'flag', 'type', 'code']
-
-        # 1. Check Continuous by Name (Highest Priority)
-        if any(keyword in col_name_lower for keyword in continuous_keywords):
-            return 'continuous'
-
-        # 2. Check Discrete by Name
-        if any(keyword in col_name_lower for keyword in discrete_keywords) or col_name_lower in ['bad customer']:
-            return 'discrete'
-
-        # 3. Analyze Sample Values
-        # Check if samples is empty (handle both Series and list)
-        if hasattr(samples, 'empty'):
-            if samples.empty:
-                return 'discrete' # Default to discrete when no data
-        elif hasattr(samples, '__len__'):
-            if len(samples) == 0:
-                return 'discrete' # Default to discrete when no data
-        else:
-            if not samples:
-                return 'discrete' # Default to discrete when no data
-
-        try:
-            # Handle pandas Series/DataFrame samples
-            if hasattr(samples, 'dtype'):
-                is_numeric = pd.api.types.is_numeric_dtype(samples)
-                samples_list = samples.dropna().tolist()
-            else:
-                is_numeric = all(isinstance(x, (int, float)) for x in samples)
-                samples_list = [x for x in samples if x is not None]
-            
-            if not is_numeric:
-                return 'discrete' # Text/Categorical data
-
-            # Check for presence of non-integer/float values
-            has_float = any(isinstance(x, float) and not x.is_integer() for x in samples_list)
-            if has_float:
-                return 'continuous' # Presence of decimals strongly suggests measurement/continuous
-
-            # Check cardinality for numeric data (e.g., binary or few levels)
-            unique_values = len(set(samples_list))
-            # Use a conservative low-cardinality threshold for discrete classification
-            if unique_values <= 15: 
-                return 'discrete'
-            
-            # If numeric, all integers, high cardinality, and not caught by name:
-            # It's either a large count (discrete) or a large monetary value/ID (context-dependent).
-            # We default to continuous as LLM classification should be used for this ambiguity, 
-            # but if heuristics must decide, numeric high cardinality is often treated as continuous for modeling.
-            return 'continuous'
-        except Exception:
-            return 'discrete' # Safe default on sample analysis failure
-    # --- End Helper Function ---
 
     try:
+        load_dotenv()  # Load HF_TOKEN from .env file if present
+
         payload = request.get_json() or {}
         columns = payload.get('columns', [])
         sample_data = payload.get('sampleData', {})
-        model = payload.get('model') or os.getenv('AI_CLASSIFY_MODEL') or 'openai/gpt-5-mini'
 
-        token = os.getenv('GITHUB_TOKEN')
-        if not token:
-            print("ERROR: GITHUB_TOKEN environment variable not found")
-            return jsonify({"error": "Server missing GITHUB_TOKEN environment variable. Set it and restart the backend."}), 401
-        
-        print(f"DEBUG: Using GitHub token (first 10 chars): {token[:10]}...")
-        print(f"DEBUG: Processing {len(columns)} columns")
+        hf_token = os.getenv('HF_TOKEN1')
+        if not hf_token:
+            return jsonify({"error": "HF_TOKEN environment variable not set"}), 401
 
-        # FIX 1: Replace unrunnable 'classify_with_heuristics' call with the defined local helper
-        if len(columns) > 50:
-            print(f"DEBUG: Large dataset detected ({len(columns)} columns), using enhanced heuristics")
-            results = {}
-            for col in columns:
-                # Use the locally defined heuristic function
-                results[col] = _classify_with_heuristics(col, sample_data.get(col, []))
-            return jsonify(results)
-
-        # FIX 2: Build the enhanced prompt with detailed classification criteria
+        # Use OpenAI client with Hugging Face router
+        client = OpenAI(
+            base_url="https://router.huggingface.co/v1",
+            api_key=hf_token,
+        )
         prompt = (
             "You are an *expert Data Scientist* and your only task is to strictly classify the provided dataset columns "
             "as either 'discrete' or 'continuous' based on their name and sample values.\n\n"
@@ -6531,52 +6589,23 @@ def ai_classify_columns():
             "Response format: {\"column_name\": \"discrete\" or \"continuous\"}\n"
         )
 
-        body = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant that replies with strict JSON."},
+        completion = client.chat.completions.create(
+            model="meta-llama/Llama-3.1-8B-Instruct:novita",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that replies with strict JSON to classify discrete and continuous."},
                 {"role": "user", "content": prompt}
-            ]
-        }
+            ],
+            temperature=0.0,  # Added for deterministic output
+            seed=42           # Added for fixed response
+        )
 
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-        url = "[https://models.github.ai/inference/chat/completions](https://models.github.ai/inference/chat/completions)"
-        resp = requests.post(url, headers=headers, json=body, timeout=30)
-        
-        print(f"DEBUG: GitHub API response status: {resp.status_code}")
-        if not resp.ok:
-            print(f"DEBUG: GitHub API error response: {resp.text}")
-            error_msg = f"GitHub Models API call failed (status {resp.status_code})"
-            if resp.status_code == 401:
-                error_msg += ". Check if your GitHub token has 'models:read' permission."
-            elif resp.status_code == 403:
-                error_msg += ". Rate limit exceeded or insufficient permissions."
-            return jsonify({"error": error_msg, "details": resp.text}), 502
-
-        data = resp.json()
-        # Expected path: choices[0].message.content
-        text = None
-        try:
-            text = data.get('choices', [])[0].get('message', {}).get('content')
-        except Exception:
-            text = None
-
-        if not text:
-            # fallback: try top-level generated_text
-            if isinstance(data, list) and data and isinstance(data[0], dict):
-                text = data[0].get('generated_text')
-
-        if not text:
-            return jsonify({"error": "Model returned unexpected response", "raw": data}), 502
-
-        # Try to extract JSON from the model's text
+        # Extract JSON from model output (OpenAI client returns .content directly)
+        text = completion.choices[0].message.content
         mapping = None
         try:
-            # Use strict load first
             mapping = json.loads(text.strip())
         except Exception:
-            # attempt to find JSON substring
+            # Attempt to find JSON substring
             m = re.search(r"\{[\s\S]*\}", text)
             if m:
                 try:
@@ -6585,15 +6614,9 @@ def ai_classify_columns():
                     mapping = None
 
         if not mapping or not isinstance(mapping, dict):
-            # Fallback when LLM fails to return valid/parsable JSON
-            print(f"WARN: LLM failed to return valid JSON, falling back to heuristics.")
-            normalized = {}
-            for col in columns:
-                normalized[col] = _classify_with_heuristics(col, sample_data.get(col, []))
-            return jsonify(normalized)
+            return jsonify({"error": "Model returned invalid JSON", "raw": text}), 502
 
-
-        # Normalize values to 'discrete' or 'continuous'
+        # Normalize values
         normalized = {}
         for k, v in mapping.items():
             s = str(v).strip().lower()
@@ -6602,16 +6625,15 @@ def ai_classify_columns():
             elif s.startswith('c'):
                 normalized[k] = 'continuous'
             else:
-                # FIX 3: Fallback if LLM output is not 'discrete' or 'continuous'
-                # Use the robust heuristic function for the one-off failure
-                print(f"WARN: LLM returned non-standard classification '{v}' for '{k}'. Using heuristics.")
-                normalized[k] = _classify_with_heuristics(k, sample_data.get(k, []))
-        
+                normalized[k] = 'unknown'
+
         return jsonify(normalized)
+
     except Exception as e:
         import traceback
         print('ai_classify_columns error:', traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
 
 # ----------- Credit Scoring Metrics Calculation -----------
 @app.route('/api/calculate-scoring-metrics', methods=['POST'])
