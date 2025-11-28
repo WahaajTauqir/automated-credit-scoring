@@ -210,6 +210,7 @@ const SelectedColumnsPage = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [columnsPerPage, setColumnsPerPage] = useState(7);
   const columnListRef = useRef<HTMLDivElement>(null);
+  const previousStepRef = useRef<number>(0); // Track previous step to detect navigation source
   
   // Calculate columns per page based on available viewport height
   useEffect(() => {
@@ -308,6 +309,7 @@ const SelectedColumnsPage = () => {
   const [vifData, setVifData] = useState<Record<string, number | null>>({}); // VIF values for each variable
   const [significanceData, setSignificanceData] = useState<Record<string, { pValue: number | null; level: string }>>({}); // Significance data for each variable
   const [isCalculatingVIF, setIsCalculatingVIF] = useState(false);
+  const [hasLRCompleted, setHasLRCompleted] = useState(false); // Track if LR has completed
   const [triggerLogisticRegression, setTriggerLogisticRegression] = useState(0);
   const [triggerRandomForest, setTriggerRandomForest] = useState(0);
   const [triggerXGBoost, setTriggerXGBoost] = useState(0);
@@ -317,6 +319,13 @@ const SelectedColumnsPage = () => {
   const [scoreCardData, setScoreCardData] = useState<any>(null);
   const [testScoreLoading, setTestScoreLoading] = useState(false);
   const [testScoreResults, setTestScoreResults] = useState<any[] | null>(null);
+  const [testScoreKSData, setTestScoreKSData] = useState<{ ks_stat: number | null; ks_threshold: number | null; ks_curve: any[] | null } | null>(null);
+  const [testScoreRiskBands, setTestScoreRiskBands] = useState<any[] | null>(null);
+  const [createRangesLoading, setCreateRangesLoading] = useState(false);
+  const [trainingScoreResults, setTrainingScoreResults] = useState<any[] | null>(null);
+  const [trainingScoreKSData, setTrainingScoreKSData] = useState<{ ks_stat: number | null; ks_threshold: number | null; ks_curve: any[] | null } | null>(null);
+  const [trainingScoreRiskBands, setTrainingScoreRiskBands] = useState<any[] | null>(null);
+  const [currentDataSource, setCurrentDataSource] = useState<'training' | 'test'>('test'); // Track which data source is currently displayed
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedModel, setSelectedModel] = useState<string>('stacking'); // Default to stacking ensemble
@@ -371,20 +380,96 @@ const SelectedColumnsPage = () => {
   // Filtered and sorted columns
   // Filter columns by search term and sort alphabetically by name
   // Add these state setters to your component
+  // Cache model results to localStorage
+  const saveCachedModelResults = (modelType: string, results: any) => {
+    if (!recordId || !results) return;
+    
+    try {
+      const cacheKey = `model_results_${recordId}_${modelType}`;
+      localStorage.setItem(cacheKey, JSON.stringify({
+        results: results,
+        timestamp: Date.now()
+      }));
+      console.log(`[Model Cache] Saved ${modelType} results to cache`);
+    } catch (error) {
+      console.error(`[Model Cache] Error saving ${modelType} results:`, error);
+    }
+  };
+
+  // Load cached model results from localStorage
+  const loadCachedModelResults = (modelType: string): any | null => {
+    if (!recordId) return null;
+    
+    try {
+      const cacheKey = `model_results_${recordId}_${modelType}`;
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.results) {
+          console.log(`[Model Cache] Loaded ${modelType} results from cache`);
+          return parsed.results;
+        }
+      }
+    } catch (error) {
+      console.error(`[Model Cache] Error loading ${modelType} results:`, error);
+    }
+    return null;
+  };
+
+  // Cache selectedForFinalModeling to localStorage
+  const saveCachedFinalSelected = (finalSelected: string[]) => {
+    if (!recordId) return;
+    
+    try {
+      const cacheKey = `final_selected_${recordId}`;
+      localStorage.setItem(cacheKey, JSON.stringify({
+        finalSelected: finalSelected,
+        timestamp: Date.now()
+      }));
+      console.log('[Final Selected Cache] Saved final_selected to cache:', finalSelected);
+    } catch (error) {
+      console.error('[Final Selected Cache] Error saving final_selected:', error);
+    }
+  };
+
+  // Load cached selectedForFinalModeling from localStorage
+  const loadCachedFinalSelected = (): string[] | null => {
+    if (!recordId) return null;
+    
+    try {
+      const cacheKey = `final_selected_${recordId}`;
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.finalSelected && Array.isArray(parsed.finalSelected)) {
+          console.log('[Final Selected Cache] Loaded final_selected from cache:', parsed.finalSelected);
+          return parsed.finalSelected;
+        }
+      }
+    } catch (error) {
+      console.error('[Final Selected Cache] Error loading final_selected:', error);
+    }
+    return null;
+  };
+
   const handleLogisticResults = (results: any) => {
     setLogisticResults(results);
+    saveCachedModelResults('logistic', results);
   };
 
   const handleRandomForestResults = (results: any) => {
     setRandomForestResults(results);
+    saveCachedModelResults('random_forest', results);
   };
 
   const handleXGBoostResults = (results: any) => {
     setXgboostResults(results);
+    saveCachedModelResults('xgboost', results);
   };
 
   const handleStackingResults = (results: any) => {
     setStackingResults(results);
+    saveCachedModelResults('stacking', results);
   };
 
   const syncBinningFromState = useCallback(
@@ -893,7 +978,20 @@ const SelectedColumnsPage = () => {
       const data = await response.json();
       if (data.success && data.results) {
         setTestScoreResults(data.results);
-        showNotification(`Score card tested using ${modelType} model`);
+        // Store KS data if available
+        if (data.ks_stat !== undefined && data.ks_curve) {
+          setTestScoreKSData({
+            ks_stat: data.ks_stat,
+            ks_threshold: data.ks_threshold || null,
+            ks_curve: data.ks_curve
+          });
+        }
+        // Store risk bands
+        if (data.risk_bands && data.risk_bands.length > 0) {
+          setTestScoreRiskBands(data.risk_bands);
+        }
+        setCurrentDataSource('test');
+        showNotification(`Score card tested using ${modelType} model on test data`);
       } else {
         alert('Error applying score card: ' + (data.error || 'Unknown error'));
       }
@@ -901,6 +999,85 @@ const SelectedColumnsPage = () => {
       alert('Error applying score card: ' + err);
     } finally {
       setTestScoreLoading(false);
+    }
+  };
+
+  // Create ranges from training data
+  const handleCreateRanges = async (modelType: string = selectedModelForScorecard) => {
+    setCreateRangesLoading(true);
+    setTrainingScoreResults(null);
+    setTrainingScoreRiskBands(null);
+    setTrainingScoreKSData(null);
+    try {
+      // Get the appropriate model results based on the selected model
+      let modelResults: any = null;
+
+      switch (modelType) {
+        case 'logistic':
+          modelResults = logisticResults;
+          break;
+        case 'random_forest':
+          modelResults = randomForestResults;
+          break;
+        case 'xgboost':
+          modelResults = xgboostResults;
+          break;
+        case 'stacking':
+          modelResults = stackingResults;
+          break;
+        default:
+          modelResults = logisticResults;
+      }
+
+      if (!modelResults) {
+        alert(`No results available for ${modelType}. Please run the model first.`);
+        setCreateRangesLoading(false);
+        return;
+      }
+
+      // Map frontend model type to backend model type
+      const backendModelType = modelType === 'stacking' ? 'stacking_ensemble' : modelType;
+
+      const response = await fetch('http://localhost:5000/api/apply-scorecard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          selected_variables: selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling,
+          target: targetVariable,
+          woe_transformed_data: Object.fromEntries(
+            Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
+          ),
+          model_results: modelResults,
+          model_type: backendModelType,
+          record_id: recordId,
+          data_source: 'training'  // Use training data instead of test
+        })
+      });
+
+      const data = await response.json();
+      if (data.success && data.results) {
+        setTrainingScoreResults(data.results);
+        // Store KS data if available
+        if (data.ks_stat !== undefined && data.ks_curve) {
+          setTrainingScoreKSData({
+            ks_stat: data.ks_stat,
+            ks_threshold: data.ks_threshold || null,
+            ks_curve: data.ks_curve
+          });
+        }
+        // Store risk bands from training data
+        if (data.risk_bands && data.risk_bands.length > 0) {
+          setTrainingScoreRiskBands(data.risk_bands);
+        }
+        setCurrentDataSource('training');
+        showNotification(`Score card applied to training data using ${modelType} model`);
+      } else {
+        alert('Error creating ranges: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      alert('Error creating ranges: ' + err);
+    } finally {
+      setCreateRangesLoading(false);
     }
   };
   const calculateAllBinMetrics = async (columnName: string, bins: NormalizedBin[]) => {
@@ -2333,6 +2510,9 @@ const SelectedColumnsPage = () => {
       // DO NOT update selectedForModeling - it should remain unchanged
       // selectedForModeling represents model_ready features and should stay visible in binning section
 
+      // Cache the new selection
+      saveCachedFinalSelected(newSelection);
+
       // Update UI immediately (optimistic update)
       showNotification(`${col} ${isCurrentlySelected ? 'deselected' : 'selected'} for final model training.`);
 
@@ -2615,6 +2795,55 @@ const SelectedColumnsPage = () => {
   const hasInitializedFinalModelingRef = useRef<boolean>(false);
   const lastStep3RecordIdRef = useRef<number | undefined>(undefined);
 
+  // Load cached VIF and significance data from localStorage
+  const loadCachedVIFAndSignificance = (): boolean => {
+    if (!recordId) return false;
+    
+    try {
+      const cacheKey = `vif_significance_${recordId}`;
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.vifData && parsed.significanceData) {
+          console.log('[VIF] Loaded cached VIF and significance data');
+          setVifData(parsed.vifData);
+          setSignificanceData(parsed.significanceData);
+          setHasLRCompleted(true);
+          return true;
+        }
+      }
+    } catch (error) {
+      console.error('[VIF] Error loading cached data:', error);
+    }
+    return false;
+  };
+
+  // Save VIF and significance data to localStorage
+  const saveCachedVIFAndSignificance = (vifMap: Record<string, number | null>, significanceMap: Record<string, { pValue: number | null; level: string }>) => {
+    if (!recordId) return;
+    
+    try {
+      const cacheKey = `vif_significance_${recordId}`;
+      localStorage.setItem(cacheKey, JSON.stringify({
+        vifData: vifMap,
+        significanceData: significanceMap,
+        timestamp: Date.now()
+      }));
+      console.log('[VIF] Saved VIF and significance data to cache');
+    } catch (error) {
+      console.error('[VIF] Error saving cached data:', error);
+    }
+  };
+
+  // Track previous step before it changes
+  useEffect(() => {
+    // This runs AFTER the render but BEFORE the main useEffect below
+    // So when currentStep changes to 3, previousStepRef.current still has the old value
+    if (currentStep !== 3) {
+      previousStepRef.current = currentStep;
+    }
+  }, [currentStep]);
+
   // Initialize selectedForFinalModeling and calculate VIF when entering models section
   useEffect(() => {
     if (currentStep === 3 && targetVariable && recordId && selectedForModeling.length > 0) {
@@ -2626,9 +2855,23 @@ const SelectedColumnsPage = () => {
         lastStep3RecordIdRef.current = recordId;
       }
       
-      // Load final_selected from database when entering models section
+      // Load final_selected from database or cache when entering models section
       // This preserves user's previous selections (checked/unchecked state)
       const loadFinalSelected = async () => {
+        // First, try to load from cache (for when coming from scorecard)
+        const previousStep = previousStepRef.current;
+        if (previousStep === 4) {
+          // Coming from scorecard - prefer cache over database
+          const cachedFinalSelected = loadCachedFinalSelected();
+          if (cachedFinalSelected && cachedFinalSelected.length > 0) {
+            console.log('[Models] Coming from scorecard, loaded final_selected from cache:', cachedFinalSelected);
+            setSelectedForFinalModeling(cachedFinalSelected);
+            hasInitializedFinalModelingRef.current = true;
+            return;
+          }
+        }
+
+        // Try database first
         try {
           const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
           if (featuresResponse.ok) {
@@ -2643,26 +2886,35 @@ const SelectedColumnsPage = () => {
                 // Use final_selected from database if available
                 console.log('[Models] Loaded final_selected from database:', finalSelectedFeatures);
                 setSelectedForFinalModeling(finalSelectedFeatures);
+                // Cache it for future use
+                saveCachedFinalSelected(finalSelectedFeatures);
                 hasInitializedFinalModelingRef.current = true;
-              } else if (!hasInitializedFinalModelingRef.current) {
-                // Only initialize with all model_ready features if no final_selected in DB and not yet initialized
-                console.log('[Models] No final_selected in DB, initializing with all model_ready features:', selectedForModeling);
-                setSelectedForFinalModeling([...selectedForModeling]);
-                hasInitializedFinalModelingRef.current = true;
-              } else {
-                // Already initialized - preserve existing state (user's current selections)
-                console.log('[Models] Already initialized, preserving existing selectedForFinalModeling state');
+                return;
               }
             }
           }
         } catch (err) {
-          console.error('[Models] Error loading final_selected:', err);
-          // Fallback: initialize with all model_ready features if loading fails and not yet initialized
-          if (!hasInitializedFinalModelingRef.current) {
-            console.log('[Models] Fallback: Initializing with all model_ready features:', selectedForModeling);
-            setSelectedForFinalModeling([...selectedForModeling]);
-            hasInitializedFinalModelingRef.current = true;
-          }
+          console.error('[Models] Error loading final_selected from database:', err);
+        }
+
+        // If no database result, try cache
+        const cachedFinalSelected = loadCachedFinalSelected();
+        if (cachedFinalSelected && cachedFinalSelected.length > 0) {
+          console.log('[Models] Loaded final_selected from cache:', cachedFinalSelected);
+          setSelectedForFinalModeling(cachedFinalSelected);
+          hasInitializedFinalModelingRef.current = true;
+          return;
+        }
+
+        // Last resort: initialize with all model_ready features if not yet initialized
+        if (!hasInitializedFinalModelingRef.current) {
+          console.log('[Models] No final_selected in DB or cache, initializing with all model_ready features:', selectedForModeling);
+          setSelectedForFinalModeling([...selectedForModeling]);
+          saveCachedFinalSelected([...selectedForModeling]);
+          hasInitializedFinalModelingRef.current = true;
+        } else {
+          // Already initialized - preserve existing state (user's current selections)
+          console.log('[Models] Already initialized, preserving existing selectedForFinalModeling state');
         }
       };
       
@@ -2670,14 +2922,60 @@ const SelectedColumnsPage = () => {
         loadFinalSelected();
       }
       
-      // Always calculate VIF for all model_ready features (selectedForModeling)
-      // This ensures VIF is shown for all features in the sidebar
-      console.log('[VIF] Calculating VIF for all model_ready features:', selectedForModeling);
-      calculateVIF();
+      // Only calculate VIF when coming from binning (step 2), not from scorecard (step 4)
+      // previousStepRef.current contains the step BEFORE currentStep changed to 3
+      const previousStep = previousStepRef.current;
+      console.log('[VIF] Entering step 3, previous step was:', previousStep);
+      if (previousStep === 2) {
+        // Coming from binning - calculate VIF and significance
+        console.log('[VIF] Coming from binning, calculating VIF for all model_ready features:', selectedForModeling);
+        calculateVIF();
+      } else if (previousStep === 4) {
+        // Coming from scorecard - load cached VIF and significance data
+        console.log('[VIF] Coming from scorecard, loading cached VIF and significance data');
+        loadCachedVIFAndSignificance();
+      } else {
+        // First time entering or from other step - check if we have cached data
+        const cachedData = loadCachedVIFAndSignificance();
+        if (!cachedData) {
+          // No cached data, calculate VIF
+          console.log('[VIF] No cached data found, calculating VIF for all model_ready features:', selectedForModeling);
+          calculateVIF();
+        }
+      }
+
+      // Load cached model results when entering models section
+      // This prevents recomputation when switching between models and scorecard
+      // Only load if results are not already set
+      if (!logisticResults) {
+        const cachedLR = loadCachedModelResults('logistic');
+        if (cachedLR) {
+          setLogisticResults(cachedLR);
+        }
+      }
+      if (!randomForestResults) {
+        const cachedRF = loadCachedModelResults('random_forest');
+        if (cachedRF) {
+          setRandomForestResults(cachedRF);
+        }
+      }
+      if (!xgboostResults) {
+        const cachedXGB = loadCachedModelResults('xgboost');
+        if (cachedXGB) {
+          setXgboostResults(cachedXGB);
+        }
+      }
+      if (!stackingResults) {
+        const cachedStacking = loadCachedModelResults('stacking');
+        if (cachedStacking) {
+          setStackingResults(cachedStacking);
+        }
+      }
     } else if (currentStep !== 3) {
       // Reset flag when leaving step 3
       hasInitializedFinalModelingRef.current = false;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep, targetVariable, recordId, selectedForModeling]);
 
   const calculateVIF = async () => {
@@ -2695,6 +2993,7 @@ const SelectedColumnsPage = () => {
 
     console.log('[VIF] Starting VIF calculation for all model_ready features:', selectedForModeling);
     setIsCalculatingVIF(true);
+    setHasLRCompleted(false);
     try {
       const response = await fetch('http://localhost:5000/api/logistic-regression', {
         method: 'POST',
@@ -2768,11 +3067,21 @@ const SelectedColumnsPage = () => {
         });
         console.log('[Significance] Final significance map:', significanceMap);
         setSignificanceData(significanceMap);
+        
+        // Save to cache
+        saveCachedVIFAndSignificance(vifMap, significanceMap);
+        
+        // Mark LR as completed
+        setHasLRCompleted(true);
+        
         await autoSelectFeaturesFromDiagnostics(vifMap, significanceMap);
       } else {
         console.log('[Significance] No p_values in response or request failed');
         // Still set the map with null values so UI shows something for all features
         setSignificanceData(significanceMap);
+        // Save to cache even if incomplete
+        saveCachedVIFAndSignificance(vifMap, significanceMap);
+        setHasLRCompleted(true);
       }
       
       // Log summary
@@ -2785,6 +3094,7 @@ const SelectedColumnsPage = () => {
       }
     } catch (error) {
       console.error('[VIF] Error calculating VIF:', error);
+      setHasLRCompleted(false);
     } finally {
       setIsCalculatingVIF(false);
     }
@@ -3078,7 +3388,15 @@ const SelectedColumnsPage = () => {
                     onClick={() => {
                       setTriggerLogisticRegression(prev => prev + 1);
                     }}
-                    disabled={isCalculatingVIF || (currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0}
+                    disabled={
+                      isCalculatingVIF || 
+                      !hasLRCompleted ||
+                      (currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0 ||
+                      Object.keys(vifData).length === 0 ||
+                      Object.keys(significanceData).length === 0 ||
+                      !Object.values(vifData).some(v => v !== null) ||
+                      !Object.values(significanceData).some(s => s.pValue !== null)
+                    }
                   >
                     {isCalculatingVIF ? 'Calculating VIF...' : 'Run Logistic Regression'}
                   </button>
@@ -3089,7 +3407,15 @@ const SelectedColumnsPage = () => {
                     onClick={() => {
                       setTriggerRandomForest(prev => prev + 1);
                     }}
-                    disabled={(currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0}
+                    disabled={
+                      isCalculatingVIF || 
+                      !hasLRCompleted ||
+                      (currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0 ||
+                      Object.keys(vifData).length === 0 ||
+                      Object.keys(significanceData).length === 0 ||
+                      !Object.values(vifData).some(v => v !== null) ||
+                      !Object.values(significanceData).some(s => s.pValue !== null)
+                    }
                   >
                     Run Random Forest
                   </button>
@@ -3100,7 +3426,15 @@ const SelectedColumnsPage = () => {
                     onClick={() => {
                       setTriggerXGBoost(prev => prev + 1);
                     }}
-                    disabled={(currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0}
+                    disabled={
+                      isCalculatingVIF || 
+                      !hasLRCompleted ||
+                      (currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0 ||
+                      Object.keys(vifData).length === 0 ||
+                      Object.keys(significanceData).length === 0 ||
+                      !Object.values(vifData).some(v => v !== null) ||
+                      !Object.values(significanceData).some(s => s.pValue !== null)
+                    }
                   >
                     Run XGBoost
                   </button>
@@ -3111,7 +3445,15 @@ const SelectedColumnsPage = () => {
                     onClick={() => {
                       setTriggerStacking(prev => prev + 1);
                     }}
-                    disabled={(currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0}
+                    disabled={
+                      isCalculatingVIF || 
+                      !hasLRCompleted ||
+                      (currentStep === 3 && selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling).length === 0 ||
+                      Object.keys(vifData).length === 0 ||
+                      Object.keys(significanceData).length === 0 ||
+                      !Object.values(vifData).some(v => v !== null) ||
+                      !Object.values(significanceData).some(s => s.pValue !== null)
+                    }
                   >
                     Run Stacking Ensemble
                   </button>
@@ -4127,6 +4469,7 @@ const SelectedColumnsPage = () => {
                     onResultsUpdate={handleLogisticResults}
                     recordId={recordId}
                     triggerRegression={triggerLogisticRegression}
+                    initialResults={logisticResults}
                   />
                 )}
 
@@ -4150,6 +4493,7 @@ const SelectedColumnsPage = () => {
                     onResultsUpdate={handleRandomForestResults}
                     recordId={recordId}
                     triggerRegression={triggerRandomForest}
+                    initialResults={randomForestResults}
                   />
                 )}
 
@@ -4173,6 +4517,7 @@ const SelectedColumnsPage = () => {
                     onResultsUpdate={handleXGBoostResults}
                     recordId={recordId}
                     triggerRegression={triggerXGBoost}
+                    initialResults={xgboostResults}
                   />
                 )}
 
@@ -4196,191 +4541,268 @@ const SelectedColumnsPage = () => {
                     onResultsUpdate={handleStackingResults}
                     recordId={recordId}
                     triggerRegression={triggerStacking}
+                    initialResults={stackingResults}
                   />
                 )}
               </div>
             )}
             {currentStep === 4 && (
-              <div className="scorecard-section">
-                <h3>Score Card</h3>
-                {/* Model Selection for Score Card */}
-                <div className="scorecard-model-selection" style={{ marginBottom: '16px' }}>
-                  <label htmlFor="scorecard-model-select">Select Model for Score Card: </label>
-                  <select
-                    id="scorecard-model-select"
-                    value={selectedModelForScorecard}
-                    onChange={(e) => setSelectedModelForScorecard(e.target.value)}
-                    style={{ marginLeft: '8px', padding: '4px 8px' }}
-                  >
-                    <option value="logistic">Logistic Regression</option>
-                    <option value="random_forest">Random Forest</option>
-                    <option value="xgboost">XGBoost</option>
-                    <option value="stacking">Stacking Ensemble</option>
-                  </select>
-                </div>
-
-                <div className="scorecard-controls">
-                  <button
-                    className="run-regression-btn"
-                    onClick={generateScoreCard}
-                    disabled={generatingScoreCard || selectedForModeling.length === 0}
-                    aria-label="Generate score card"
-                  >
-                    {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
-                  </button>
-                </div>
-                {/* Show loading skeleton while generating */}
-                {generatingScoreCard && (
-                  <div className="scorecard-results-loading">
-                    <h4>Score Card Results</h4>
-                    <div className="scorecard-loading-skeleton">
-                      <div className="skeleton-header" />
-                      <div className="skeleton-row" />
-                      <div className="skeleton-row" />
-                      <div className="skeleton-row" />
+              <>
+                {/* Model Selection for Score Card - Outside main box */}
+                {developerMode && (
+                  <div className="scorecard-model-selection" style={{ marginBottom: '16px' }}>
+                    <div className="model-buttons">
+                      <button
+                        className={`model-btn ${selectedModelForScorecard === 'logistic' ? 'active' : ''}`}
+                        onClick={() => setSelectedModelForScorecard('logistic')}
+                      >
+                        Logistic Regression
+                      </button>
+                      <button
+                        className={`model-btn ${selectedModelForScorecard === 'random_forest' ? 'active' : ''}`}
+                        onClick={() => setSelectedModelForScorecard('random_forest')}
+                      >
+                        Random Forest
+                      </button>
+                      <button
+                        className={`model-btn ${selectedModelForScorecard === 'xgboost' ? 'active' : ''}`}
+                        onClick={() => setSelectedModelForScorecard('xgboost')}
+                      >
+                        XGBoost
+                      </button>
+                      <button
+                        className={`model-btn ${selectedModelForScorecard === 'stacking' ? 'active' : ''}`}
+                        onClick={() => setSelectedModelForScorecard('stacking')}
+                      >
+                        Stacking Ensemble
+                      </button>
                     </div>
                   </div>
                 )}
 
-                {/* Only show results when not generating and scoreCardData is loaded */}
-                {scoreCardData && !generatingScoreCard && (
-                  <div className="scorecard-results">
-                    <h4>Score Card Results (Based on {selectedModelForScorecard} model)</h4>
-                    <div className="table-container">
-                      <table className="scorecard-table" aria-label="Score card results">
-                        <thead>
-                          <tr>
-                            <th>Bin #</th>
-                            <th>Variable</th>
-                            <th>Bin Range</th>
-                            <th>WOE</th>
-                            <th>
-                              {(selectedModelForScorecard === 'logistic' || selectedModelForScorecard === 'stacking')
-                                ? 'Coefficient (β)'
-                                : 'Feature Importance'}
-                            </th>
-                            <th>Score</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {scoreCardData.scorecard_bins && (() => {
-                            const grouped: Record<string, any[]> = {};
-                            const varsToUse = selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling;
-                            scoreCardData.scorecard_bins.forEach((b: any) => {
-                              if (varsToUse.includes(b.variable)) {
-                                grouped[b.variable] = grouped[b.variable] || [];
-                                grouped[b.variable].push(b);
-                              }
-                            });
-                            const rows: any[] = [];
-                            Object.keys(grouped).forEach((variable, varIndex) => {
-                              const bins = grouped[variable];
-                              if (varIndex > 0) {
-                                rows.push(
-                                  <tr key={`sep-${variable}`} className="variable-separator">
-                                    <td colSpan={6} />
-                                  </tr>
-                                );
-                              }
-                              for (let i = 0; i < bins.length; i++) {
-                                const bin = bins[i];
-                                rows.push(
-                                  <tr key={`${variable}-${i}-${String(bin.bin_range)}`}>
-                                    <td>{i + 1}</td>
-                                    <td>{bin.variable}</td>
-                                    <td>{bin.bin_range}</td>
-                                    <td>{formatToFourDecimals(bin.woe)}</td>
-                                    <td>
-                                      {(selectedModelForScorecard === 'logistic' || selectedModelForScorecard === 'stacking')
-                                        ? formatToFourDecimals(bin.coefficient)
-                                        : formatToFourDecimals(bin.feature_importance)
-                                      }
-                                    </td>
-                                    <td>{Math.round(bin.score)}</td>
-                                  </tr>
-                                );
-                              }
-                            });
-                            return rows;
-                          })()}
-                        </tbody>
-                      </table>
+                <div className="scorecard-container">
+                  {/* Left Box: Controls, Risk Scale, KS Chart */}
+                  <div className="scorecard-middle-box">
+                    <div className="scorecard-controls">
+                      <button
+                        className="run-regression-btn scorecard-btn-small"
+                        onClick={generateScoreCard}
+                        disabled={generatingScoreCard || selectedForModeling.length === 0}
+                        aria-label="Generate score card"
+                      >
+                        {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
+                      </button>
+                      <button
+                        className="run-regression-btn scorecard-btn-small"
+                        onClick={() => handleCreateRanges(selectedModelForScorecard)}
+                        disabled={createRangesLoading || !scoreCardData}
+                        aria-label="Create ranges from training data"
+                      >
+                        {createRangesLoading ? 'Creating...' : 'Create Ranges'}
+                      </button>
+                      <button
+                        className="run-regression-btn scorecard-btn-small"
+                        onClick={() => handleTestScoreCard(selectedModelForScorecard)}
+                        disabled={testScoreLoading || !scoreCardData}
+                        aria-label="Test Score Card on Data"
+                      >
+                        {testScoreLoading ? 'Testing...' : 'Test Score Card'}
+                      </button>
                     </div>
-                    {scoreCardData.score_parameters && (
-                      <div className="score-parameters">
-                        <h5>Score Card Parameters</h5>
-                        <div className="parameters-grid">
-                          <div className="parameter-item">
-                            <label>Factor:</label>
-                            <span>{formatToFourDecimals(scoreCardData.score_parameters.factor)}</span>
-                          </div>
-                          <div className="parameter-item">
-                            <label>Offset:</label>
-                            <span>{formatToFourDecimals(scoreCardData.score_parameters.offset)}</span>
-                          </div>
-                          <div className="parameter-item">
-                            <label>Base Score (600 points):</label>
-                            <span>Good/Bad Odds 50:1</span>
-                          </div>
-                          <div className="parameter-item">
-                            <label>Score Range:</label>
-                            <span>{scoreCardData.score_parameters.min_score} - {scoreCardData.score_parameters.max_score}</span>
-                          </div>
-                          <div className="parameter-item">
-                            <label>Model Type:</label>
-                            <span>{selectedModelForScorecard.toUpperCase()}</span>
-                          </div>
+
+                        {/* Risk Scale */}
+                        {((currentDataSource === 'training' && trainingScoreRiskBands && trainingScoreRiskBands.length > 0) || 
+                          (currentDataSource === 'test' && testScoreRiskBands && testScoreRiskBands.length > 0)) && (
+                          <div className="scorecard-risk-scale">
+                            <h5 style={{ marginBottom: '12px', fontSize: '13px', color: 'var(--fg-primary)' }}>
+                              Risk Scale ({currentDataSource === 'training' ? 'Training Data' : 'Test Data'})
+                            </h5>
+                            <div className="risk-bands-container">
+                              {((currentDataSource === 'training' ? trainingScoreRiskBands : testScoreRiskBands) || []).map((band: any, idx: number) => (
+                            <div 
+                              key={idx} 
+                              className="risk-band-item"
+                              style={{ 
+                                borderLeft: `4px solid ${band.color}`,
+                                backgroundColor: `${band.color}15` // 15 = ~8% opacity
+                              }}
+                            >
+                              <div className="risk-band-header">
+                                <span className="risk-band-label" style={{ color: band.color }}>
+                                  {band.label}
+                                </span>
+                                {band.description && (
+                                  <span className="risk-band-desc">→ {band.description}</span>
+                                )}
+                              </div>
+                              <div className="risk-band-range">
+                                {Math.round(band.min)} - {Math.round(band.max)}
+                              </div>
+                              {band.bad_rate !== undefined && (
+                                <div className="risk-band-stats">
+                                  <span>Bad Rate: {band.bad_rate.toFixed(1)}%</span>
+                                  <span>Count: {band.count}</span>
+                                </div>
+                              )}
+                            </div>
+                          ))}
                         </div>
                       </div>
                     )}
-                    {/* Test Score Button and Results Table */}
-                    <div style={{ marginTop: '32px' }}>
-                      <div style={{ marginBottom: '16px' }}>
-                        <button
-                          className="run-regression-btn"
-                          onClick={() => handleTestScoreCard(selectedModelForScorecard)}
-                          disabled={testScoreLoading}
-                          aria-label="Test Score Card on Data"
-                        >
-                          {testScoreLoading ? 'Testing...' : `Test Score Card (${selectedModelForScorecard})`}
-                        </button>
-                      </div>
-
-                      {testScoreResults && (
-                        <div className="scorecard-test-results">
-                          <h5>Score Card Test Results - {selectedModelForScorecard.toUpperCase()} Model (Sorted by Score)</h5>
-
-                          <div className="table-container">
-                            <table className="scorecard-table" aria-label="Score card test results">
-                              <thead>
-                                <tr>
-                                  <th>#</th>
-                                  <th>Score</th>
-                                  <th>Target</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {testScoreResults.map((row: any, idx: number) => (
-                                  <tr key={idx}>
-                                    <td>{idx + 1}</td>
-                                    <td>{row.score}</td>
-                                    <td style={{
-                                      color: row.target === 0 ? 'green' : row.target === 1 ? 'red' : undefined,
-                                      fontWeight: row.target === 1 ? 'bold' : 'normal'
-                                    }}>
-                                      {row.target}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
+                    
+                    {/* KS Chart */}
+                        {((currentDataSource === 'training' && trainingScoreKSData && trainingScoreKSData.ks_curve && trainingScoreKSData.ks_curve.length > 0) ||
+                          (currentDataSource === 'test' && testScoreKSData && testScoreKSData.ks_curve && testScoreKSData.ks_curve.length > 0)) && (
+                          <div className="scorecard-ks-chart">
+                            <ScorecardKSChart 
+                              ks_curve={(currentDataSource === 'training' ? trainingScoreKSData : testScoreKSData)?.ks_curve || []} 
+                              ks_stat={(currentDataSource === 'training' ? trainingScoreKSData : testScoreKSData)?.ks_stat || 0}
+                            />
                           </div>
-                        </div>
-                      )}
-                    </div>
+                        )}
                   </div>
-                )}
-              </div>
+
+                  {/* Middle Box: Score Card (wider, scrollable) */}
+                  <div className="scorecard-left-box">
+                    {/* Show loading skeleton while generating */}
+                    {generatingScoreCard && (
+                      <div className="scorecard-results-loading">
+                        <div className="scorecard-loading-skeleton">
+                          <div className="skeleton-header" />
+                          <div className="skeleton-row" />
+                          <div className="skeleton-row" />
+                          <div className="skeleton-row" />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Only show results when not generating and scoreCardData is loaded */}
+                    {scoreCardData && !generatingScoreCard && (
+                      <div className="scorecard-results">
+                        <div className="table-container scorecard-scrollable">
+                          <table className="scorecard-table" aria-label="Score card results">
+                            <thead>
+                              <tr>
+                                <th>Bin #</th>
+                                <th>Variable</th>
+                                <th>Bin Range</th>
+                                <th>WOE</th>
+                                <th>
+                                  {(selectedModelForScorecard === 'logistic' || selectedModelForScorecard === 'stacking')
+                                    ? 'Coefficient (β)'
+                                    : 'Feature Importance'}
+                                </th>
+                                <th>Score</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {scoreCardData.scorecard_bins && (() => {
+                                const grouped: Record<string, any[]> = {};
+                                const varsToUse = selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling;
+                                scoreCardData.scorecard_bins.forEach((b: any) => {
+                                  if (varsToUse.includes(b.variable)) {
+                                    grouped[b.variable] = grouped[b.variable] || [];
+                                    grouped[b.variable].push(b);
+                                  }
+                                });
+                                const rows: any[] = [];
+                                Object.keys(grouped).forEach((variable, varIndex) => {
+                                  const bins = grouped[variable];
+                                  if (varIndex > 0) {
+                                    rows.push(
+                                      <tr key={`sep-${variable}`} className="variable-separator">
+                                        <td colSpan={6} />
+                                      </tr>
+                                    );
+                                  }
+                                  for (let i = 0; i < bins.length; i++) {
+                                    const bin = bins[i];
+                                    rows.push(
+                                      <tr key={`${variable}-${i}-${String(bin.bin_range)}`}>
+                                        <td>{i + 1}</td>
+                                        <td>{bin.variable}</td>
+                                        <td>{bin.bin_range}</td>
+                                        <td>{formatToFourDecimals(bin.woe)}</td>
+                                        <td>
+                                          {(selectedModelForScorecard === 'logistic' || selectedModelForScorecard === 'stacking')
+                                            ? formatToFourDecimals(bin.coefficient)
+                                            : formatToFourDecimals(bin.feature_importance)
+                                          }
+                                        </td>
+                                        <td>{Math.round(bin.score)}</td>
+                                      </tr>
+                                    );
+                                  }
+                                });
+                                return rows;
+                              })()}
+                            </tbody>
+                          </table>
+                        </div>
+                        {/* Score Card Parameters - Individual Boxes */}
+                        {scoreCardData.score_parameters && (
+                          <div className="scorecard-parameters-boxes">
+                            <div className="parameter-box">
+                              <div className="parameter-label">Factor:</div>
+                              <div className="parameter-value">{formatToFourDecimals(scoreCardData.score_parameters.factor)}</div>
+                            </div>
+                            <div className="parameter-box">
+                              <div className="parameter-label">Offset:</div>
+                              <div className="parameter-value">{formatToFourDecimals(scoreCardData.score_parameters.offset)}</div>
+                            </div>
+                            <div className="parameter-box">
+                              <div className="parameter-label">Base Score (600 points):</div>
+                              <div className="parameter-value">Good/Bad Odds 50:1</div>
+                            </div>
+                            <div className="parameter-box">
+                              <div className="parameter-label">Score Range:</div>
+                              <div className="parameter-value">{scoreCardData.score_parameters.min_score} - {scoreCardData.score_parameters.max_score}</div>
+                            </div>
+                            <div className="parameter-box">
+                              <div className="parameter-label">Model Type:</div>
+                              <div className="parameter-value">{selectedModelForScorecard.toUpperCase()}</div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right Box: Score Target Mapping (narrower) */}
+                  <div className="scorecard-right-box">
+                    {/* Score Results - Show training or test data based on currentDataSource */}
+                    {((currentDataSource === 'training' && trainingScoreResults) || (currentDataSource === 'test' && testScoreResults)) && (
+                      <div className="scorecard-test-results">
+                        <div className="table-container scorecard-test-scrollable">
+                          <table className="scorecard-table" aria-label="Score card results">
+                            <thead>
+                              <tr>
+                                <th>#</th>
+                                <th>Score</th>
+                                <th>Target</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {((currentDataSource === 'training' ? trainingScoreResults : testScoreResults) || []).map((row: any, idx: number) => (
+                                <tr key={idx}>
+                                  <td>{idx + 1}</td>
+                                  <td>{row.score}</td>
+                                  <td style={{
+                                    color: row.target === 0 ? 'green' : row.target === 1 ? 'red' : undefined,
+                                    fontWeight: row.target === 1 ? 'bold' : 'normal'
+                                  }}>
+                                    {row.target}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
             )}
           </section>
         </div >
@@ -4390,4 +4812,137 @@ const SelectedColumnsPage = () => {
     </div >
   );
 };
+
+// KS Chart component for Scorecard
+interface ScorecardKSChartProps {
+  ks_curve: Array<{ threshold: number | null; tpr: number | null; fpr: number | null; diff: number | null }>;
+  ks_stat: number;
+}
+
+const ScorecardKSChart: React.FC<ScorecardKSChartProps> = ({ ks_curve, ks_stat }) => {
+  if (!ks_curve || ks_curve.length === 0) return null;
+
+  const _fmt = (n: number | null, d = 4) => n !== null ? Number(n).toFixed(d) : '0.0000';
+
+  // Responsive sizing - use viewBox for scalability
+  const width = 420;
+  const height = 280;
+  const margin = 35;
+  const plotW = width - margin * 2;
+  const plotH = height - margin * 2;
+
+  // Filter out null values and create points
+  const validCurve = ks_curve.filter(p => p.threshold !== null && p.tpr !== null && p.fpr !== null);
+  if (validCurve.length === 0) return null;
+
+  // Normalize thresholds to 0-1 range for plotting
+  const thresholds = validCurve.map(p => p.threshold!);
+  const minThresh = Math.min(...thresholds);
+  const maxThresh = Math.max(...thresholds);
+  const threshRange = maxThresh - minThresh || 1;
+
+  const points = validCurve.map(p => ({
+    x: margin + ((p.threshold! - minThresh) / threshRange) * plotW,
+    fpr: margin + (1 - (p.fpr || 0)) * plotH,
+    tpr: margin + (1 - (p.tpr || 0)) * plotH,
+    diff: p.diff || 0,
+    threshold: p.threshold!
+  }));
+
+  // Find max diff index
+  const ksIndex = validCurve.reduce((acc, cur, idx) => 
+    (cur.diff !== null && cur.diff > (validCurve[acc]?.diff || 0)) ? idx : acc, 0
+  );
+  const ksPoint = points[ksIndex];
+
+  // Create paths
+  const tprPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.tpr}`).join(' ');
+  const fprPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.fpr}`).join(' ');
+
+  return (
+    <div className="ks-chart-container">
+      <h5 style={{ marginBottom: '12px', fontSize: '13px', color: 'var(--fg-primary)' }}>KS Statistics</h5>
+      <div className="ks-graph-wrapper">
+        <svg viewBox={`0 0 ${width} ${height}`} className="roc-svg" preserveAspectRatio="xMidYMid meet">
+        {/* Axes */}
+        <line x1={margin} y1={margin} x2={margin} y2={margin + plotH} stroke="#f0f6fc" strokeWidth={1} />
+        <line x1={margin} y1={margin + plotH} x2={margin + plotW} y2={margin + plotH} stroke="#f0f6fc" strokeWidth={1} />
+        
+        {/* Grid lines */}
+        {[0, 0.2, 0.4, 0.6, 0.8, 1.0].map(val => (
+          <g key={val}>
+            <line
+              x1={margin + val * plotW}
+              y1={margin}
+              x2={margin + val * plotW}
+              y2={margin + plotH}
+              stroke="#30363d"
+              strokeWidth={0.5}
+            />
+            <line
+              x1={margin}
+              y1={margin + val * plotH}
+              x2={margin + plotW}
+              y2={margin + val * plotH}
+              stroke="#30363d"
+              strokeWidth={0.5}
+            />
+          </g>
+        ))}
+        
+        {/* Paths */}
+        <path d={tprPath} fill="none" stroke="#52c41a" strokeWidth={2} />
+        <path d={fprPath} fill="none" stroke="#ff4d4f" strokeWidth={2} />
+        
+        {/* KS marker */}
+        {ksPoint && (
+          <g>
+            <line 
+              x1={ksPoint.x} 
+              y1={margin} 
+              x2={ksPoint.x} 
+              y2={margin + plotH} 
+              stroke="#58a6ff" 
+              strokeDasharray="4,4" 
+              strokeWidth={1.5}
+            />
+            <text 
+              x={ksPoint.x} 
+              y={margin - 8} 
+              textAnchor="middle" 
+              fill="#58a6ff" 
+              fontSize="11"
+              fontWeight="600"
+            >
+              KS={_fmt(ks_stat, 4)}
+            </text>
+          </g>
+        )}
+        
+        {/* Labels */}
+        <text x={margin + plotW / 2} y={height - 5} textAnchor="middle" fill="#8b949e" fontSize="10">Threshold</text>
+        <text 
+          x={10} 
+          y={margin + plotH / 2} 
+          textAnchor="middle" 
+          fill="#8b949e" 
+          fontSize="10"
+          transform={`rotate(-90, 10, ${margin + plotH / 2})`}
+        >
+          Cumulative Distribution
+        </text>
+        
+        {/* Legend */}
+        <g transform={`translate(${margin + plotW - 100}, ${margin + 20})`}>
+          <line x1={0} y1={0} x2={20} y2={0} stroke="#52c41a" strokeWidth={2} />
+          <text x={25} y={4} fill="#f0f6fc" fontSize="10">TPR (Good)</text>
+          <line x1={0} y1={15} x2={20} y2={15} stroke="#ff4d4f" strokeWidth={2} />
+          <text x={25} y={19} fill="#f0f6fc" fontSize="10">FPR (Bad)</text>
+        </g>
+      </svg>
+      </div>
+    </div>
+  );
+};
+
 export default SelectedColumnsPage;

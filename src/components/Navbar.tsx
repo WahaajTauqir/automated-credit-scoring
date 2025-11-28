@@ -19,8 +19,8 @@ const Navbar = ({ developerMode = false, onDeveloperModeChange, currentStep }: N
     }
   };
 
-  // Only show developer mode toggle when in models section (step 3)
-  const showDeveloperMode = currentStep === 3;
+  // Show developer mode toggle when in models section (step 3) or scorecard section (step 4)
+  const showDeveloperMode = currentStep === 3 || currentStep === 4;
 
   return (
     <>

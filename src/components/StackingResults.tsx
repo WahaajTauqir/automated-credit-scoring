@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './ModelResults.css';
 
 interface StackingResultsProps {
@@ -15,6 +15,7 @@ interface StackingResultsProps {
   onResultsUpdate?: (results: any) => void;
   recordId?: number;
   triggerRegression?: number; // Trigger count to run regression from sidebar
+  initialResults?: StackingResults | null; // Cached results to initialize from
 }
 
 interface MetaLearnerWeights {
@@ -78,15 +79,35 @@ const StackingResults: React.FC<StackingResultsProps> = ({
   onGotoScoreCard,
   onResultsUpdate,
   recordId,
-  triggerRegression
+  triggerRegression,
+  initialResults
 }) => {
-  const [results, setResults] = useState<StackingResults | null>(null);
+  const [results, setResults] = useState<StackingResults | null>(initialResults || null);
   const [loading, setLoading] = useState(false);
   const [confusionView, setConfusionView] = useState<'counts' | 'percent'>('counts');
+  const lastTriggerRef = useRef<number>(triggerRegression || 0); // Initialize with current trigger value
 
-  // Watch for trigger from sidebar button
+  // Update results when initialResults prop changes (e.g., when cached data is loaded)
+  // Only update if we don't already have results to avoid overwriting with stale cache
+  useEffect(() => {
+    if (initialResults && !results) {
+      setResults(initialResults);
+    }
+  }, [initialResults]);
+
+  // Initialize lastTriggerRef with current trigger value on mount to prevent auto-run
   useEffect(() => {
     if (triggerRegression && triggerRegression > 0) {
+      lastTriggerRef.current = triggerRegression;
+    }
+  }, []); // Only run on mount
+
+  // Watch for trigger from sidebar button
+  // Only run when triggerRegression actually increases (user clicked Run button)
+  // This prevents re-running when component remounts with the same trigger value
+  useEffect(() => {
+    if (triggerRegression && triggerRegression > 0 && triggerRegression > lastTriggerRef.current) {
+      lastTriggerRef.current = triggerRegression;
       runStacking();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

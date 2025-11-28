@@ -3,11 +3,17 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import Navbar from './Navbar';
 import './CreditScorePage.css';
 
+interface RiskBand {
+  label: string;
+  color: string;
+  description: string;
+}
+
 interface PredictionRow {
   id: string;
   score: number;
-  probability: number;
-  status: string;
+  probability?: number;
+  risk_band: RiskBand;
   [key: string]: any;
 }
 
@@ -33,8 +39,10 @@ const CreditScorePage = () => {
   const [csvData, setCsvData] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>('logistic');
+  const [predictionMethod, setPredictionMethod] = useState<'probability' | 'scorecard'>('scorecard');
   const [selectedIdentifier, setSelectedIdentifier] = useState<string>('');
   const [predictions, setPredictions] = useState<PredictionRow[]>([]);
+  const [riskBands, setRiskBands] = useState<Array<{label: string, min: number, max: number, color: string, description: string}>>([]);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [recordId, setRecordId] = useState<number | undefined>(
     location.state?.recordId
@@ -45,20 +53,8 @@ const CreditScorePage = () => {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [modelLoading, setModelLoading] = useState<boolean>(false);
   const [modelFetchError, setModelFetchError] = useState<string | null>(null);
-
-  const baseModels = [
-    { value: 'logistic', label: 'Logistic Regression' },
-    { value: 'xgboost', label: 'XGBoost' },
-  ];
-  const lockedModelValue = modelInfo
-    ? modelInfo.model_label === 'LR'
-      ? 'logistic'
-      : 'xgboost'
-    : null;
-  const availableModels = lockedModelValue
-    ? baseModels.filter(model => model.value === lockedModelValue)
-    : baseModels;
-  const isModelLocked = Boolean(lockedModelValue);
+  const [availableModels, setAvailableModels] = useState<Array<{value: string, label: string}>>([]);
+  const [availableModelsLoading, setAvailableModelsLoading] = useState<boolean>(false);
 
   useEffect(() => {
     if (recordId) {
@@ -66,17 +62,91 @@ const CreditScorePage = () => {
     }
   }, [recordId]);
 
+  // Fetch all available models for the dataset
   useEffect(() => {
     if (!recordId) {
+      setAvailableModels([]);
       setModelInfo(null);
       setModelFetchError(null);
       setModelLoading(false);
+      setAvailableModelsLoading(false);
+      return;
+    }
+    let isCancelled = false;
+    setAvailableModelsLoading(true);
+    setModelFetchError(null);
+    
+    // Fetch all available models
+    fetch(`http://localhost:5000/api/datasets/${recordId}/models`)
+      .then(async response => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || 'Failed to load available models.');
+        }
+        return payload;
+      })
+      .then(payload => {
+        if (!isCancelled) {
+          const models = payload.available_models || [];
+          const modelOptions = models.map((m: any) => ({
+            value: m.model_type,
+            label: m.model_name
+          }));
+          setAvailableModels(modelOptions);
+          
+          // If models are available, select the first one and load its metadata
+          if (models.length > 0) {
+            const firstModel = models[0];
+            setSelectedModel(firstModel.model_type);
+            setModelInfo(firstModel.metadata);
+          } else {
+            setAvailableModels([]);
+            setModelInfo(null);
+          }
+        }
+      })
+      .catch(err => {
+        if (!isCancelled) {
+          setAvailableModels([]);
+          setModelInfo(null);
+          setModelFetchError(err.message);
+        }
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setAvailableModelsLoading(false);
+        }
+      });
+    return () => {
+      isCancelled = true;
+    };
+  }, [recordId]);
+
+  // Load metadata for selected model
+  useEffect(() => {
+    if (!recordId || !selectedModel) {
       return;
     }
     let isCancelled = false;
     setModelLoading(true);
     setModelFetchError(null);
-    fetch(`http://localhost:5000/api/datasets/${recordId}/model`)
+    
+    // Map frontend model type to backend model label
+    const modelLabelMap: Record<string, string> = {
+      'logistic': 'LR',
+      'random_forest': 'RandomForest',
+      'xgboost': 'XGBoost',
+      'stacking_ensemble': 'stacking_ensemble'
+    };
+    
+    const modelLabel = modelLabelMap[selectedModel];
+    if (!modelLabel) {
+      setModelLoading(false);
+      return;
+    }
+    
+    // Fetch specific model metadata
+    fetch(`http://localhost:5000/api/datasets/${recordId}/model?model_label=${modelLabel}`)
       .then(async response => {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
@@ -103,13 +173,7 @@ const CreditScorePage = () => {
     return () => {
       isCancelled = true;
     };
-  }, [recordId]);
-
-  useEffect(() => {
-    if (modelInfo) {
-      setSelectedModel(modelInfo.model_label === 'LR' ? 'logistic' : 'xgboost');
-    }
-  }, [modelInfo]);
+  }, [recordId, selectedModel]);
 
   // Handle file upload
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -189,7 +253,7 @@ const CreditScorePage = () => {
     return true;
   };
 
-  // Handle prediction (placeholder - will be implemented later)
+  // Handle prediction
   const handlePredict = async () => {
     if (!uploadedFile) {
       setError('Please upload a CSV file first');
@@ -207,12 +271,14 @@ const CreditScorePage = () => {
     }
 
     if (!modelInfo) {
-      setError('No trained model is available for this dataset. Train Logistic Regression or XGBoost first.');
+      setError('No trained model is available for this dataset. Train a model first.');
       return;
     }
 
     setIsProcessing(true);
     setError(null);
+    setPredictions([]);
+    setRiskBands([]);
 
     try {
       // Validate CSV structure
@@ -222,19 +288,39 @@ const CreditScorePage = () => {
         return;
       }
 
-      // TODO: Implement actual prediction API call
-      // For now, create dummy predictions
-      const dummyPredictions: PredictionRow[] = csvData.map((row, index) => ({
-        id: row[selectedIdentifier] || `Row_${index + 1}`,
-        score: Math.floor(Math.random() * 300) + 500, // Random score between 500-800
-        probability: Math.random() * 0.3 + 0.1, // Random probability between 0.1-0.4
-        status: Math.random() > 0.5 ? 'Approved' : 'Pending',
-        ...row,
-      }));
+      // Call prediction API
+      const response = await fetch('http://localhost:5000/api/predict-credit-score', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          dataset_id: recordId,
+          model_type: selectedModel,
+          prediction_method: predictionMethod,
+          csv_data: csvData,
+          identifier_column: selectedIdentifier
+        }),
+      });
 
-      setPredictions(dummyPredictions);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to generate predictions');
+      }
+
+      if (data.success && data.predictions) {
+        setPredictions(data.predictions);
+        if (data.risk_bands) {
+          setRiskBands(data.risk_bands);
+        }
+      } else {
+        throw new Error('Invalid response from server');
+      }
     } catch (err) {
       setError('Error processing predictions: ' + (err as Error).message);
+      setPredictions([]);
+      setRiskBands([]);
     } finally {
       setIsProcessing(false);
     }
@@ -367,22 +453,54 @@ const CreditScorePage = () => {
                 {/* Model Selection */}
                 <div className="config-item">
                   <label className="config-label">Select Model</label>
+                  {availableModelsLoading ? (
+                    <div className="config-help">Loading available models...</div>
+                  ) : availableModels.length > 0 ? (
+                    <>
+                      <select
+                        className="config-select"
+                        value={selectedModel}
+                        onChange={(e) => setSelectedModel(e.target.value)}
+                      >
+                        {availableModels.map(model => (
+                          <option key={model.value} value={model.value}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="config-help">
+                        {modelInfo
+                          ? `Using ${modelInfo.model_label} model. Select a different model from the dropdown.`
+                          : 'Select which trained model to use for scoring.'}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <select className="config-select" disabled>
+                        <option>No models available</option>
+                      </select>
+                      <p className="config-help">
+                        No trained models found for this dataset. Train a model from the modeling workspace first.
+                      </p>
+                    </>
+                  )}
+                </div>
+
+                {/* Prediction Method Selection */}
+                <div className="config-item">
+                  <label className="config-label">Prediction Method</label>
                   <select
                     className="config-select"
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    disabled={isModelLocked}
+                    value={predictionMethod}
+                    onChange={(e) => setPredictionMethod(e.target.value as 'probability' | 'scorecard')}
                   >
-                    {availableModels.map(model => (
-                      <option key={model.value} value={model.value}>
-                        {model.label}
-                      </option>
-                    ))}
+                    <option value="scorecard">Scorecard Method</option>
+                    <option value="probability">Probability Method</option>
                   </select>
                   <p className="config-help">
-                    {modelInfo
-                      ? `Model locked to ${modelInfo.model_label}. Retrain the model from the modeling workspace to replace it.`
-                      : 'Select which trained model to use for scoring.'}
+                    {predictionMethod === 'scorecard' 
+                      ? 'Uses scorecard bins for fast, interpretable scoring. Requires scorecard to be generated first.'
+                      : 'Uses model probabilities for scoring. Works with any trained model.'}
                   </p>
                 </div>
 
@@ -478,23 +596,43 @@ const CreditScorePage = () => {
                         <span className="prediction-id">
                           {prediction.id}
                         </span>
-                        <span className={`prediction-status prediction-status-${prediction.status.toLowerCase()}`}>
-                          {prediction.status}
+                        <span 
+                          className="prediction-risk-band"
+                          style={{
+                            backgroundColor: prediction.risk_band.color,
+                            color: '#fff',
+                            padding: '4px 12px',
+                            borderRadius: '4px',
+                            fontSize: '0.85rem',
+                            fontWeight: '500'
+                          }}
+                        >
+                          {prediction.risk_band.label}
                         </span>
                       </div>
                       <div className="prediction-card-body">
                         <div className="prediction-metric">
                           <span className="prediction-metric-label">Credit Score:</span>
                           <span className="prediction-metric-value prediction-score">
-                            {prediction.score}
+                            {prediction.score.toFixed(0)}
                           </span>
                         </div>
-                        <div className="prediction-metric">
-                          <span className="prediction-metric-label">Default Probability:</span>
-                          <span className="prediction-metric-value">
-                            {(prediction.probability * 100).toFixed(2)}%
-                          </span>
-                        </div>
+                        {prediction.probability !== undefined && (
+                          <div className="prediction-metric">
+                            <span className="prediction-metric-label">Default Probability:</span>
+                            <span className="prediction-metric-value">
+                              {(prediction.probability * 100).toFixed(2)}%
+                            </span>
+                          </div>
+                        )}
+                        {prediction.risk_band.description && (
+                          <div className="prediction-metric">
+                            <span className="prediction-metric-label">Risk Level:</span>
+                            <span className="prediction-metric-value">
+                              {prediction.risk_band.description}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}

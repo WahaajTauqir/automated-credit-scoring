@@ -734,9 +734,9 @@ def _clean_nan_values(obj: Any) -> Any:
 
 
 DEFAULT_SCORECARD_CONFIG = {
-    "min_score": 300,
-    "max_score": 850,
-    "base_score": 600,
+    "min_score": 0,      # Worst customer (highest risk)
+    "max_score": 600,    # Best customer (lowest risk)
+    "base_score": 300,   # Score at baseline odds (midpoint of 0-600)
     "base_odds": 50,
     "points_to_double_odds": 50
 }
@@ -786,9 +786,9 @@ def _probability_to_score(probabilities, config: Dict[str, float] = DEFAULT_SCOR
         Probability of default/bad (target=1). Should be between 0 and 1.
     config : dict
         Scorecard configuration with:
-        - min_score: Minimum credit score (default: 300)
-        - max_score: Maximum credit score (default: 850)
-        - base_score: Score at baseline odds (default: 600)
+        - min_score: Minimum credit score (default: 0)
+        - max_score: Maximum credit score (default: 600)
+        - base_score: Score at baseline odds (default: 300)
         - base_odds: Baseline odds of good:bad (default: 50, meaning 2% default rate)
         - points_to_double_odds: Points per doubling of odds (default: 50)
         
@@ -818,6 +818,57 @@ def _probability_to_score(probabilities, config: Dict[str, float] = DEFAULT_SCOR
     # Clip to valid score range
     clipped = np.clip(raw_scores, config["min_score"], config["max_score"])
     return clipped
+
+
+def _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw, target_min=0, target_max=600):
+    """
+    Normalize scores to target range using stored min/max from training data.
+    This ensures consistent scaling across all datasets (training, test, production).
+    
+    Args:
+        scores_array: Array of raw scores
+        score_min_raw: Minimum score from training data
+        score_max_raw: Maximum score from training data
+        target_min: Target minimum (default: 0)
+        target_max: Target maximum (default: 600)
+    
+    Returns:
+        Normalized scores in [target_min, target_max] range
+        
+    Example:
+        If training data has scores in range [45.2, 331.8], this function will
+        normalize them to [0, 600] using min-max scaling. All subsequent
+        datasets (test, production) will use the same training data min/max
+        to ensure consistent score interpretation.
+    """
+    scores_array = np.asarray(scores_array, dtype=float)
+    
+    # Avoid division by zero
+    score_range = score_max_raw - score_min_raw
+    if score_range <= 0:
+        print(f"[_normalize_scores_to_range] Warning: Invalid score range ({score_min_raw}, {score_max_raw}), returning original scores")
+        return scores_array
+    
+    # Normalize to [0, 1] using training data range
+    normalized = (scores_array - score_min_raw) / score_range
+    
+    # Scale to target range [0, 600]
+    scaled = normalized * (target_max - target_min) + target_min
+    
+    # CRITICAL FIX: Re-scale to ensure scores ALWAYS span full 0-600 range
+    # This handles cases where test data doesn't span full training range
+    scaled_min = np.min(scaled)
+    scaled_max = np.max(scaled)
+    scaled_range = scaled_max - scaled_min
+    
+    if scaled_range > 0:
+        # Re-normalize so min=0, max=600
+        rescaled = ((scaled - scaled_min) / scaled_range) * (target_max - target_min) + target_min
+    else:
+        rescaled = scaled
+    
+    # Clip to ensure scores stay within target range
+    return np.clip(rescaled, target_min, target_max)
 
 
 def get_csv_path(dataset_id: Optional[int] = None):
@@ -8417,16 +8468,68 @@ def load_record_dataset(record_id):
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/datasets/<int:dataset_id>/model', methods=['GET'])
-def get_dataset_model_artifact(dataset_id: int):
+@app.route('/api/datasets/<int:dataset_id>/models', methods=['GET'])
+def get_dataset_available_models(dataset_id: int):
     """
-    Return metadata about the persisted model artifact for a dataset.
+    Return list of all available model artifacts for a dataset.
     """
     try:
         dataset = get_dataset(dataset_id)
         if not dataset:
             return jsonify({"error": "Dataset not found"}), 404
-        artifact_payload, artifact_path = load_model_artifact(dataset_id)
+        
+        # Check for all possible model types
+        model_types = [
+            ('LR', 'logistic', 'Logistic Regression'),
+            ('RandomForest', 'random_forest', 'Random Forest'),
+            ('XGBoost', 'xgboost', 'XGBoost'),
+            ('stacking_ensemble', 'stacking_ensemble', 'Stacking Ensemble')
+        ]
+        
+        available_models = []
+        for model_label, model_type, model_name in model_types:
+            artifact_payload, artifact_path = load_model_artifact(dataset_id, model_label)
+            if artifact_payload and artifact_path:
+                metadata = _build_artifact_metadata(artifact_payload, artifact_path)
+                available_models.append({
+                    'model_label': model_label,
+                    'model_type': model_type,
+                    'model_name': model_name,
+                    'metadata': metadata
+                })
+        
+        return jsonify({
+            "dataset_id": dataset_id,
+            "available_models": available_models
+        })
+    except Exception as e:
+        print(f"[get_dataset_available_models] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to load available models: {str(e)}"}), 500
+
+@app.route('/api/datasets/<int:dataset_id>/model', methods=['GET'])
+def get_dataset_model_artifact(dataset_id: int):
+    """
+    Return metadata about the persisted model artifact for a dataset.
+    Returns the most recent model if no specific model is requested.
+    Accepts optional query parameter 'model_label' to get a specific model.
+    """
+    try:
+        dataset = get_dataset(dataset_id)
+        if not dataset:
+            return jsonify({"error": "Dataset not found"}), 404
+        
+        # Check if specific model is requested
+        model_label = request.args.get('model_label')
+        
+        if model_label:
+            # Load specific model
+            artifact_payload, artifact_path = load_model_artifact(dataset_id, model_label)
+        else:
+            # Load most recent model
+            artifact_payload, artifact_path = load_model_artifact(dataset_id)
+        
         if not artifact_payload or not artifact_path:
             return jsonify({"error": "Model artifact not found"}), 404
         metadata = _build_artifact_metadata(artifact_payload, artifact_path)
@@ -12363,13 +12466,13 @@ def stacking_analysis():
                     n_class_1 = class_counts[1] if len(class_counts) > 1 else 0
                     
                     # Calculate balanced weights manually for better control
-                    # Reduce weight on positive class to reduce false positives
+                    # Increase weight on positive class to reduce false negatives (catch more defaults)
                     if n_class_0 > 0 and n_class_1 > 0:
                         # Standard balanced weights
                         weight_0 = total_samples / (n_classes * n_class_0)
                         weight_1 = total_samples / (n_classes * n_class_1)
-                        # Reduce positive class weight by 30% to reduce false positives
-                        weight_1 = weight_1 * 0.7
+                        # Increase positive class weight by 50% to reduce false negatives
+                        weight_1 = weight_1 * 1.5
                         class_weight_dict = {0: weight_0, 1: weight_1}
                     else:
                         class_weight_dict = 'balanced'
@@ -13195,8 +13298,8 @@ def stacking_analysis():
                     if recall_optimal_selected:
                         print(f"STACKING DEBUG: Keeping recall-optimized threshold: {recall_optimal_threshold:.4f}")
         
-        # STRATEGY 3: PRECISION-FOCUSED / FALSE POSITIVE MINIMIZATION
-        # This is critical for credit scoring - minimize false positives while maintaining better performance than XGBoost
+        # STRATEGY 3: RECALL-FOCUSED / FALSE NEGATIVE MINIMIZATION
+        # This is critical for credit scoring - minimize false negatives (missed defaults) while maintaining acceptable precision
         
         # Get XGBoost performance as baseline (must beat this) - Define outside try block for final comparison
         # Use actual current XGBoost performance: AUC 0.7941, Recall 0.7500, Precision 0.0769
@@ -13205,7 +13308,7 @@ def stacking_analysis():
         xgb_auc_target = 0.7941
         
         try:
-            print("STACKING DEBUG: Starting precision-focused threshold selection (minimize false positives)...")
+            print("STACKING DEBUG: Starting recall-focused threshold selection (minimize false negatives)...")
             
             # Try to get XGBoost performance from base_models_performance, but use actual values as defaults
             try:
@@ -13227,7 +13330,7 @@ def stacking_analysis():
                 print(f"STACKING DEBUG: Error getting XGBoost baseline: {e}, retaining defaults")
             
             print(f"STACKING DEBUG: XGBoost baseline - AUC: {xgb_auc_target:.4f}, Recall: {xgb_recall_target:.4f}, Precision: {xgb_precision_target:.4f}")
-            print(f"STACKING DEBUG: Target - Maintain AUC >= {xgb_auc_target:.4f}, Recall >= {xgb_recall_target:.4f}, Minimize FP")
+            print(f"STACKING DEBUG: Target - Maintain AUC >= {xgb_auc_target:.4f}, Maximize Recall (>= {xgb_recall_target:.4f}), Minimize FN")
             
             # Calculate FPR (False Positive Rate) and FP count for all thresholds
             # Ensure valid_thresholds exists and is not empty (it should be defined earlier, but check just in case)
@@ -13243,6 +13346,7 @@ def stacking_analysis():
             
             fpr_scores = []
             fp_counts = []
+            fn_counts = []  # Track false negatives for recall-focused strategy
             tp_counts = []
             precision_at_thresholds = []
             recall_at_thresholds = []
@@ -13262,6 +13366,7 @@ def stacking_analysis():
                 
                 fpr_scores.append(fpr)
                 fp_counts.append(fp)
+                fn_counts.append(fn)  # Track FN for recall-focused strategy
                 tp_counts.append(tp)
                 precision_at_thresholds.append(prec)
                 recall_at_thresholds.append(rec)
@@ -13271,6 +13376,7 @@ def stacking_analysis():
             # Current threshold metrics
             y_pred_current = (ensemble_test_pred >= optimal_threshold).astype(int)
             current_fp = ((y_test == 0) & (y_pred_current == 1)).sum()
+            current_fn = ((y_test == 1) & (y_pred_current == 0)).sum()  # Track current FN
             current_tn = ((y_test == 0) & (y_pred_current == 0)).sum()
             current_tp = ((y_test == 1) & (y_pred_current == 1)).sum()
             current_fpr = current_fp / (current_fp + current_tn) if (current_fp + current_tn) > 0 else 0
@@ -13279,178 +13385,184 @@ def stacking_analysis():
             current_positive_rate = (current_tp + current_fp) / len(y_test) if len(y_test) > 0 else 0
             
             print(f"STACKING DEBUG: Current threshold ({optimal_threshold:.4f}) metrics:")
-            print(f"  - FP: {current_fp}, FPR: {current_fpr:.4f}")
+            print(f"  - FN: {current_fn}, FP: {current_fp}, FPR: {current_fpr:.4f}")
             print(f"  - Precision: {current_precision:.4f}, Recall: {current_recall:.4f}")
             print(f"  - Positive rate: {current_positive_rate:.2%}")
             print(f"  - AUC: {roc_auc:.4f}")
 
             positive_rate_cap = 0.25
-            # Note: Guardrail deferred until after precision-focused search to avoid premature recall sacrifice
-            print(f"STACKING DEBUG: Positive-rate cap set to {positive_rate_cap:.0%}, will apply as fallback if precision-focused search fails")
+            # Note: Guardrail deferred until after recall-focused search to avoid premature precision sacrifice
+            print(f"STACKING DEBUG: Positive-rate cap set to {positive_rate_cap:.0%}, will apply as fallback if recall-focused search fails")
             
-            # Strategy 3a: Find threshold with minimum FP count while maintaining:
-            # - Recall >= XGBoost recall (but more lenient for precision)
+            # Strategy 3a: Find threshold with minimum FN count while maintaining:
+            # - Recall >= XGBoost recall (PRIORITY - maximize recall)
+            # - Precision >= minimum acceptable (more lenient for recall)
             # - AUC >= XGBoost AUC (0.7409) - always true since AUC is threshold-independent
-            # - Maximize precision (PRIORITY)
-            # More aggressive precision focus: lower minimum recall to allow better precision
-            min_recall_floor = max(xgb_recall_target * 0.7, 0.3)  # More lenient: 70% of XGBoost recall or 30% minimum
-            min_fp_candidates = []
+            # More aggressive recall focus: maximize recall to catch more defaults
+            min_precision_floor = max(xgb_precision_target * 0.5, 0.05)  # More lenient: 50% of XGBoost precision or 5% minimum
+            positive_count = int((y_test == 1).sum())  # Total actual defaults
+            min_fn_candidates = []
             
-            for i, (rec, prec, fp_count, fpr_val) in enumerate(zip(recall_at_thresholds, precision_at_thresholds, fp_counts, fpr_scores)):
-                # Must maintain minimum recall (at least XGBoost's recall)
-                if rec >= min_recall_floor:
-                    min_fp_candidates.append({
+            for i, (rec, prec, fp_count, fn_count, fpr_val) in enumerate(zip(recall_at_thresholds, precision_at_thresholds, fp_counts, fn_counts, fpr_scores)):
+                # Must maintain minimum precision (at least 50% of XGBoost's precision)
+                if prec >= min_precision_floor:
+                    min_fn_candidates.append({
                         'idx': i,
                         'threshold': valid_thresholds[i],
                         'recall': rec,
                         'precision': prec,
+                        'fn': fn_count,  # Track FN instead of FP
                         'fp': fp_count,
                         'fpr': fpr_val,
-                        'score': prec * (1 - fpr_val)  # Combined score: precision weighted by (1 - FPR)
+                        'score': rec * (1 - (fn_count / max(positive_count, 1)))  # Combined score: recall weighted by (1 - FN rate)
                     })
             
-            print(f"STACKING DEBUG: Found {len(min_fp_candidates)} candidates with recall >= {min_recall_floor:.4f}")
+            print(f"STACKING DEBUG: Found {len(min_fn_candidates)} candidates with precision >= {min_precision_floor:.4f}")
             
-            if len(min_fp_candidates) > 0:
+            if len(min_fn_candidates) > 0:
                 # Show top 5 candidates for debugging
-                print(f"STACKING DEBUG: Top 5 candidates (by FP count, before sorting):")
-                temp_sorted = sorted(min_fp_candidates, key=lambda x: (x['fp'], -x['precision'], -x['recall']))
+                print(f"STACKING DEBUG: Top 5 candidates (by FN count, before sorting):")
+                temp_sorted = sorted(min_fn_candidates, key=lambda x: (x['fn'], -x['recall'], -x['precision']))
                 for idx, cand in enumerate(temp_sorted[:5]):
-                    print(f"  Candidate {idx+1}: Threshold={cand['threshold']:.4f}, FP={cand['fp']}, "
+                    print(f"  Candidate {idx+1}: Threshold={cand['threshold']:.4f}, FN={cand['fn']}, FP={cand['fp']}, "
                           f"Recall={cand['recall']:.4f}, Precision={cand['precision']:.4f}, FPR={cand['fpr']:.4f}")
                 
-                # Sort by: 1) FP count (ascending), 2) Precision (descending), 3) Recall (descending)
-                min_fp_candidates.sort(key=lambda x: (x['fp'], -x['precision'], -x['recall']))
+                # Sort by: 1) FN count (ascending), 2) Recall (descending), 3) Precision (descending)
+                min_fn_candidates.sort(key=lambda x: (x['fn'], -x['recall'], -x['precision']))
                 
                 # Try top candidates using weighted scoring for credit scoring context
-                best_precision_focused = None
+                best_recall_focused = None
                 best_improvement = None
                 
-                # More lenient FP reduction for precision-focused approach (accept smaller improvements)
-                min_fp_reduction = max(10, int(current_fp * 0.10))  # At least 10 FP or 10% reduction (more lenient)
-                max_recall_loss = max(0.0, current_recall - min_recall_floor)
+                # More lenient FN reduction for recall-focused approach (accept smaller improvements)
+                min_fn_reduction = max(1, int(current_fn * 0.10))  # At least 1 FN or 10% reduction (more lenient)
+                max_precision_loss = max(0.0, current_precision - min_precision_floor)
                 
-                print(f"STACKING DEBUG: Selection criteria (precision-focused, credit scoring optimized):")
-                print(f"  - Min FP reduction: {min_fp_reduction} (current FP: {current_fp}, 20% = {int(current_fp * 0.20)})")
-                print(f"  - Max recall loss: {max_recall_loss:.2%} (current recall: {current_recall:.4f}, min allowed: {min_recall_floor:.4f})")
-                print(f"  - Min recall: {min_recall_floor:.4f}")
-                print(f"  - Weighted scoring: FP reduction (50%), Precision gain (30%), Recall preservation (15%), Positive rate reduction (5%)")
+                print(f"STACKING DEBUG: Selection criteria (recall-focused, credit scoring optimized):")
+                print(f"  - Min FN reduction: {min_fn_reduction} (current FN: {current_fn}, 10% = {int(current_fn * 0.10)})")
+                print(f"  - Max precision loss: {max_precision_loss:.4f} (current precision: {current_precision:.4f}, min allowed: {min_precision_floor:.4f})")
+                print(f"  - Min precision: {min_precision_floor:.4f}")
+                print(f"  - Weighted scoring: FN reduction (50%), Recall gain (30%), Precision preservation (15%), FP control (5%)")
                 positive_count = int((y_test == 1).sum())
                 total_samples = len(y_test)
                 
-                for candidate in min_fp_candidates[:10]:  # Check top 10 candidates
-                    fp_reduction = current_fp - candidate['fp']
-                    fpr_reduction = current_fpr - candidate['fpr']
-                    precision_gain = candidate['precision'] - current_precision
-                    recall_loss = current_recall - candidate['recall']
+                for candidate in min_fn_candidates[:10]:  # Check top 10 candidates
+                    fn_reduction = current_fn - candidate['fn']
+                    recall_gain = candidate['recall'] - current_recall
+                    precision_loss = current_precision - candidate['precision']
+                    fp_increase = candidate['fp'] - current_fp
                     pos_rate = (candidate['fp'] + (candidate['recall'] * positive_count)) / total_samples if total_samples > 0 else 0
-                    pos_rate_reduction = current_positive_rate - pos_rate
+                    pos_rate_increase = pos_rate - current_positive_rate
                     
-                    # Weighted score for precision-focused approach: prioritize FP reduction and precision gain
-                    fp_score = (fp_reduction / max(current_fp, 1)) * 0.5  # Increased from 0.4 to 0.5
-                    precision_score_component = max(0, precision_gain / max(abs(current_precision) + 0.01, 0.01)) * 0.3  # Increased from 0.2 to 0.3
-                    recall_score_component = (1 - (recall_loss / max(current_recall, 0.01))) * 0.15  # Decreased from 0.3 to 0.15
-                    pos_rate_score = max(0, pos_rate_reduction / max(current_positive_rate, 0.01)) * 0.05  # Decreased from 0.1 to 0.05
+                    # Weighted score for recall-focused approach: prioritize FN reduction and recall gain
+                    fn_score = (fn_reduction / max(current_fn, 1)) * 0.5  # Prioritize FN reduction
+                    recall_score_component = max(0, recall_gain / max(abs(current_recall) + 0.01, 0.01)) * 0.3  # Prioritize recall gain
+                    precision_score_component = (1 - (precision_loss / max(current_precision, 0.01))) * 0.15  # Preserve precision
+                    fp_penalty = max(0, fp_increase / max(current_fp, 1)) * 0.05  # Penalize FP increase (small weight)
                     
-                    improvement_score = fp_score + recall_score_component + precision_score_component + pos_rate_score
+                    improvement_score = fn_score + recall_score_component + precision_score_component - fp_penalty
                     
-                    # More lenient conditions for precision-focused approach
-                    meets_fp_reduction = fp_reduction >= min_fp_reduction
-                    meets_recall_loss = recall_loss <= max_recall_loss
-                    meets_recall_target = candidate['recall'] >= min_recall_floor
-                    # Accept if: (FP reduction is good AND precision improves) OR (any FP reduction with precision gain) OR (significant FP reduction)
-                    meets_quality = (fp_reduction >= min_fp_reduction and precision_gain > 0) or (fp_reduction > 0 and precision_gain > 0.001) or (fp_reduction >= min_fp_reduction * 0.7 and recall_loss <= max_recall_loss * 1.5)
+                    # More lenient conditions for recall-focused approach
+                    meets_fn_reduction = fn_reduction >= min_fn_reduction
+                    meets_precision_loss = precision_loss <= max_precision_loss
+                    meets_precision_target = candidate['precision'] >= min_precision_floor
+                    # Accept if: (FN reduction is good AND recall improves) OR (any FN reduction with recall gain) OR (significant FN reduction)
+                    meets_quality = (fn_reduction >= min_fn_reduction and recall_gain > 0) or (fn_reduction > 0 and recall_gain > 0.001) or (fn_reduction >= min_fn_reduction * 0.7 and precision_loss <= max_precision_loss * 1.5)
                     
                     print(f"STACKING DEBUG: Candidate (threshold={candidate['threshold']:.4f}):")
-                    print(f"  - FP: {current_fp} → {candidate['fp']} (reduction: {fp_reduction}, required: {min_fp_reduction}) {'✓' if meets_fp_reduction else '✗'}")
-                    print(f"  - Recall: {current_recall:.4f} → {candidate['recall']:.4f} (loss: {recall_loss:.4f}, max: {max_recall_loss}) {'✓' if meets_recall_loss else '✗'}")
-                    print(f"  - Recall >= target: {candidate['recall']:.4f} >= {min_recall_floor:.4f} {'✓' if meets_recall_target else '✗'}")
-                    print(f"  - Precision: {current_precision:.4f} → {candidate['precision']:.4f} (gain: {precision_gain:.4f})")
+                    print(f"  - FN: {current_fn} → {candidate['fn']} (reduction: {fn_reduction}, required: {min_fn_reduction}) {'✓' if meets_fn_reduction else '✗'}")
+                    print(f"  - Recall: {current_recall:.4f} → {candidate['recall']:.4f} (gain: {recall_gain:.4f})")
+                    print(f"  - Precision: {current_precision:.4f} → {candidate['precision']:.4f} (loss: {precision_loss:.4f}, max: {max_precision_loss:.4f}) {'✓' if meets_precision_loss else '✗'}")
+                    print(f"  - Precision >= target: {candidate['precision']:.4f} >= {min_precision_floor:.4f} {'✓' if meets_precision_target else '✗'}")
+                    print(f"  - FP: {current_fp} → {candidate['fp']} (increase: {fp_increase})")
                     print(f"  - Quality check: {'✓' if meets_quality else '✗'}")
-                    print(f"  - Weighted score: {improvement_score:.4f} (FP:{fp_score:.3f} + Recall:{recall_score_component:.3f} + Prec:{precision_score_component:.3f} + PosRate:{pos_rate_score:.3f})")
+                    print(f"  - Weighted score: {improvement_score:.4f} (FN:{fn_score:.3f} + Recall:{recall_score_component:.3f} + Prec:{precision_score_component:.3f} - FP:{fp_penalty:.3f})")
                     
-                    # More lenient acceptance: prioritize precision and FP reduction
-                    if (meets_recall_target and meets_quality):
-                        # Accept if precision improves OR FP reduces (even slightly)
-                        if precision_gain > 0 or fp_reduction > 0:
-                            print(f"  → ✓ ACCEPTED (precision-focused)")
+                    # More lenient acceptance: prioritize recall and FN reduction
+                    if (meets_precision_target and meets_quality):
+                        # Accept if recall improves OR FN reduces (even slightly)
+                        if recall_gain > 0 or fn_reduction > 0:
+                            print(f"  → ✓ ACCEPTED (recall-focused)")
                             if best_improvement is None or improvement_score > best_improvement:
                                 best_improvement = improvement_score
-                                best_precision_focused = candidate
-                    elif meets_recall_target and fp_reduction > 0 and recall_loss <= max_recall_loss * 2.0:
-                        # Even more lenient: accept if FP reduces and recall loss is acceptable
-                        print(f"  → ✓ ACCEPTED (lenient precision-focused)")
+                                best_recall_focused = candidate
+                    elif meets_precision_target and fn_reduction > 0 and precision_loss <= max_precision_loss * 2.0:
+                        # Even more lenient: accept if FN reduces and precision loss is acceptable
+                        print(f"  → ✓ ACCEPTED (lenient recall-focused)")
                         if best_improvement is None or improvement_score > best_improvement:
                             best_improvement = improvement_score
-                            best_precision_focused = candidate
+                            best_recall_focused = candidate
                     else:
                         rejection_reasons = []
-                        if not meets_recall_loss:
-                            rejection_reasons.append(f"Recall loss {recall_loss:.4f} > {max_recall_loss}")
-                        if not meets_recall_target:
-                            rejection_reasons.append(f"Recall {candidate['recall']:.4f} < {min_recall_floor:.4f}")
+                        if not meets_precision_loss:
+                            rejection_reasons.append(f"Precision loss {precision_loss:.4f} > {max_precision_loss:.4f}")
+                        if not meets_precision_target:
+                            rejection_reasons.append(f"Precision {candidate['precision']:.4f} < {min_precision_floor:.4f}")
                         if not meets_quality:
-                            rejection_reasons.append(f"Quality: FP reduction {fp_reduction} insufficient or recall loss too high")
+                            rejection_reasons.append(f"Quality: FN reduction {fn_reduction} insufficient or precision loss too high")
                         print(f"  → ✗ REJECTED: {', '.join(rejection_reasons)}")
                 
-                if best_precision_focused is not None:
-                    precision_focused_threshold = best_precision_focused['threshold']
-                    precision_focused_fp = best_precision_focused['fp']
-                    precision_focused_fpr = best_precision_focused['fpr']
-                    precision_focused_precision = best_precision_focused['precision']
-                    precision_focused_recall = best_precision_focused['recall']
+                if best_recall_focused is not None:
+                    recall_focused_threshold = best_recall_focused['threshold']
+                    recall_focused_fn = best_recall_focused['fn']
+                    recall_focused_fp = best_recall_focused['fp']
+                    recall_focused_fpr = best_recall_focused['fpr']
+                    recall_focused_precision = best_recall_focused['precision']
+                    recall_focused_recall = best_recall_focused['recall']
                     
-                    fp_reduction = current_fp - precision_focused_fp
-                    fpr_reduction = current_fpr - precision_focused_fpr
-                    precision_gain = precision_focused_precision - current_precision
-                    recall_loss = current_recall - precision_focused_recall
+                    fn_reduction = current_fn - recall_focused_fn
+                    recall_gain = recall_focused_recall - current_recall
+                    precision_loss = current_precision - recall_focused_precision
+                    fp_increase = recall_focused_fp - current_fp
                     
-                    print(f"STACKING DEBUG: ✓ Precision-focused threshold found: {precision_focused_threshold:.4f}")
-                    fp_reduction_pct = (fp_reduction / current_fp * 100) if current_fp > 0 else 0
-                    print(f"STACKING DEBUG:   FP: {current_fp} → {precision_focused_fp} (reduction: {fp_reduction}, {fp_reduction_pct:.1f}%)")
-                    print(f"STACKING DEBUG:   Recall: {current_recall:.4f} → {precision_focused_recall:.4f} (loss: {recall_loss:.4f})")
-                    print(f"STACKING DEBUG:   Precision: {current_precision:.4f} → {precision_focused_precision:.4f} (gain: {precision_gain:.4f})")
+                    print(f"STACKING DEBUG: ✓ Recall-focused threshold found: {recall_focused_threshold:.4f}")
+                    fn_reduction_pct = (fn_reduction / current_fn * 100) if current_fn > 0 else 0
+                    print(f"STACKING DEBUG:   FN: {current_fn} → {recall_focused_fn} (reduction: {fn_reduction}, {fn_reduction_pct:.1f}%)")
+                    print(f"STACKING DEBUG:   Recall: {current_recall:.4f} → {recall_focused_recall:.4f} (gain: {recall_gain:.4f})")
+                    print(f"STACKING DEBUG:   Precision: {current_precision:.4f} → {recall_focused_precision:.4f} (loss: {precision_loss:.4f})")
+                    print(f"STACKING DEBUG:   FP: {current_fp} → {recall_focused_fp} (increase: {fp_increase})")
                     
-                    optimal_threshold = precision_focused_threshold
+                    optimal_threshold = recall_focused_threshold
                 else:
-                    print(f"STACKING DEBUG: No suitable precision-focused threshold found, trying precision-maximization strategy...")
+                    print(f"STACKING DEBUG: No suitable recall-focused threshold found, trying recall-maximization strategy...")
                     
-                    # Additional strategy: Find threshold that maximizes precision while maintaining minimum recall
-                    precision_max_candidates = []
-                    min_recall_for_precision = max(xgb_recall_target * 0.5, 0.2)  # Even more lenient: 50% of XGBoost recall or 20% minimum
-                    precision_max_found = False
+                    # Additional strategy: Find threshold that maximizes recall while maintaining minimum precision
+                    recall_max_candidates = []
+                    min_precision_for_recall = max(xgb_precision_target * 0.3, 0.03)  # Even more lenient: 30% of XGBoost precision or 3% minimum
+                    recall_max_found = False
                     
-                    for i, (rec, prec, fp_count) in enumerate(zip(recall_at_thresholds, precision_at_thresholds, fp_counts)):
-                        if rec >= min_recall_for_precision and prec > current_precision:
-                            precision_max_candidates.append({
+                    for i, (rec, prec, fn_count, fp_count) in enumerate(zip(recall_at_thresholds, precision_at_thresholds, fn_counts, fp_counts)):
+                        if prec >= min_precision_for_recall and rec > current_recall:
+                            recall_max_candidates.append({
                                 'idx': i,
                                 'threshold': valid_thresholds[i],
                                 'recall': rec,
                                 'precision': prec,
+                                'fn': fn_count,
                                 'fp': fp_count,
-                                'fp_reduction': current_fp - fp_count,
-                                'precision_gain': prec - current_precision,
-                                'recall_loss': current_recall - rec
+                                'fn_reduction': current_fn - fn_count,
+                                'recall_gain': rec - current_recall,
+                                'precision_loss': current_precision - prec
                             })
                     
-                    if len(precision_max_candidates) > 0:
-                        # Sort by precision (descending), then by FP reduction (descending)
-                        precision_max_candidates.sort(key=lambda x: (-x['precision'], -x['fp_reduction']))
+                    if len(recall_max_candidates) > 0:
+                        # Sort by recall (descending), then by FN reduction (descending)
+                        recall_max_candidates.sort(key=lambda x: (-x['recall'], -x['fn_reduction']))
                         
-                        # Try top candidates - accept if precision improves OR FP reduces (more lenient)
-                        for candidate in precision_max_candidates[:10]:  # Check more candidates
-                            if (candidate['precision_gain'] > 0 or candidate['fp_reduction'] > 0) and candidate['recall'] >= min_recall_for_precision:
-                                print(f"STACKING DEBUG: ✓ Precision-maximization threshold found: {candidate['threshold']:.4f}")
-                                print(f"STACKING DEBUG:   Precision: {current_precision:.4f} → {candidate['precision']:.4f} (gain: {candidate['precision_gain']:.4f})")
-                                print(f"STACKING DEBUG:   FP: {current_fp} → {candidate['fp']} (reduction: {candidate['fp_reduction']})")
-                                print(f"STACKING DEBUG:   Recall: {current_recall:.4f} → {candidate['recall']:.4f} (loss: {candidate['recall_loss']:.4f})")
+                        # Try top candidates - accept if recall improves OR FN reduces (more lenient)
+                        for candidate in recall_max_candidates[:10]:  # Check more candidates
+                            if (candidate['recall_gain'] > 0 or candidate['fn_reduction'] > 0) and candidate['precision'] >= min_precision_for_recall:
+                                print(f"STACKING DEBUG: ✓ Recall-maximization threshold found: {candidate['threshold']:.4f}")
+                                print(f"STACKING DEBUG:   Recall: {current_recall:.4f} → {candidate['recall']:.4f} (gain: {candidate['recall_gain']:.4f})")
+                                print(f"STACKING DEBUG:   FN: {current_fn} → {candidate['fn']} (reduction: {candidate['fn_reduction']})")
+                                print(f"STACKING DEBUG:   Precision: {current_precision:.4f} → {candidate['precision']:.4f} (loss: {candidate['precision_loss']:.4f})")
                                 optimal_threshold = candidate['threshold']
-                                precision_max_found = True
+                                recall_max_found = True
                                 break
                     
-                    if not precision_max_found:
+                    if not recall_max_found:
                         print(f"STACKING DEBUG: Applying positive-rate guardrail as final fallback...")
-                        # Fallback: Apply positive-rate cap only if precision-focused search failed
+                        # Fallback: Apply positive-rate cap only if recall-focused search failed
                     guardrail_levels = [
                         ('primary', min(current_recall, max(xgb_recall_target + 0.25, 0.75))),
                         ('secondary', min(current_recall, max(xgb_recall_target + 0.25, 0.5))),
@@ -13486,7 +13598,7 @@ def stacking_analysis():
             else:
                 print(f"STACKING DEBUG: No precision-focused candidates found (no threshold meets minimum recall {min_recall_floor:.4f})")
         except Exception as precision_err:
-            print(f"STACKING DEBUG: Error in precision-focused threshold selection: {precision_err}")
+            print(f"STACKING DEBUG: Error in recall-focused threshold selection: {precision_err}")
             import traceback
             traceback.print_exc()
             print(f"STACKING DEBUG: Continuing with current optimal threshold: {optimal_threshold:.4f}")
@@ -13495,36 +13607,36 @@ def stacking_analysis():
         best_threshold = optimal_threshold
         y_pred = (ensemble_test_pred >= best_threshold).astype(int)
         
-        # Check if we still have too many false positives and try conservative threshold
-        final_fp_check = ((y_test == 0) & (y_pred == 1)).sum()
-        n_good_customers = (y_test == 0).sum()
-        fp_rate_check = final_fp_check / n_good_customers if n_good_customers > 0 else 0
+        # Check if we still have too many false negatives and try more aggressive threshold
+        final_fn_check = ((y_test == 1) & (y_pred == 0)).sum()
+        n_bad_customers = (y_test == 1).sum()
+        fn_rate_check = final_fn_check / n_bad_customers if n_bad_customers > 0 else 0
         
-        # If FP rate is still very high (>75%), try to find a more conservative threshold
-        if fp_rate_check > 0.75 and n_good_customers > 0:
-            print(f"STACKING DEBUG: FP rate still very high ({fp_rate_check:.2%}), trying conservative threshold search...")
-            conservative_candidates = []
+        # If FN rate is still very high (>30%), try to find a more aggressive threshold to catch more defaults
+        if fn_rate_check > 0.30 and n_bad_customers > 0:
+            print(f"STACKING DEBUG: FN rate still very high ({fn_rate_check:.2%}), trying aggressive threshold search to catch more defaults...")
+            aggressive_candidates = []
             
-            # Find thresholds that minimize FP while maintaining reasonable recall
-            # Balance: reduce FP significantly but maintain at least 60-70% recall for better performance
-            # Use the current recall from precision-focused threshold as baseline
-            current_recall_conservative = recall_score(y_test, y_pred, zero_division=0)
-            min_recall_conservative = max(0.6, min(current_recall_conservative * 0.85, 0.75))  # At least 60% recall, or 85% of current recall (max 75%)
+            # Find thresholds that minimize FN while maintaining reasonable precision
+            # Balance: reduce FN significantly but maintain at least 3-5% precision for better performance
+            # Use the current precision from recall-focused threshold as baseline
+            current_precision_aggressive = precision_score(y_test, y_pred, zero_division=0)
+            min_precision_aggressive = max(0.03, min(current_precision_aggressive * 0.7, 0.10))  # At least 3% precision, or 70% of current precision (max 10%)
             
-            # Recalculate metrics for all thresholds (use existing if available from precision-focused search)
+            # Recalculate metrics for all thresholds (use existing if available from recall-focused search)
             try:
-                # Check if recall_at_thresholds exists from precision-focused search
+                # Check if recall_at_thresholds exists from recall-focused search
                 if len(recall_at_thresholds) == 0:
                     raise ValueError("Empty recall_at_thresholds")
             except (NameError, ValueError):
                 # Recalculate if not available
                 recall_at_thresholds = []
                 precision_at_thresholds = []
-                fp_counts = []
+                fn_counts = []
                 valid_thresholds = []
-                test_thresholds_conservative = np.linspace(0.01, 0.99, 200)
+                test_thresholds_aggressive = np.linspace(0.01, 0.99, 200)
                 
-                for thresh in test_thresholds_conservative:
+                for thresh in test_thresholds_aggressive:
                     y_pred_thresh = (ensemble_test_pred >= thresh).astype(int)
                     tn = ((y_test == 0) & (y_pred_thresh == 0)).sum()
                     fp = ((y_test == 0) & (y_pred_thresh == 1)).sum()
@@ -13536,50 +13648,51 @@ def stacking_analysis():
                     
                     recall_at_thresholds.append(rec)
                     precision_at_thresholds.append(prec)
-                    fp_counts.append(fp)
+                    fn_counts.append(fn)
                     valid_thresholds.append(thresh)
             
-            for i, (rec, prec, fp_count) in enumerate(zip(recall_at_thresholds, precision_at_thresholds, fp_counts)):
-                if rec >= min_recall_conservative:
-                    fp_rate_candidate = fp_count / n_good_customers if n_good_customers > 0 else 1.0
-                    # Accept if FP rate is lower OR if precision is significantly better
-                    if fp_rate_candidate < fp_rate_check or (fp_rate_candidate <= fp_rate_check * 1.1 and prec > precision_score(y_test, y_pred, zero_division=0) + 0.01):
-                        conservative_candidates.append({
+            for i, (rec, prec, fn_count) in enumerate(zip(recall_at_thresholds, precision_at_thresholds, fn_counts)):
+                if prec >= min_precision_aggressive:
+                    fn_rate_candidate = fn_count / n_bad_customers if n_bad_customers > 0 else 1.0
+                    # Accept if FN rate is lower OR if recall is significantly better
+                    if fn_rate_candidate < fn_rate_check or (fn_rate_candidate <= fn_rate_check * 1.1 and rec > recall_score(y_test, y_pred, zero_division=0) + 0.01):
+                        aggressive_candidates.append({
                             'threshold': valid_thresholds[i],
                             'recall': rec,
                             'precision': prec,
-                            'fp': fp_count,
-                            'fp_rate': fp_rate_candidate,
-                            'fp_reduction': final_fp_check - fp_count
+                            'fn': fn_count,
+                            'fn_rate': fn_rate_candidate,
+                            'fn_reduction': final_fn_check - fn_count
                         })
             
-            print(f"STACKING DEBUG: Found {len(conservative_candidates)} conservative candidates with recall >= {min_recall_conservative:.4f}")
+            print(f"STACKING DEBUG: Found {len(aggressive_candidates)} aggressive candidates with precision >= {min_precision_aggressive:.4f}")
             
-            if len(conservative_candidates) > 0:
-                # Sort by balanced score: prioritize FP reduction but also maintain good recall
-                # Score = (FP reduction weight) - (recall loss weight) + (precision gain weight)
-                for cand in conservative_candidates:
-                    recall_loss = current_recall_conservative - cand['recall']
-                    fp_reduction_pct = cand['fp_reduction'] / final_fp_check if final_fp_check > 0 else 0
-                    precision_gain = cand['precision'] - precision_score(y_test, y_pred, zero_division=0)
-                    # Balanced score: 40% FP reduction, 40% recall preservation, 20% precision
-                    cand['balanced_score'] = (fp_reduction_pct * 0.4) - (recall_loss / max(current_recall_conservative, 0.01) * 0.4) + (max(0, precision_gain) * 20)
+            if len(aggressive_candidates) > 0:
+                # Sort by balanced score: prioritize FN reduction but also maintain good precision
+                # Score = (FN reduction weight) - (precision loss weight) + (recall gain weight)
+                current_recall_aggressive = recall_score(y_test, y_pred, zero_division=0)
+                for cand in aggressive_candidates:
+                    precision_loss = current_precision_aggressive - cand['precision']
+                    fn_reduction_pct = cand['fn_reduction'] / final_fn_check if final_fn_check > 0 else 0
+                    recall_gain = cand['recall'] - current_recall_aggressive
+                    # Balanced score: 40% FN reduction, 40% precision preservation, 20% recall
+                    cand['balanced_score'] = (fn_reduction_pct * 0.4) - (precision_loss / max(current_precision_aggressive, 0.01) * 0.4) + (max(0, recall_gain) * 20)
                 
-                # Sort by balanced score (descending), then by FP rate (ascending)
-                conservative_candidates.sort(key=lambda x: (-x['balanced_score'], x['fp_rate']))
-                best_conservative = conservative_candidates[0]
+                # Sort by balanced score (descending), then by FN rate (ascending)
+                aggressive_candidates.sort(key=lambda x: (-x['balanced_score'], x['fn_rate']))
+                best_aggressive = aggressive_candidates[0]
                 
-                # Only apply if it provides meaningful improvement without too much recall loss
-                recall_loss_check = current_recall_conservative - best_conservative['recall']
-                if best_conservative['fp_reduction'] > 0 and recall_loss_check < current_recall_conservative * 0.3:  # Max 30% recall loss
-                    print(f"STACKING DEBUG: ✓ Using conservative threshold: {best_conservative['threshold']:.4f}")
-                    print(f"STACKING DEBUG:   FP rate: {fp_rate_check:.2%} → {best_conservative['fp_rate']:.2%}")
-                    print(f"STACKING DEBUG:   FP: {final_fp_check} → {best_conservative['fp']} (reduction: {best_conservative['fp_reduction']})")
+                # Only apply if it provides meaningful improvement without too much precision loss
+                precision_loss_check = current_precision_aggressive - best_aggressive['precision']
+                if best_aggressive['fn_reduction'] > 0 and precision_loss_check < current_precision_aggressive * 0.5:  # Max 50% precision loss
+                    print(f"STACKING DEBUG: ✓ Using aggressive threshold: {best_aggressive['threshold']:.4f}")
+                    print(f"STACKING DEBUG:   FN rate: {fn_rate_check:.2%} → {best_aggressive['fn_rate']:.2%}")
+                    print(f"STACKING DEBUG:   FN: {final_fn_check} → {best_aggressive['fn']} (reduction: {best_aggressive['fn_reduction']})")
                     current_prec = precision_score(y_test, y_pred, zero_division=0)
                     current_rec = recall_score(y_test, y_pred, zero_division=0)
-                    print(f"STACKING DEBUG:   Precision: {current_prec:.4f} → {best_conservative['precision']:.4f}")
-                    print(f"STACKING DEBUG:   Recall: {current_rec:.4f} → {best_conservative['recall']:.4f}")
-                    best_threshold = best_conservative['threshold']
+                    print(f"STACKING DEBUG:   Precision: {current_prec:.4f} → {best_aggressive['precision']:.4f}")
+                    print(f"STACKING DEBUG:   Recall: {current_rec:.4f} → {best_aggressive['recall']:.4f}")
+                    best_threshold = best_aggressive['threshold']
                     y_pred = (ensemble_test_pred >= best_threshold).astype(int)
         
         # Recalculate F1 with final threshold
@@ -14113,8 +14226,105 @@ def stacking_analysis():
                 if var in woe_transformed_data:
                     woe_snapshot[var] = woe_transformed_data[var]
             
-            # Serialize meta-learner and scaler
+            # Train final base models on full training set for scorecard application
+            # This ensures consistency between training and scoring
+            print("STACKING DEBUG: Training final base models on full training set for scorecard application...")
             import pickle
+            
+            # Prepare full training data
+            X_train_full_woe = _apply_woe_to_test_data(df_train, selected_variables, woe_transformed_data, target, dataset_id=record_id)
+            X_train_full_woe = X_train_full_woe.drop(columns=[target], errors='ignore')
+            X_train_full_woe_const = add_constant(X_train_full_woe, has_constant='add')
+            
+            # Prepare XGBoost raw features
+            df_train_processed, _ = preprocess_dataset(
+                df_train,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': False,
+                    'handle_outliers': False,
+                    'encode_categorical': True
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            X_train_full_raw = df_train_processed[selected_variables].copy()
+            # Handle encoding for XGBoost (same as in CV loop)
+            for col in selected_variables:
+                if col in X_train_full_raw.columns:
+                    if X_train_full_raw[col].dtype == 'object' or X_train_full_raw[col].dtype.name == 'category':
+                        X_train_full_raw[col] = X_train_full_raw[col].fillna('__MISSING__')
+                        le = LabelEncoder()
+                        unique_vals = X_train_full_raw[col].dropna().unique()
+                        if len(unique_vals) > 0:
+                            le.fit(unique_vals)
+                            X_train_full_raw[col] = le.transform(X_train_full_raw[col].astype(str))
+                    else:
+                        median_val = X_train_full_raw[col].median()
+                        X_train_full_raw[col].fillna(median_val, inplace=True)
+            
+            # 1. Train final LR model on full training set
+            y_classes_full = np.unique(y_train)
+            n_classes_full = len(y_classes_full)
+            class_counts_full = np.bincount(y_train)
+            total_samples_full = len(y_train)
+            
+            if n_classes_full == 2:
+                n_class_0_full = class_counts_full[0] if len(class_counts_full) > 0 else 0
+                n_class_1_full = class_counts_full[1] if len(class_counts_full) > 1 else 0
+                
+                if n_class_0_full > 0 and n_class_1_full > 0:
+                    weight_0_full = total_samples_full / (n_classes_full * n_class_0_full)
+                    weight_1_full = total_samples_full / (n_classes_full * n_class_1_full)
+                    weight_1_full = weight_1_full * 1.5  # Same as in CV loop
+                    class_weight_dict_full = {0: weight_0_full, 1: weight_1_full}
+                else:
+                    class_weight_dict_full = 'balanced'
+                
+                sample_weights_full = np.array([class_weight_dict_full[y] for y in y_train])
+            else:
+                class_weights_full = compute_class_weight('balanced', classes=y_classes_full, y=y_train)
+                sample_weights_full = np.array([class_weights_full[y] for y in y_train])
+                class_weight_dict_full = 'balanced'
+            
+            lr_config_final = config['lr'].copy()
+            lr_config_final['class_weight'] = class_weight_dict_full
+            lr_model_final = SklearnLR(**lr_config_final)
+            lr_model_final.fit(X_train_full_woe_const, y_train, sample_weight=sample_weights_full)
+            lr_model_final_bytes = pickle.dumps(lr_model_final)
+            print("STACKING DEBUG: ✓ Final LR model trained and serialized")
+            
+            # 2. Train final RF model on full training set
+            class_weights_rf_full = compute_class_weight('balanced', classes=y_classes_full, y=y_train)
+            class_weight_dict_rf_full = dict(zip(y_classes_full, class_weights_rf_full))
+            rf_config_final = config['rf'].copy()
+            rf_config_final['class_weight'] = class_weight_dict_rf_full
+            rf_model_final = RandomForestClassifier(**rf_config_final)
+            rf_model_final.fit(X_train_full_woe, y_train)
+            rf_model_final_bytes = pickle.dumps(rf_model_final)
+            print("STACKING DEBUG: ✓ Final RF model trained and serialized")
+            
+            # 3. Train final XGBoost model on full training set
+            if n_classes_full == 2 and len(class_counts_full) == 2:
+                n_class_0_xgb = class_counts_full[0]
+                n_class_1_xgb = class_counts_full[1]
+                if n_class_0_xgb > 0 and n_class_1_xgb > 0:
+                    scale_pos_weight_final = n_class_0_xgb / n_class_1_xgb
+                else:
+                    scale_pos_weight_final = 1.0
+            else:
+                scale_pos_weight_final = 1.0
+            
+            xgb_config_final = config['xgb'].copy()
+            xgb_config_final['scale_pos_weight'] = scale_pos_weight_final
+            xgb_model_final = xgb.XGBClassifier(**xgb_config_final)
+            xgb_model_final.fit(X_train_full_raw, y_train)
+            xgb_model_final_bytes = pickle.dumps(xgb_model_final)
+            print("STACKING DEBUG: ✓ Final XGBoost model trained and serialized")
+            
+            # Serialize meta-learner and scaler
             meta_learner_bytes = pickle.dumps(meta_learner)
             scaler_bytes = pickle.dumps(scaler)
             
@@ -14135,7 +14345,11 @@ def stacking_analysis():
                 'woe_transformed_data': woe_snapshot,
                 'meta_learner_bytes': meta_learner_bytes,
                 'scaler_bytes': scaler_bytes,
+                'lr_model_final_bytes': lr_model_final_bytes,  # Save final base models
+                'rf_model_final_bytes': rf_model_final_bytes,
+                'xgb_model_final_bytes': xgb_model_final_bytes,
                 'meta_learner_weights': meta_weights,
+                'performance_weights': performance_weights,  # CRITICAL: Save performance weights for consistency
                 'base_model_configs': base_model_configs,
                 'base_models_performance': base_models_performance,
                 'ensemble_performance': ensemble_performance,
@@ -15011,29 +15225,149 @@ def generate_scorecard():
             intercept = 0
         
         elif model_type == 'stacking_ensemble':
-            # For stacking ensemble, use meta-learner coefficients for scorecard binning
+            # OPTION 2: Weighted Base Model Coefficients
+            # Extract coefficients/importance from each base model (LR, RF, XGB)
+            # Weight them by performance weights (how much meta-learner trusts each model)
+            # Combine into one set of coefficients for WOE-based scorecard
             try:
                 artifact_data, artifact_path = load_model_artifact(dataset_id, 'stacking_ensemble')
                 if not artifact_data:
                     return jsonify({"error": "Stacking ensemble model not found. Please train the stacking model first."}), 400
 
                 import pickle
-                meta_learner = pickle.loads(artifact_data['meta_learner_bytes'])
-                # meta_learner.coef_ is shape (1, n_features), intercept_ is scalar
-                meta_coefs = meta_learner.coef_[0]
-                intercept = float(meta_learner.intercept_[0])
-                # Map coefficients for selected variables
-                for i, var in enumerate(selected_variables):
-                    coefficients[var] = float(meta_coefs[i])
-                # Debug: check coefficient magnitudes
-                coef_values = list(coefficients.values())
-                if coef_values:
-                    avg_abs_coef = sum(abs(c) for c in coef_values) / len(coef_values)
-                    max_abs_coef = max(abs(c) for c in coef_values)
-                    print(f"[generate_scorecard] Stacking scorecard: meta-learner coefficients loaded - n={len(meta_coefs)}, avg|β|={avg_abs_coef:.4f}, max|β|={max_abs_coef:.4f}, intercept={intercept:.4f}")
+                
+                # Load base models
+                lr_model_final = pickle.loads(artifact_data['lr_model_final_bytes'])
+                rf_model_final = pickle.loads(artifact_data['rf_model_final_bytes'])
+                xgb_model_final = pickle.loads(artifact_data['xgb_model_final_bytes'])
+                
+                # Get performance weights (how much we trust each model)
+                performance_weights = artifact_data.get('performance_weights', [0.33, 0.33, 0.34])  # Default: equal weights
+                if len(performance_weights) != 3:
+                    performance_weights = [0.33, 0.33, 0.34]
+                
+                lr_weight = performance_weights[0]
+                rf_weight = performance_weights[1]
+                xgb_weight = performance_weights[2]
+                
+                print(f"[generate_scorecard] Stacking ensemble: Using weighted base model coefficients")
+                print(f"[generate_scorecard] Performance weights: LR={lr_weight:.3f}, RF={rf_weight:.3f}, XGB={xgb_weight:.3f}")
+                
+                # Prepare WOE feature names (for LR and RF)
+                woe_feature_names = [f"{var}_WOE" for var in selected_variables]
+                
+                # 1. Extract coefficients from Logistic Regression (uses WOE features with constant)
+                lr_coefs = {}
+                if hasattr(lr_model_final, 'coef_') and lr_model_final.coef_ is not None:
+                    # LR model has constant term, so coefficients are for: [const, var1_WOE, var2_WOE, ...]
+                    # We need to check if constant was added
+                    lr_coef_array = lr_model_final.coef_[0] if len(lr_model_final.coef_.shape) > 1 else lr_model_final.coef_
+                    
+                    # Check if first feature is constant (intercept)
+                    # If constant was added, first coef is intercept, rest are feature coefs
+                    # We need to match feature names to coefficients
+                    # Since we don't have feature names directly, we'll assume order matches selected_variables
+                    if len(lr_coef_array) == len(selected_variables) + 1:
+                        # Constant was added: [intercept, var1_coef, var2_coef, ...]
+                        intercept = float(lr_coef_array[0])
+                        for idx, var in enumerate(selected_variables):
+                            lr_coefs[var] = float(lr_coef_array[idx + 1])
+                    elif len(lr_coef_array) == len(selected_variables):
+                        # No constant: [var1_coef, var2_coef, ...]
+                        intercept = 0.0
+                        for idx, var in enumerate(selected_variables):
+                            lr_coefs[var] = float(lr_coef_array[idx])
+                    else:
+                        print(f"[generate_scorecard] WARNING: LR coefficient count mismatch: {len(lr_coef_array)} vs {len(selected_variables)}")
+                        # Fallback: try to match by position
+                        intercept = float(lr_coef_array[0]) if len(lr_coef_array) > len(selected_variables) else 0.0
+                        for idx, var in enumerate(selected_variables):
+                            if idx + 1 < len(lr_coef_array):
+                                lr_coefs[var] = float(lr_coef_array[idx + 1] if len(lr_coef_array) > len(selected_variables) else lr_coef_array[idx])
+                            else:
+                                lr_coefs[var] = 0.0
                 else:
-                    print(f"[generate_scorecard] WARNING: No coefficients found in meta-learner artifact")
-                    return jsonify({"error": "No coefficients found in stacking meta-learner."}), 400
+                    print(f"[generate_scorecard] WARNING: LR model has no coefficients")
+                    for var in selected_variables:
+                        lr_coefs[var] = 0.0
+                    intercept = 0.0
+                
+                print(f"[generate_scorecard] LR coefficients extracted: {len(lr_coefs)} variables, intercept={intercept:.4f}")
+                
+                # 2. Extract feature importance from Random Forest (uses WOE features)
+                rf_coefs = {}
+                if hasattr(rf_model_final, 'feature_importances_') and rf_model_final.feature_importances_ is not None:
+                    rf_importances = rf_model_final.feature_importances_
+                    # RF uses WOE features, so importances should match selected_variables
+                    if len(rf_importances) == len(selected_variables):
+                        # Normalize and convert to coefficient-like values
+                        total_importance = np.sum(rf_importances) if np.sum(rf_importances) > 0 else 1.0
+                        for idx, var in enumerate(selected_variables):
+                            # Scale importance to coefficient range (similar to tree models in scorecard)
+                            normalized_importance = rf_importances[idx] / total_importance
+                            rf_coefs[var] = float(normalized_importance * 50)  # Scale to reasonable range
+                    else:
+                        print(f"[generate_scorecard] WARNING: RF importance count mismatch: {len(rf_importances)} vs {len(selected_variables)}")
+                        for var in selected_variables:
+                            rf_coefs[var] = 0.0
+                else:
+                    print(f"[generate_scorecard] WARNING: RF model has no feature importances")
+                    for var in selected_variables:
+                        rf_coefs[var] = 0.0
+                
+                print(f"[generate_scorecard] RF importances extracted: {len(rf_coefs)} variables")
+                
+                # 3. Extract feature importance from XGBoost (uses raw features)
+                # XGBoost uses raw features, but we need to map to WOE features for scorecard
+                xgb_coefs = {}
+                if hasattr(xgb_model_final, 'feature_importances_') and xgb_model_final.feature_importances_ is not None:
+                    xgb_importances = xgb_model_final.feature_importances_
+                    # XGBoost feature names should match selected_variables (raw features)
+                    if hasattr(xgb_model_final, 'feature_names_in_'):
+                        xgb_feature_names = list(xgb_model_final.feature_names_in_)
+                    else:
+                        # Fallback: assume order matches selected_variables
+                        xgb_feature_names = selected_variables
+                    
+                    if len(xgb_importances) == len(xgb_feature_names):
+                        # Map raw feature importance to WOE features
+                        total_importance = np.sum(xgb_importances) if np.sum(xgb_importances) > 0 else 1.0
+                        for var in selected_variables:
+                            if var in xgb_feature_names:
+                                idx = xgb_feature_names.index(var)
+                                normalized_importance = xgb_importances[idx] / total_importance
+                                xgb_coefs[var] = float(normalized_importance * 50)  # Scale to reasonable range
+                            else:
+                                xgb_coefs[var] = 0.0
+                    else:
+                        print(f"[generate_scorecard] WARNING: XGB importance count mismatch: {len(xgb_importances)} vs {len(xgb_feature_names)}")
+                        for var in selected_variables:
+                            xgb_coefs[var] = 0.0
+                else:
+                    print(f"[generate_scorecard] WARNING: XGBoost model has no feature importances")
+                    for var in selected_variables:
+                        xgb_coefs[var] = 0.0
+                
+                print(f"[generate_scorecard] XGBoost importances extracted: {len(xgb_coefs)} variables")
+                
+                # 4. Combine coefficients using performance weights
+                # Weighted combination: final_coef = lr_weight * lr_coef + rf_weight * rf_coef + xgb_weight * xgb_coef
+                for var in selected_variables:
+                    lr_val = lr_coefs.get(var, 0.0)
+                    rf_val = rf_coefs.get(var, 0.0)
+                    xgb_val = xgb_coefs.get(var, 0.0)
+                    
+                    # Weighted combination
+                    weighted_coef = (lr_weight * lr_val) + (rf_weight * rf_val) + (xgb_weight * xgb_val)
+                    coefficients[var] = float(weighted_coef)
+                
+                # Set intercept (use LR intercept, weighted by LR importance)
+                intercept = float(intercept * lr_weight)  # Weight LR intercept by LR weight
+                
+                print(f"[generate_scorecard] Combined coefficients: {len(coefficients)} variables")
+                print(f"[generate_scorecard] Sample coefficients (top 3): {dict(list(sorted(coefficients.items(), key=lambda x: abs(x[1]), reverse=True))[:3])}")
+                print(f"[generate_scorecard] Final intercept: {intercept:.4f}")
+                
             except Exception as stacking_err:
                 print(f"[generate_scorecard] Error preparing stacking scorecard: {stacking_err}")
                 import traceback
@@ -15189,7 +15523,7 @@ def generate_scorecard():
         
         # Define base parameters for all model types
         base_odds = 50
-        base_score = 600
+        base_score = 300  # Midpoint of 0-600 scale
         
         # Use DEFAULT_SCORECARD_CONFIG for consistency with _probability_to_score
         # This ensures scores from scorecard match scores from probability conversion
@@ -15206,131 +15540,336 @@ def generate_scorecard():
         var_score_ranges = {var: [] for var in selected_variables}
         processed_ranges = set()
 
+        # WOE-based binning for all models (including stacking ensemble with weighted coefficients)
+        # Traditional WOE-based binning for logistic, tree models, and stacking ensemble
         for var in selected_variables:
-            # For tree models, all selected variables should have feature importance
-            # For logistic, variables should have coefficients
-            if var not in coefficients:
-                print(f"[generate_scorecard] Warning: Variable {var} not in coefficients/importance dict")
-                continue
-            beta = coefficients[var]
-            ranges_source = None
-            
-            # Handle normalized array format (direct from database)
-            if var in woe_transformed_data:
-                woe_data = woe_transformed_data[var]
-                if isinstance(woe_data, list):
-                    # Direct array of bin objects (NormalizedBin format)
-                    ranges_source = []
-                    for r in woe_data:
-                        if not isinstance(r, dict):
+                # For tree models, all selected variables should have feature importance
+                # For logistic, variables should have coefficients
+                if var not in coefficients:
+                    print(f"[generate_scorecard] Warning: Variable {var} not in coefficients/importance dict")
+                    continue
+                beta = coefficients[var]
+                ranges_source = None
+                
+                # Handle normalized array format (direct from database)
+                if var in woe_transformed_data:
+                    woe_data = woe_transformed_data[var]
+                    if isinstance(woe_data, list):
+                        # Direct array of bin objects (NormalizedBin format)
+                        ranges_source = []
+                        for r in woe_data:
+                            if not isinstance(r, dict):
+                                continue
+                            # Try multiple field names for range (discrete uses range_text, continuous uses min/max)
+                            bin_range = (
+                                r.get('range_text') or 
+                                r.get('bin_label') or 
+                                r.get('Range') or 
+                                r.get('Bin') or 
+                                None
+                            )
+                            
+                            # If no range_text/bin_label, construct from min/max values (for continuous)
+                            if not bin_range:
+                                min_val = r.get('min_value')
+                                max_val = r.get('max_value')
+                                if min_val is not None and max_val is not None:
+                                    bin_range = f"({min_val}, {max_val}]"
+                                elif min_val is not None:
+                                    bin_range = f"({min_val}, inf)"
+                                elif max_val is not None:
+                                    bin_range = f"(-inf, {max_val}]"
+                            
+                            # Skip if still no range
+                            if not bin_range:
+                                print(f"[generate_scorecard] Warning: Skipping bin for {var} - no range found (r: {r})")
+                                continue
+                            
+                            ranges_source.append({
+                                'range': bin_range,
+                                'woe': float(r.get('woe') or r.get('WOE') or 0),
+                                'min_value': r.get('min_value'),
+                                'max_value': r.get('max_value')
+                            })
+                        
+                        print(f"[generate_scorecard] Found {len(ranges_source)} bins for {var} from normalized array (out of {len(woe_data)} total)")
+                    # Legacy support for dict structures
+                    elif isinstance(woe_data, dict):
+                        if 'woe_ranges' in woe_data:
+                            ranges_source = woe_data['woe_ranges']
+                        elif 'stats' in woe_data:
+                            ranges_source = [{
+                                'range': r.get('Range') or r.get('Bin') or str(r),
+                                'woe': float(r.get('WOE') or 0)
+                            } for r in woe_data['stats']]
+
+                if not ranges_source:
+                    print(f"[generate_scorecard] Warning: No ranges found for {var} (woe_data type: {type(woe_transformed_data.get(var))})")
+                    continue
+                
+                print(f"[generate_scorecard] Processing {len(ranges_source)} bins for {var}")
+
+                for i, range_info in enumerate(ranges_source):
+                    try:
+                        bin_range = range_info.get('range') if isinstance(range_info, dict) else str(range_info)
+                        woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
+                        
+                        # Skip if bin_range is still None or empty
+                        if not bin_range or bin_range == 'None' or str(bin_range).strip() == '':
+                            print(f"[generate_scorecard] Skipping bin {i} for {var}: empty range (range_info: {range_info})")
                             continue
-                        # Try multiple field names for range (discrete uses range_text, continuous uses min/max)
-                        bin_range = (
-                            r.get('range_text') or 
-                            r.get('bin_label') or 
-                            r.get('Range') or 
-                            r.get('Bin') or 
-                            None
-                        )
                         
-                        # If no range_text/bin_label, construct from min/max values (for continuous)
-                        if not bin_range:
-                            min_val = r.get('min_value')
-                            max_val = r.get('max_value')
-                            if min_val is not None and max_val is not None:
-                                bin_range = f"({min_val}, {max_val}]"
-                            elif min_val is not None:
-                                bin_range = f"({min_val}, inf)"
-                            elif max_val is not None:
-                                bin_range = f"(-inf, {max_val}]"
-                        
-                        # Skip if still no range
-                        if not bin_range:
-                            print(f"[generate_scorecard] Warning: Skipping bin for {var} - no range found (r: {r})")
+                        range_key = f"{var}_{bin_range}_{woe_value}"
+                        if range_key in processed_ranges:
                             continue
+                        processed_ranges.add(range_key)
                         
-                        ranges_source.append({
-                            'range': bin_range,
-                            'woe': float(r.get('woe') or r.get('WOE') or 0),
-                            'min_value': r.get('min_value'),
-                            'max_value': r.get('max_value')
-                        })
-                    
-                    print(f"[generate_scorecard] Found {len(ranges_source)} bins for {var} from normalized array (out of {len(woe_data)} total)")
-                # Legacy support for dict structures
-                elif isinstance(woe_data, dict):
-                    if 'woe_ranges' in woe_data:
-                        ranges_source = woe_data['woe_ranges']
-                    elif 'stats' in woe_data:
-                        ranges_source = [{
-                            'range': r.get('Range') or r.get('Bin') or str(r),
-                            'woe': float(r.get('WOE') or 0)
-                        } for r in woe_data['stats']]
+                        print(f"[generate_scorecard] Adding bin for {var}: range={bin_range}, woe={woe_value}, beta={beta}")
 
-            if not ranges_source:
-                print(f"[generate_scorecard] Warning: No ranges found for {var} (woe_data type: {type(woe_transformed_data.get(var))})")
-                continue
-            
-            print(f"[generate_scorecard] Processing {len(ranges_source)} bins for {var}")
-
-            for i, range_info in enumerate(ranges_source):
-                try:
-                    bin_range = range_info.get('range') if isinstance(range_info, dict) else str(range_info)
-                    woe_value = float(range_info.get('woe') if isinstance(range_info, dict) else 0)
-                    
-                    # Skip if bin_range is still None or empty
-                    if not bin_range or bin_range == 'None' or str(bin_range).strip() == '':
-                        print(f"[generate_scorecard] Skipping bin {i} for {var}: empty range (range_info: {range_info})")
-                        continue
-                    
-                    range_key = f"{var}_{bin_range}_{woe_value}"
-                    if range_key in processed_ranges:
-                        continue
-                    processed_ranges.add(range_key)
-                    
-                    print(f"[generate_scorecard] Adding bin for {var}: range={bin_range}, woe={woe_value}, beta={beta}")
-
-                    # Unified bin scoring: show per-bin score contribution only (not full record score)
-                    woe_real = woe_value / 100.0  # Stored WOE scaled by 100
-                    score_contribution = -factor * beta * woe_real  # Negative: higher default risk lowers score
-                    score = score_contribution
-                    bin_data = {
-                        'variable': var,
-                        'bin_range': bin_range,
-                        'woe': woe_value,
-                        'coefficient': beta,
-                        'score': round(float(score), 2)
-                    }
-                    if model_type == 'logistic' or model_type == 'stacking_ensemble':
-                        bin_data['coefficient'] = round(float(beta), 4)
-                    else:  # random_forest or xgboost
-                        bin_data['feature_importance'] = round(float(beta), 4)
-                    scorecard_bins.append(bin_data)
-                    var_score_ranges[var].append(score)
-                except (ValueError, TypeError) as e:
-                    print(f"[generate_scorecard] Error processing bin {i} for {var}: {e}")
-                    import traceback
-                    traceback.print_exc()
+                        # Unified bin scoring: show per-bin score contribution only (not full record score)
+                        woe_real = woe_value / 100.0  # Stored WOE scaled by 100
+                        score_contribution = -factor * beta * woe_real  # Negative: higher default risk lowers score
+                        score = score_contribution
+                        bin_data = {
+                            'variable': var,
+                            'bin_range': bin_range,
+                            'woe': woe_value,
+                            'coefficient': beta,
+                            'score': round(float(score), 2)
+                        }
+                        if model_type == 'logistic':
+                            bin_data['coefficient'] = round(float(beta), 4)
+                        else:  # random_forest or xgboost
+                            bin_data['feature_importance'] = round(float(beta), 4)
+                        scorecard_bins.append(bin_data)
+                        var_score_ranges[var].append(score)
+                    except (ValueError, TypeError) as e:
+                        print(f"[generate_scorecard] Error processing bin {i} for {var}: {e}")
+                        import traceback
+                        traceback.print_exc()
 
         # Provide configured global score range (record-level scores use probability mapping)
         min_total_score = DEFAULT_SCORECARD_CONFIG['min_score']
         max_total_score = DEFAULT_SCORECARD_CONFIG['max_score']
         print(f"[generate_scorecard] Generated {len(scorecard_bins)} scorecard bins for {len(selected_variables)} variables (range {min_total_score}-{max_total_score})")
 
+        # ========== STEP 2: Calculate raw scores from training data and update artifact ==========
+        score_min_raw = None
+        score_max_raw = None
+        
+        try:
+            print(f"[generate_scorecard] Calculating raw score range from training data...")
+            
+            # Try to get probabilities from model applied to training data
+            # This will be used to calculate raw scores before normalization
+            raw_scores_list = []
+            
+            if model_type == 'stacking_ensemble':
+                # For stacking ensemble, load artifact and apply model to training data
+                try:
+                    artifact_data, artifact_path = load_model_artifact(dataset_id, 'stacking_ensemble')
+                    if artifact_data:
+                        import pickle
+                        from sklearn.linear_model import LogisticRegression as SklearnLR
+                        from sklearn.ensemble import RandomForestClassifier
+                        from sklearn.preprocessing import StandardScaler
+                        import xgboost as xgb
+                        from statsmodels.tools.tools import add_constant
+                        
+                        # Load models
+                        meta_learner = pickle.loads(artifact_data['meta_learner_bytes'])
+                        scaler = pickle.loads(artifact_data['scaler_bytes'])
+                        lr_model_final = pickle.loads(artifact_data['lr_model_final_bytes'])
+                        rf_model_final = pickle.loads(artifact_data['rf_model_final_bytes'])
+                        xgb_model_final = pickle.loads(artifact_data['xgb_model_final_bytes'])
+                        performance_weights = artifact_data.get('performance_weights', [0.33, 0.33, 0.34])
+                        
+                        # Apply WOE to training data
+                        X_train_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                        X_train_woe = X_train_woe.drop(columns=[target], errors='ignore')
+                        X_train_woe_const = add_constant(X_train_woe, has_constant='add')
+                        
+                        # Get predictions from base models
+                        lr_pred = np.clip(lr_model_final.predict_proba(X_train_woe_const)[:, 1], 1e-7, 1 - 1e-7)
+                        rf_pred = np.clip(rf_model_final.predict_proba(X_train_woe)[:, 1], 1e-7, 1 - 1e-7)
+                        
+                        # XGBoost needs raw features
+                        df_train_processed, _ = preprocess_dataset(
+                            df, target_col=target,
+                            preprocessing_steps={'detect_types': True, 'handle_missing': True, 'remove_duplicates': False}
+                        )
+                        X_train_xgb = df_train_processed[selected_variables]
+                        xgb_pred = np.clip(xgb_model_final.predict_proba(X_train_xgb)[:, 1], 1e-7, 1 - 1e-7)
+                        
+                        # Weighted average
+                        weighted_avg = (performance_weights[0] * lr_pred + 
+                                       performance_weights[1] * rf_pred + 
+                                       performance_weights[2] * xgb_pred)
+                        
+                        # Meta-learner prediction
+                        # CRITICAL: Use same augmentation as apply_scorecard() - 6 features (3 raw + 3 logit)
+                        def _logit_transform(preds, eps=1e-6):
+                            clipped = np.clip(preds, eps, 1 - eps)
+                            return np.log(clipped / (1 - clipped))
+                        
+                        meta_features = np.column_stack([lr_pred, rf_pred, xgb_pred])
+                        logit_features = np.column_stack([
+                            _logit_transform(lr_pred),
+                            _logit_transform(rf_pred),
+                            _logit_transform(xgb_pred)
+                        ])
+                        meta_features_aug = np.hstack([meta_features, logit_features])  # 6 features total
+                        
+                        # Scale meta-features (now 6 features, matching scaler expectation)
+                        base_preds_scaled = scaler.transform(meta_features_aug)
+                        meta_pred = np.clip(meta_learner.predict_proba(base_preds_scaled)[:, 1], 1e-7, 1 - 1e-7)
+                        
+                        # Hybrid: 70% meta-learner + 30% weighted average
+                        ensemble_pred = 0.7 * meta_pred + 0.3 * weighted_avg
+                        
+                        # Convert to raw scores (using formula without clipping)
+                        factor, offset = _scorecard_scaling_params(DEFAULT_SCORECARD_CONFIG)
+                        probs = np.clip(ensemble_pred, 1e-6, 1 - 1e-6)
+                        odds_default = probs / (1.0 - probs)
+                        raw_scores = offset - factor * np.log(odds_default)
+                        raw_scores_list = raw_scores.tolist()
+                        
+                        print(f"[generate_scorecard] Calculated {len(raw_scores_list)} raw scores from stacking ensemble")
+                except Exception as stacking_err:
+                    print(f"[generate_scorecard] Warning: Could not calculate raw scores from stacking model: {stacking_err}")
+            
+            elif model_type in ['logistic', 'random_forest', 'xgboost']:
+                # For other models, try to load artifact and apply
+                model_label_map = {
+                    'logistic': 'LR',
+                    'random_forest': 'RandomForest',
+                    'xgboost': 'XGBoost'
+                }
+                model_label = model_label_map.get(model_type)
+                
+                if model_label:
+                    try:
+                        artifact_data, artifact_path = load_model_artifact(dataset_id, model_label)
+                        if artifact_data:
+                            import pickle
+                            
+                            if model_type == 'logistic':
+                                # Logistic regression uses WOE features
+                                X_train_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                                X_train_woe = X_train_woe.drop(columns=[target], errors='ignore')
+                                from statsmodels.tools.tools import add_constant
+                                X_train_woe_const = add_constant(X_train_woe, has_constant='add')
+                                
+                                # Get probabilities from coefficients
+                                coef_dict = artifact_data.get('coefficients', {})
+                                intercept_val = artifact_data.get('intercept', 0)
+                                
+                                # Calculate logit manually
+                                logit = intercept_val
+                                for var in selected_variables:
+                                    if var in coef_dict and f"{var}_WOE" in X_train_woe_const.columns:
+                                        logit += coef_dict[var] * X_train_woe_const[f"{var}_WOE"]
+                                
+                                # Convert to probabilities
+                                probs = 1 / (1 + np.exp(-logit))
+                                probs = np.clip(probs, 1e-6, 1 - 1e-6)
+                                
+                            elif model_type == 'random_forest':
+                                # RF uses WOE features
+                                X_train_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                                X_train_woe = X_train_woe.drop(columns=[target], errors='ignore')
+                                woe_cols = [f"{var}_WOE" for var in selected_variables if f"{var}_WOE" in X_train_woe.columns]
+                                X_train_rf = X_train_woe[woe_cols].fillna(0)
+                                
+                                rf_model = pickle.loads(artifact_data['model_bytes'])
+                                probs = np.clip(rf_model.predict_proba(X_train_rf)[:, 1], 1e-6, 1 - 1e-6)
+                                
+                            elif model_type == 'xgboost':
+                                # XGBoost uses raw features
+                                df_train_processed, _ = preprocess_dataset(
+                                    df, target_col=target,
+                                    preprocessing_steps={'detect_types': True, 'handle_missing': True, 'remove_duplicates': False}
+                                )
+                                X_train_xgb = df_train_processed[selected_variables]
+                                
+                                xgb_model = pickle.loads(artifact_data['model_bytes'])
+                                probs = np.clip(xgb_model.predict_proba(X_train_xgb)[:, 1], 1e-6, 1 - 1e-6)
+                            
+                            # Convert to raw scores (using formula without clipping)
+                            factor, offset = _scorecard_scaling_params(DEFAULT_SCORECARD_CONFIG)
+                            odds_default = probs / (1.0 - probs)
+                            raw_scores = offset - factor * np.log(odds_default)
+                            raw_scores_list = raw_scores.tolist()
+                            
+                            print(f"[generate_scorecard] Calculated {len(raw_scores_list)} raw scores from {model_type}")
+                    except Exception as model_err:
+                        print(f"[generate_scorecard] Warning: Could not calculate raw scores from {model_type} model: {model_err}")
+            
+            # Calculate min/max from raw scores
+            if raw_scores_list:
+                score_min_raw = float(np.min(raw_scores_list))
+                score_max_raw = float(np.max(raw_scores_list))
+                print(f"[generate_scorecard] Raw score range from training data: {score_min_raw:.2f} to {score_max_raw:.2f}")
+            else:
+                # Fallback: use theoretical range
+                score_min_raw = float(min_total_score)
+                score_max_raw = float(max_total_score)
+                print(f"[generate_scorecard] Warning: Could not calculate raw scores, using theoretical range: {score_min_raw:.2f} to {score_max_raw:.2f}")
+        
+        except Exception as calc_err:
+            print(f"[generate_scorecard] Error calculating raw scores: {calc_err}")
+            import traceback
+            traceback.print_exc()
+            # Fallback: use theoretical range
+            score_min_raw = float(min_total_score)
+            score_max_raw = float(max_total_score)
+        
+        # Build score_parameters with raw min/max
+        score_parameters = {
+            "factor": round(float(factor), 4),
+            "offset": round(float(offset), 4),
+            "base_score": base_score,
+            "base_odds": base_odds,
+            "intercept": round(float(intercept), 4),
+            "n_variables": N,
+            "min_score": min_total_score,
+            "max_score": max_total_score,
+            "model_type": model_type,
+            "score_min_raw": score_min_raw,  # NEW: Raw min from training data
+            "score_max_raw": score_max_raw,  # NEW: Raw max from training data
+        }
+        
+        # Update artifact with scorecard data
+        try:
+            model_label_map = {
+                'logistic': 'LR',
+                'random_forest': 'RandomForest',
+                'xgboost': 'XGBoost',
+                'stacking_ensemble': 'stacking_ensemble'
+            }
+            model_label = model_label_map.get(model_type)
+            
+            if model_label:
+                existing_artifact, artifact_path = load_model_artifact(dataset_id, model_label)
+                if existing_artifact:
+                    # Update artifact with scorecard data
+                    existing_artifact['scorecard_bins'] = scorecard_bins
+                    existing_artifact['score_parameters'] = score_parameters
+                    
+                    # Save updated artifact
+                    save_model_artifact(dataset_id, model_label, existing_artifact)
+                    print(f"[generate_scorecard] ✓ Updated artifact with scorecard data (score_min_raw={score_min_raw:.2f}, score_max_raw={score_max_raw:.2f})")
+                else:
+                    print(f"[generate_scorecard] Warning: No existing artifact found for {model_label}, scorecard data not saved to artifact")
+        except Exception as artifact_err:
+            print(f"[generate_scorecard] Warning: Failed to update artifact: {artifact_err}")
+            import traceback
+            traceback.print_exc()
+
         return jsonify({
             "success": True,
             "scorecard_bins": scorecard_bins,
-            "score_parameters": {
-                "factor": round(float(factor), 4),
-                "offset": round(float(offset), 4),
-                "base_score": base_score,
-                "base_odds": base_odds,
-                "intercept": round(float(intercept), 4),
-                "n_variables": N,
-                "min_score": min_total_score,
-                "max_score": max_total_score,
-                "model_type": model_type
-            },
+            "score_parameters": score_parameters,
             "model_summary": {
                 "coefficients": {k: round(float(v), 4) for k, v in coefficients.items()},
                 "intercept": round(float(intercept), 4),
@@ -15380,10 +15919,11 @@ def apply_scorecard():
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id/record_id"}), 400
 
-        # Load dataset - use TRAIN dataset for scorecard evaluation
+        # Load dataset - use specified data source (test/evaluation or training)
+        data_source = data.get('data_source', 'evaluation')  # Default to 'evaluation' (test) for backward compatibility
         try:
-            df = get_data_for_stage(dataset_id, 'training')  # Use TRAIN set for scorecard testing
-            print(f"[APPLY-SCORECARD] Loaded TRAIN dataset: {len(df)} rows, {len(df.columns)} columns")
+            df = get_data_for_stage(dataset_id, data_source)  # Use data_source parameter
+            print(f"[APPLY-SCORECARD] Loaded {data_source.upper()} dataset: {len(df)} rows, {len(df.columns)} columns")
             if df.empty:
                 return jsonify({"error": "Dataset is empty"}), 400
             if len(df.columns) == 0:
@@ -15675,11 +16215,64 @@ def apply_scorecard():
                 
                 # Convert probabilities to credit scores
                 scores_array = _probability_to_score(y_pred_proba_bad, DEFAULT_SCORECARD_CONFIG)
+                
+                # Apply normalization ONLY for training data (Create Ranges)
+                # Test data should use natural score ranges
+                if data_source == 'training':
+                    try:
+                        model_label_map = {
+                            'logistic': 'LR',
+                            'random_forest': 'RandomForest',
+                            'xgboost': 'XGBoost',
+                            'stacking_ensemble': 'stacking_ensemble'
+                        }
+                        model_label = model_label_map.get(model_type)
+                        
+                        if model_label:
+                            # Load artifact to get normalization parameters
+                            artifact_data, _ = load_model_artifact(dataset_id, model_label)
+                            if artifact_data and 'score_parameters' in artifact_data:
+                                score_params = artifact_data['score_parameters']
+                                if 'score_min_raw' in score_params and 'score_max_raw' in score_params:
+                                    # Use stored normalization parameters (Approach 2)
+                                    scores_array = _normalize_scores_to_range(
+                                        scores_array,
+                                        score_params['score_min_raw'],
+                                        score_params['score_max_raw']
+                                    )
+                                    print(f"[apply_scorecard] Applied normalization using training data range: {score_params['score_min_raw']:.2f} - {score_params['score_max_raw']:.2f}")
+                                else:
+                                    # Fallback: calculate from current data
+                                    score_min_raw = float(np.min(scores_array))
+                                    score_max_raw = float(np.max(scores_array))
+                                    scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
+                                    print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
+                            else:
+                                # No artifact: normalize using current data
+                                score_min_raw = float(np.min(scores_array))
+                                score_max_raw = float(np.max(scores_array))
+                                scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
+                                print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
+                        else:
+                            # Unknown model type: normalize using current data
+                            score_min_raw = float(np.min(scores_array))
+                            score_max_raw = float(np.max(scores_array))
+                            scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
+                            print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
+                    except Exception as norm_err:
+                        print(f"[apply_scorecard] Warning: Normalization failed: {norm_err}, using raw scores")
+                        import traceback
+                        traceback.print_exc()
+                        # Continue with unnormalized scores
+                else:
+                    # Test/evaluation data: use natural score ranges (no normalization)
+                    print(f"[apply_scorecard] Using natural score ranges for {data_source} data (no normalization)")
+                
                 scores = scores_array.astype(float).tolist()
                 
                 print(f"[apply_scorecard] {model_type} scoring - Predictions: {len(y_pred_proba_bad)}, Row IDs: {len(row_ids)}")
                 print(f"[apply_scorecard] {model_type} scoring - Bad probabilities range: {np.min(y_pred_proba_bad):.4f} to {np.max(y_pred_proba_bad):.4f}")
-                print(f"[apply_scorecard] {model_type} scoring - Scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
+                print(f"[apply_scorecard] {model_type} scoring - Scores range (normalized): {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
                 
             except Exception as model_err:
                 print(f"[apply_scorecard] {model_type} model scoring failed: {model_err}")
@@ -15689,6 +16282,7 @@ def apply_scorecard():
         
         elif model_type == 'stacking_ensemble':
             # Stacking ensemble: combine predictions from LR, RF, and XGBoost using meta-learner
+            # XGBOOST-STYLE APPROACH: Filter data FIRST, then predict (ensures perfect alignment)
             try:
                 print(f"[apply_scorecard] Loading stacking ensemble model from artifact")
                 
@@ -15706,101 +16300,149 @@ def apply_scorecard():
                 from sklearn.preprocessing import LabelEncoder
                 from statsmodels.tools.tools import add_constant
                 
-                # Load meta-learner and scaler
+                # Load meta-learner, scaler, and saved base models
                 meta_learner = pickle.loads(artifact_data['meta_learner_bytes'])
                 scaler = pickle.loads(artifact_data['scaler_bytes'])
+                
+                # Try to load saved base models (preferred - ensures consistency with training)
+                if 'lr_model_final_bytes' in artifact_data and 'rf_model_final_bytes' in artifact_data and 'xgb_model_final_bytes' in artifact_data:
+                    print(f"[apply_scorecard] Loading saved base models from artifact (ensures consistency)")
+                    lr_model_final = pickle.loads(artifact_data['lr_model_final_bytes'])
+                    rf_model_final = pickle.loads(artifact_data['rf_model_final_bytes'])
+                    xgb_model_final = pickle.loads(artifact_data['xgb_model_final_bytes'])
+                    use_saved_models = True
+                else:
+                    print(f"[apply_scorecard] WARNING: Saved base models not found, will retrain (may cause inconsistency)")
+                    use_saved_models = False
                 
                 # Get base model configurations
                 base_model_configs = artifact_data.get('base_model_configs', {})
                 selected_vars = artifact_data.get('selected_variables', selected_variables)
                 
-                # Get base model predictions
-                # Note: We need predictions for filtered_df rows only, but we'll generate for all rows and filter
-                # 1. Logistic Regression predictions (on WOE features)
-                print(f"[apply_scorecard] Getting LR predictions for stacking")
-                # Apply WOE to all rows first, then filter
-                X_lr_woe_all = _apply_woe_to_test_data(df, selected_vars, woe_transformed_data, target, dataset_id=dataset_id)
-                X_lr_woe_all = X_lr_woe_all.drop(columns=[target], errors='ignore')
-                X_lr_woe_const_all = add_constant(X_lr_woe_all, has_constant='add')
+                # XGBOOST-STYLE: Filter data FIRST (like XGBoost does)
+                # Remove rows with missing target - use same mask as filtered_df
+                target_series = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
+                valid_mask = target_series.isin([0, 1])
+                df_filtered = df[valid_mask].copy()
+                y_filtered = target_series[valid_mask]
+                row_ids_filtered = np.where(valid_mask)[0].tolist()
                 
-                # Train LR on full training data for predictions (simplified approach)
-                # In production, you'd want to save the base models, but for now we'll use a simplified approach
-                df_train, _, _ = get_train_test_data(dataset_id)
-                if df_train is not None and len(df_train) > 0:
-                    y_train = df_train[target].values
-                    X_train_lr_woe = _apply_woe_to_test_data(df_train, selected_vars, woe_transformed_data, target, dataset_id=dataset_id)
-                    X_train_lr_woe = X_train_lr_woe.drop(columns=[target], errors='ignore')
-                    X_train_lr_woe_const = add_constant(X_train_lr_woe, has_constant='add')
-                    
-                    lr_config = base_model_configs.get('lr', {})
-                    lr_model = SklearnLR(**lr_config)
-                    lr_model.fit(X_train_lr_woe_const, y_train)
-                    lr_pred_all = np.clip(lr_model.predict_proba(X_lr_woe_const_all)[:, 1], 1e-7, 1 - 1e-7)
+                print(f"[apply_scorecard] XGBoost-style filtering: {len(df)} rows -> {len(df_filtered)} valid rows")
+                
+                # Now make predictions ONLY on filtered data (ensures perfect alignment)
+                # 1. Logistic Regression predictions (on WOE features)
+                print(f"[apply_scorecard] Getting LR predictions for stacking (on filtered data)")
+                # Apply WOE to filtered rows only
+                X_lr_woe = _apply_woe_to_test_data(df_filtered, selected_vars, woe_transformed_data, target, dataset_id=dataset_id)
+                X_lr_woe = X_lr_woe.drop(columns=[target], errors='ignore')
+                X_lr_woe_const = add_constant(X_lr_woe, has_constant='add')
+                
+                if use_saved_models:
+                    # Use saved model (ensures consistency with training)
+                    lr_pred = np.clip(lr_model_final.predict_proba(X_lr_woe_const)[:, 1], 1e-7, 1 - 1e-7)
                 else:
-                    return jsonify({"error": "Training data not found for stacking ensemble"}), 400
+                    # Fallback: Retrain model (legacy support)
+                    df_train, _, _ = get_train_test_data(dataset_id)
+                    if df_train is not None and len(df_train) > 0:
+                        y_train = df_train[target].values
+                        X_train_lr_woe = _apply_woe_to_test_data(df_train, selected_vars, woe_transformed_data, target, dataset_id=dataset_id)
+                        X_train_lr_woe = X_train_lr_woe.drop(columns=[target], errors='ignore')
+                        X_train_lr_woe_const = add_constant(X_train_lr_woe, has_constant='add')
+                        lr_config = base_model_configs.get('lr', {})
+                        lr_model = SklearnLR(**lr_config)
+                        lr_model.fit(X_train_lr_woe_const, y_train)
+                        lr_pred = np.clip(lr_model.predict_proba(X_lr_woe_const)[:, 1], 1e-7, 1 - 1e-7)
+                    else:
+                        return jsonify({"error": "Training data not found for stacking ensemble"}), 400
                 
                 # 2. Random Forest predictions (on WOE features)
-                print(f"[apply_scorecard] Getting RF predictions for stacking")
-                X_rf_woe_all = X_lr_woe_all.copy()  # RF uses same WOE features as LR
-                rf_config = base_model_configs.get('rf', {})
-                rf_model = RandomForestClassifier(**rf_config)
-                rf_model.fit(X_train_lr_woe, y_train)
-                rf_pred_all = np.clip(rf_model.predict_proba(X_rf_woe_all)[:, 1], 1e-7, 1 - 1e-7)
+                print(f"[apply_scorecard] Getting RF predictions for stacking (on filtered data)")
+                X_rf_woe = X_lr_woe.copy()  # RF uses same WOE features as LR
+                
+                if use_saved_models:
+                    # Use saved model (ensures consistency with training)
+                    rf_pred = np.clip(rf_model_final.predict_proba(X_rf_woe)[:, 1], 1e-7, 1 - 1e-7)
+                else:
+                    # Fallback: Retrain model (legacy support)
+                    rf_config = base_model_configs.get('rf', {})
+                    rf_model = RandomForestClassifier(**rf_config)
+                    rf_model.fit(X_train_lr_woe, y_train)
+                    rf_pred = np.clip(rf_model.predict_proba(X_rf_woe)[:, 1], 1e-7, 1 - 1e-7)
                 
                 # 3. XGBoost predictions (on raw features)
-                print(f"[apply_scorecard] Getting XGBoost predictions for stacking")
-                df_processed_all, _ = preprocess_dataset(
-                    df,
+                print(f"[apply_scorecard] Getting XGBoost predictions for stacking (on filtered data)")
+                df_processed, _ = preprocess_dataset(
+                    df_filtered,  # Use filtered data
                     target_col=target,
                     preprocessing_steps={
                         'detect_types': True,
                         'handle_missing': True,
                         'remove_duplicates': False,
                         'handle_outliers': False,
-                        'encode_categorical': False
+                        'encode_categorical': True
                     },
                     missing_threshold=0.5,
                     treat_negative_one_as_missing=True
                 )
                 
-                X_xgb_raw_all = df_processed_all[selected_vars].copy()
+                X_xgb_raw = df_processed[selected_vars].copy()
                 # Handle missing values and encoding (same as stacking training)
+                if not use_saved_models:
+                    # Only need df_train for encoding if retraining
+                    df_train, _, _ = get_train_test_data(dataset_id)
+                
                 for col in selected_vars:
-                    if col in X_xgb_raw_all.columns:
-                        if X_xgb_raw_all[col].dtype == 'object' or X_xgb_raw_all[col].dtype.name == 'category':
-                            X_xgb_raw_all[col] = X_xgb_raw_all[col].fillna('__MISSING__')
+                    if col in X_xgb_raw.columns:
+                        if X_xgb_raw[col].dtype == 'object' or X_xgb_raw[col].dtype.name == 'category':
+                            X_xgb_raw[col] = X_xgb_raw[col].fillna('__MISSING__')
                             le = LabelEncoder()
-                            train_unique = df_train[col].astype(str).unique() if col in df_train.columns else []
+                            if use_saved_models:
+                                # For saved models, we need to use the same encoding as training
+                                # Load training data just for encoding reference
+                                df_train_enc, _, _ = get_train_test_data(dataset_id)
+                                train_unique = df_train_enc[col].astype(str).unique() if df_train_enc is not None and col in df_train_enc.columns else []
+                            else:
+                                train_unique = df_train[col].astype(str).unique() if col in df_train.columns else []
                             if len(train_unique) > 0:
                                 le.fit(train_unique)
                                 seen_categories = set(le.classes_)
-                                test_values = X_xgb_raw_all[col].astype(str)
+                                test_values = X_xgb_raw[col].astype(str)
                                 test_unseen_mask = ~test_values.isin(seen_categories)
                                 if test_unseen_mask.any():
                                     if '__MISSING__' in seen_categories:
-                                        X_xgb_raw_all.loc[test_unseen_mask, col] = '__MISSING__'
-                                X_xgb_raw_all[col] = le.transform(X_xgb_raw_all[col].astype(str))
+                                        X_xgb_raw.loc[test_unseen_mask, col] = '__MISSING__'
+                                X_xgb_raw[col] = le.transform(X_xgb_raw[col].astype(str))
                         else:
-                            median_val = df_train[col].median() if col in df_train.columns else 0
-                            X_xgb_raw_all[col].fillna(median_val, inplace=True)
+                            if use_saved_models:
+                                df_train_enc, _, _ = get_train_test_data(dataset_id)
+                                median_val = df_train_enc[col].median() if df_train_enc is not None and col in df_train_enc.columns else 0
+                            else:
+                                median_val = df_train[col].median() if col in df_train.columns else 0
+                            X_xgb_raw[col].fillna(median_val, inplace=True)
                 
-                xgb_config = base_model_configs.get('xgb', {})
-                xgb_model = xgb.XGBClassifier(**xgb_config)
-                xgb_model.fit(df_train[selected_vars], y_train)
-                xgb_pred_all = np.clip(xgb_model.predict_proba(X_xgb_raw_all)[:, 1], 1e-7, 1 - 1e-7)
+                if use_saved_models:
+                    # Use saved model (ensures consistency with training)
+                    xgb_pred = np.clip(xgb_model_final.predict_proba(X_xgb_raw)[:, 1], 1e-7, 1 - 1e-7)
+                else:
+                    # Fallback: Retrain model (legacy support)
+                    xgb_config = base_model_configs.get('xgb', {})
+                    xgb_model = xgb.XGBClassifier(**xgb_config)
+                    xgb_model.fit(df_train[selected_vars], y_train)
+                    xgb_pred = np.clip(xgb_model.predict_proba(X_xgb_raw)[:, 1], 1e-7, 1 - 1e-7)
                 
-                # Filter predictions to match filtered_df (rows with valid target values)
-                # model_df has the same index as df, and filtered_df is model_df[mask]
-                mask = ~model_df[target].isna()
-                lr_pred = lr_pred_all[mask.values] if len(mask) == len(lr_pred_all) else lr_pred_all
-                rf_pred = rf_pred_all[mask.values] if len(mask) == len(rf_pred_all) else rf_pred_all
-                xgb_pred = xgb_pred_all[mask.values] if len(mask) == len(xgb_pred_all) else xgb_pred_all
+                # XGBOOST-STYLE: All predictions are already on filtered data - perfect alignment!
+                # lr_pred, rf_pred, xgb_pred, y_filtered, and row_ids_filtered are all aligned
+                print(f"[apply_scorecard] XGBoost-style alignment: LR={len(lr_pred)}, RF={len(rf_pred)}, XGB={len(xgb_pred)}, y={len(y_filtered)}, row_ids={len(row_ids_filtered)}")
                 
-                # Ensure all predictions have the same length
-                min_len = min(len(lr_pred), len(rf_pred), len(xgb_pred), len(filtered_df))
-                lr_pred = lr_pred[:min_len]
-                rf_pred = rf_pred[:min_len]
-                xgb_pred = xgb_pred[:min_len]
+                # Verify all arrays have same length (they should!)
+                if not (len(lr_pred) == len(rf_pred) == len(xgb_pred) == len(y_filtered) == len(row_ids_filtered)):
+                    min_len = min(len(lr_pred), len(rf_pred), len(xgb_pred), len(y_filtered), len(row_ids_filtered))
+                    print(f"[apply_scorecard] WARNING: Length mismatch detected! Truncating to {min_len}")
+                    lr_pred = lr_pred[:min_len]
+                    rf_pred = rf_pred[:min_len]
+                    xgb_pred = xgb_pred[:min_len]
+                    y_filtered = y_filtered[:min_len]
+                    row_ids_filtered = row_ids_filtered[:min_len]
                 
                 # Combine base model predictions into meta-features
                 def _logit_transform(preds, eps=1e-6):
@@ -15818,19 +16460,107 @@ def apply_scorecard():
                 # Scale meta-features
                 meta_features_scaled = scaler.transform(meta_features_aug)
                 
-                # Get ensemble predictions from meta-learner
-                ensemble_pred = np.clip(meta_learner.predict_proba(meta_features_scaled)[:, 1], 1e-7, 1 - 1e-7)
+                # Get meta-learner predictions
+                meta_learner_pred = np.clip(meta_learner.predict_proba(meta_features_scaled)[:, 1], 1e-7, 1 - 1e-7)
+                
+                # CRITICAL FIX: Use same hybrid approach as training (70% meta-learner + 30% weighted average)
+                # This ensures consistency between training and scoring
+                # Use saved performance weights from training (CRITICAL for consistency!)
+                if 'performance_weights' in artifact_data:
+                    performance_weights = artifact_data['performance_weights']
+                    print(f"[apply_scorecard] Using saved performance weights from training: LR={performance_weights[0]:.3f}, RF={performance_weights[1]:.3f}, XGB={performance_weights[2]:.3f}")
+                else:
+                    # Fallback: Calculate from current data (may cause inconsistency)
+                    print(f"[apply_scorecard] WARNING: Performance weights not found in artifact, calculating from current data (may cause inconsistency)")
+                    base_model_aucs = []
+                    # Use y_filtered (from filtered data) - perfect alignment!
+                    y_values = y_filtered.values if hasattr(y_filtered, 'values') else np.array(y_filtered)
+                    for model_name, test_pred in [('LR', lr_pred), ('RF', rf_pred), ('XGB', xgb_pred)]:
+                        try:
+                            from sklearn.metrics import roc_curve, auc
+                            if len(y_values) == len(test_pred):
+                                fpr_temp, tpr_temp, _ = roc_curve(y_values, test_pred)
+                                auc_temp = auc(fpr_temp, tpr_temp)
+                                base_model_aucs.append(auc_temp)
+                            else:
+                                # Fallback: use equal weights if length mismatch
+                                base_model_aucs.append(0.5)
+                        except Exception as auc_err:
+                            # Fallback: use equal weights if AUC calculation fails
+                            print(f"[apply_scorecard] Warning: Could not calculate AUC for {model_name}: {auc_err}")
+                            base_model_aucs.append(0.5)
+                    
+                    # Normalize AUCs to get weights
+                    total_auc = sum(base_model_aucs) if sum(base_model_aucs) > 0 else 1
+                    performance_weights = [auc / total_auc for auc in base_model_aucs]
+                
+                # Weighted average prediction (same as training)
+                weighted_avg_pred = (
+                    performance_weights[0] * lr_pred + 
+                    performance_weights[1] * rf_pred +
+                    performance_weights[2] * xgb_pred
+                )
+                
+                # Combine meta-learner (70%) with weighted average (30%) - SAME AS TRAINING
+                ensemble_pred = 0.7 * meta_learner_pred + 0.3 * weighted_avg_pred
+                ensemble_pred = np.clip(ensemble_pred, 1e-7, 1 - 1e-7)
+                
+                print(f"[apply_scorecard] Hybrid ensemble: 70% meta-learner + 30% weighted average")
+                print(f"[apply_scorecard] Performance weights: LR={performance_weights[0]:.3f}, RF={performance_weights[1]:.3f}, XGB={performance_weights[2]:.3f}")
                 
                 # Store probabilities for ROC curve
                 probabilities_for_roc = ensemble_pred.copy()
                 
                 # Convert to scores
                 scores_array = _probability_to_score(ensemble_pred, DEFAULT_SCORECARD_CONFIG)
+                
+                # Apply normalization ONLY for training data (Create Ranges)
+                # Test data should use natural score ranges
+                if data_source == 'training':
+                    try:
+                        # Load artifact to get normalization parameters
+                        artifact_data, _ = load_model_artifact(dataset_id, 'stacking_ensemble')
+                        if artifact_data and 'score_parameters' in artifact_data:
+                            score_params = artifact_data['score_parameters']
+                            if 'score_min_raw' in score_params and 'score_max_raw' in score_params:
+                                # Use stored normalization parameters (Approach 2)
+                                scores_array = _normalize_scores_to_range(
+                                    scores_array,
+                                    score_params['score_min_raw'],
+                                    score_params['score_max_raw']
+                                )
+                                print(f"[apply_scorecard] Applied normalization using training data range: {score_params['score_min_raw']:.2f} - {score_params['score_max_raw']:.2f}")
+                            else:
+                                # Fallback: calculate from current data
+                                score_min_raw = float(np.min(scores_array))
+                                score_max_raw = float(np.max(scores_array))
+                                scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
+                                print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
+                        else:
+                            # No artifact: normalize using current data
+                            score_min_raw = float(np.min(scores_array))
+                            score_max_raw = float(np.max(scores_array))
+                            scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
+                            print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
+                    except Exception as norm_err:
+                        print(f"[apply_scorecard] Warning: Normalization failed: {norm_err}, using raw scores")
+                        import traceback
+                        traceback.print_exc()
+                        # Continue with unnormalized scores
+                else:
+                    # Test/evaluation data: use natural score ranges (no normalization)
+                    print(f"[apply_scorecard] Using natural score ranges for {data_source} data (no normalization)")
+                
                 scores = scores_array.astype(float).tolist()
+                
+                # XGBOOST-STYLE: Set variables for result preparation (perfect alignment!)
+                y = y_filtered  # Use filtered y
+                row_ids = row_ids_filtered  # Use filtered row_ids
                 
                 print(f"[apply_scorecard] Stacking ensemble scoring - Predictions: {len(ensemble_pred)}, Row IDs: {len(row_ids)}")
                 print(f"[apply_scorecard] Stacking ensemble scoring - Bad probabilities range: {np.min(ensemble_pred):.4f} to {np.max(ensemble_pred):.4f}")
-                print(f"[apply_scorecard] Stacking ensemble scoring - Scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
+                print(f"[apply_scorecard] Stacking ensemble scoring - Scores range (normalized): {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
+                print(f"[apply_scorecard] XGBoost-style alignment verified: scores={len(scores)}, y={len(y)}, row_ids={len(row_ids)}")
                 
             except Exception as stacking_err:
                 print(f"[apply_scorecard] Stacking ensemble model scoring failed: {stacking_err}")
@@ -15889,6 +16619,16 @@ def apply_scorecard():
             ks_idx = np.argmax(diffs)
             ks_threshold = float(thresholds[ks_idx]) if len(thresholds) > ks_idx else 0.0
             
+            # Build KS curve data
+            ks_curve = []
+            for f, t, th in zip(fpr, tpr, thresholds):
+                ks_curve.append({
+                    'threshold': float(th) if np.isfinite(th) else None,
+                    'tpr': float(t) if np.isfinite(t) else None,
+                    'fpr': float(f) if np.isfinite(f) else None,
+                    'diff': float(abs(t - f)) if np.isfinite(t) and np.isfinite(f) else None
+                })
+            
             print(f"DEBUG: KS Statistic calculated: {ks_stat}, Threshold: {ks_threshold}")
             
             # Debug: Check score distribution by target
@@ -15901,6 +16641,100 @@ def apply_scorecard():
             print(f"DEBUG: KS calculation error: {ks_err}")
             ks_stat = None
             ks_threshold = None
+            ks_curve = []
+
+        # Calculate dynamic risk bands based on score distribution
+        try:
+            scores_array = np.array([r["score"] for r in results_list])
+            targets_array = np.array([r["target"] for r in results_list])
+            
+            score_min = float(np.min(scores_array))
+            score_max = float(np.max(scores_array))
+            score_range = score_max - score_min
+            
+            # Calculate risk bands using percentiles of all scores
+            if len(scores_array) > 0:
+                # Method: Use percentiles to create 5 risk bands
+                # Very High Risk: Bottom 20% of scores (where most bads are)
+                # High Risk: 20-40% of scores
+                # Medium Risk: 40-60% of scores  
+                # Low Risk: 60-80% of scores
+                # Very Low Risk: Top 20% of scores (where most goods are)
+                
+                p20 = float(np.percentile(scores_array, 20))
+                p40 = float(np.percentile(scores_array, 40))
+                p60 = float(np.percentile(scores_array, 60))
+                p80 = float(np.percentile(scores_array, 80))
+                
+                risk_bands = [
+                    {
+                        "label": "Very High Risk",
+                        "description": "Likely bad",
+                        "min": score_min,
+                        "max": p20,
+                        "color": "#da3633"  # Red
+                    },
+                    {
+                        "label": "High Risk",
+                        "description": "",
+                        "min": p20,
+                        "max": p40,
+                        "color": "#ed8936"  # Orange
+                    },
+                    {
+                        "label": "Medium Risk",
+                        "description": "",
+                        "min": p40,
+                        "max": p60,
+                        "color": "#d29922"  # Yellow
+                    },
+                    {
+                        "label": "Low Risk",
+                        "description": "",
+                        "min": p60,
+                        "max": p80,
+                        "color": "#58a6ff"  # Blue
+                    },
+                    {
+                        "label": "Very Low Risk",
+                        "description": "Good customer",
+                        "min": p80,
+                        "max": score_max,
+                        "color": "#2ea043"  # Green
+                    }
+                ]
+                
+                # Calculate bad rates for each band
+                for band in risk_bands:
+                    band_mask = (scores_array >= band["min"]) & (scores_array <= band["max"])
+                    band_scores = scores_array[band_mask]
+                    band_targets = targets_array[band_mask]
+                    band_total = len(band_scores)
+                    band_bads = int(np.sum(band_targets == 1))
+                    band["bad_rate"] = float((band_bads / band_total * 100) if band_total > 0 else 0)
+                    band["count"] = int(band_total)
+                    band["bad_count"] = band_bads
+                    band["good_count"] = int(band_total - band_bads)
+            else:
+                # Fallback: Equal width bands
+                band_width = score_range / 5
+                risk_bands = [
+                    {"label": "Very High Risk", "description": "Likely bad", "min": score_min, "max": score_min + band_width, "color": "#da3633", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
+                    {"label": "High Risk", "description": "", "min": score_min + band_width, "max": score_min + 2*band_width, "color": "#ed8936", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
+                    {"label": "Medium Risk", "description": "", "min": score_min + 2*band_width, "max": score_min + 3*band_width, "color": "#d29922", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
+                    {"label": "Low Risk", "description": "", "min": score_min + 3*band_width, "max": score_min + 4*band_width, "color": "#58a6ff", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
+                    {"label": "Very Low Risk", "description": "Good customer", "min": score_min + 4*band_width, "max": score_max, "color": "#2ea043", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0}
+                ]
+                
+            print(f"DEBUG: Risk bands calculated: {len(risk_bands)} bands")
+            for band in risk_bands:
+                print(f"  {band['label']}: {band['min']:.2f}-{band['max']:.2f}, Bad Rate: {band.get('bad_rate', 0):.2f}%")
+                
+        except Exception as risk_band_err:
+            print(f"DEBUG: Risk band calculation error: {risk_band_err}")
+            import traceback
+            traceback.print_exc()
+            risk_bands = []
 
         # Calculate additional metrics
         try:
@@ -15954,7 +16788,11 @@ def apply_scorecard():
                 "min": float(np.min(scores_np)) if len(scores_np) > 0 else 0,
                 "max": float(np.max(scores_np)) if len(scores_np) > 0 else 0,
                 "mean": float(np.mean(scores_np)) if len(scores_np) > 0 else 0
-            }
+            },
+            "ks_stat": ks_stat if 'ks_stat' in locals() else None,
+            "ks_threshold": ks_threshold if 'ks_threshold' in locals() else None,
+            "ks_curve": ks_curve if 'ks_curve' in locals() else [],
+            "risk_bands": risk_bands if 'risk_bands' in locals() else []
         })
         
     except Exception as e:
@@ -15962,6 +16800,647 @@ def apply_scorecard():
         tb = traceback.format_exc()
         print(f"ERROR in apply_scorecard: {tb}")
         return jsonify({"error": f"Failed to apply score card ({type(e).__name__}): {str(e)}"}), 500
+
+
+# ----------- Predict Credit Score for User-Uploaded Data -----------
+@app.route('/api/predict-credit-score', methods=['POST'])
+def predict_credit_score():
+    """
+    Predict credit scores for user-uploaded CSV data.
+    Supports two methods: 'probability' and 'scorecard'
+    
+    Request body:
+    {
+        "dataset_id": int,
+        "model_type": str,  # 'logistic', 'random_forest', 'xgboost', 'stacking_ensemble'
+        "prediction_method": str,  # 'probability' or 'scorecard'
+        "csv_data": list of dicts,  # Each dict is a row with column names as keys
+        "identifier_column": str  # Column name to use as row identifier
+    }
+    
+    Returns:
+    {
+        "success": bool,
+        "predictions": [
+            {
+                "id": str,
+                "score": float,  # 0-600
+                "probability": float,  # 0-1 (only if method='probability')
+                "risk_band": {
+                    "label": str,
+                    "color": str,
+                    "description": str
+                },
+                ...other row data...
+            }
+        ],
+        "risk_bands": [
+            {
+                "label": str,
+                "min": float,
+                "max": float,
+                "color": str,
+                "description": str
+            }
+        ]
+    }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        dataset_id = data.get('dataset_id') or data.get('recordId') or data.get('record_id')
+        model_type = data.get('model_type', 'logistic')
+        prediction_method = data.get('prediction_method', 'scorecard')  # Default to scorecard
+        csv_data = data.get('csv_data', [])
+        identifier_column = data.get('identifier_column', 'id')
+        
+        # Validate inputs
+        if not dataset_id:
+            return jsonify({"error": "Missing dataset_id"}), 400
+        try:
+            dataset_id = int(dataset_id)
+        except (ValueError, TypeError):
+            return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        if not csv_data or len(csv_data) == 0:
+            return jsonify({"error": "No CSV data provided"}), 400
+        
+        if prediction_method not in ['probability', 'scorecard']:
+            return jsonify({"error": f"Invalid prediction_method: {prediction_method}. Must be 'probability' or 'scorecard'"}), 400
+        
+        # Map frontend model type to backend model label
+        model_label_map = {
+            'logistic': 'LR',
+            'random_forest': 'RandomForest',
+            'xgboost': 'XGBoost',
+            'stacking_ensemble': 'stacking_ensemble'
+        }
+        model_label = model_label_map.get(model_type)
+        if not model_label:
+            return jsonify({"error": f"Invalid model_type: {model_type}"}), 400
+        
+        # Load model artifact
+        artifact_data, artifact_path = load_model_artifact(dataset_id, model_label)
+        if not artifact_data:
+            return jsonify({"error": f"Model artifact not found for dataset {dataset_id}, model {model_label}"}), 404
+        
+        print(f"[PREDICT-CREDIT-SCORE] Loaded artifact: {artifact_path}")
+        print(f"[PREDICT-CREDIT-SCORE] Method: {prediction_method}, Model: {model_label}")
+        
+        # Get model metadata
+        target = artifact_data.get('target', 'loan_status')
+        selected_variables = artifact_data.get('selected_variables', [])
+        woe_transformed_data = artifact_data.get('woe_transformed_data', {})
+        score_parameters = artifact_data.get('score_parameters', {})
+        scorecard_bins = artifact_data.get('scorecard_bins', [])
+        
+        if not selected_variables:
+            return jsonify({"error": "No selected variables found in artifact"}), 400
+        
+        # Convert CSV data to DataFrame
+        df = pd.DataFrame(csv_data)
+        
+        # Validate required columns exist
+        missing_cols = [var for var in selected_variables if var not in df.columns]
+        if missing_cols:
+            return jsonify({"error": f"Missing required columns: {missing_cols}"}), 400
+        
+        # Sanitize data
+        for var in selected_variables:
+            if var in df.columns:
+                df[var] = df[var].replace([np.inf, -np.inf], np.nan)
+                if df[var].isnull().any():
+                    if df[var].dtype.kind in 'biufc':
+                        df[var] = df[var].fillna(df[var].median())
+                    else:
+                        df[var] = df[var].fillna('Missing')
+        
+        # Step 1: Apply same preprocessing as training (without encoding first)
+        print(f"[PREDICT-CREDIT-SCORE] Applying preprocessing (same as training)...")
+        
+        # Get dataset info for target
+        dataset = get_dataset(dataset_id)
+        if dataset:
+            target = dataset.get('target_variable') or target
+        
+        try:
+            df_processed, preprocessing_report = preprocess_dataset(
+                df,
+                target_col=target,
+                preprocessing_steps={
+                    'detect_types': True,
+                    'handle_missing': True,
+                    'remove_duplicates': True,
+                    'handle_outliers': False,  # Same as training
+                    'encode_categorical': False  # Don't encode yet - we'll do it with training encoders
+                },
+                missing_threshold=0.5,
+                treat_negative_one_as_missing=True
+            )
+            print(f"[PREDICT-CREDIT-SCORE] Preprocessing completed. Shape: {df_processed.shape}")
+        except Exception as e:
+            print(f"[PREDICT-CREDIT-SCORE] WARNING: Preprocessing failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            df_processed = df.copy()
+        
+        # Step 2: Load training data and create encoders
+        # LabelEncoder sorts classes alphabetically, so mapping is deterministic regardless of data order
+        df_train, _, _ = get_train_test_data(dataset_id)
+        
+        if df_train is not None:
+            try:
+                df_train_processed, _ = preprocess_dataset(
+                    df_train,
+                    target_col=target,
+                    preprocessing_steps={
+                        'detect_types': True,
+                        'handle_missing': True,
+                        'remove_duplicates': True,
+                        'handle_outliers': False,
+                        'encode_categorical': False  # Don't encode - we'll create encoders manually
+                    },
+                    missing_threshold=0.5,
+                    treat_negative_one_as_missing=True
+                )
+            except Exception as e:
+                print(f"[PREDICT-CREDIT-SCORE] WARNING: Training data preprocessing failed: {str(e)}")
+                df_train_processed = df_train.copy()
+            
+            # Step 3: For each categorical variable, create encoder from training data
+            from sklearn.preprocessing import LabelEncoder
+            
+            for var in selected_variables:
+                if var not in df_processed.columns:
+                    continue
+                
+                # Check if variable is categorical (object/string type)
+                if df_processed[var].dtype == 'object' or df_processed[var].dtype.name == 'category':
+                    # Check if bins have numeric ranges (indicating encoding was done)
+                    var_bins = [b for b in scorecard_bins if b.get('variable') == var]
+                    if var_bins:
+                        first_bin_range = var_bins[0].get('bin_range', '')
+                        range_clean = first_bin_range.replace(',', '').replace(' ', '').strip()
+                        # Check if range is numeric
+                        if range_clean and all(c.isdigit() or c == '-' for c in range_clean.replace(',', '')):
+                            # Need to encode - create encoder from training data
+                            if var in df_train_processed.columns:
+                                # Get training data's unique values
+                                train_col = df_train_processed[var].copy()
+                                train_col = train_col.fillna('__MISSING__')
+                                train_col = train_col.astype(str)
+                                train_unique = train_col.unique()
+                                
+                                # Create encoder and fit on training data
+                                # LabelEncoder sorts classes alphabetically, so mapping is deterministic
+                                le = LabelEncoder()
+                                le.fit(train_unique)
+                                
+                                # Transform user's data with this encoder
+                                test_col = df_processed[var].copy()
+                                test_col = test_col.fillna('__MISSING__')
+                                test_col = test_col.astype(str)
+                                
+                                # Handle unseen categories
+                                unseen_mask = ~test_col.isin(le.classes_)
+                                if unseen_mask.any():
+                                    if '__MISSING__' in le.classes_:
+                                        test_col.loc[unseen_mask] = '__MISSING__'
+                                    else:
+                                        # Use first category from training
+                                        test_col.loc[unseen_mask] = le.classes_[0]
+                                
+                                # Transform using training encoder
+                                df_processed[var] = le.transform(test_col)
+                                
+                                print(f"[PREDICT-CREDIT-SCORE] Encoded variable '{var}': "
+                                      f"{dict(zip(le.classes_, range(len(le.classes_))))} "
+                                      f"({len(le.classes_)} categories)")
+                            else:
+                                print(f"[PREDICT-CREDIT-SCORE] WARNING: Variable '{var}' not in training data, cannot encode")
+        else:
+            print(f"[PREDICT-CREDIT-SCORE] WARNING: Training data not available, cannot recreate encoding")
+        
+        # Use df_processed instead of df for all subsequent operations
+        df = df_processed
+        
+        scores_array = None
+        probabilities_array = None
+        
+        # Method 1: Probability-based prediction
+        if prediction_method == 'probability':
+            print(f"[PREDICT-CREDIT-SCORE] Using probability method")
+            
+            # Load models based on model_type
+            if model_type == 'logistic':
+                # Load LR model
+                if 'lr_model_final_bytes' not in artifact_data:
+                    return jsonify({"error": "LR model not found in artifact"}), 400
+                
+                lr_model = pickle.loads(artifact_data['lr_model_final_bytes'])
+                
+                # Apply WOE transformation
+                from statsmodels.tools.tools import add_constant
+                X_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                X_woe = X_woe.drop(columns=[target], errors='ignore')
+                X_woe_const = add_constant(X_woe, has_constant='add')
+                
+                # Get probabilities
+                probabilities_array = np.clip(lr_model.predict_proba(X_woe_const)[:, 1], 1e-7, 1 - 1e-7)
+                
+            elif model_type == 'random_forest':
+                # Load RF model
+                if 'rf_model_final_bytes' not in artifact_data:
+                    return jsonify({"error": "RF model not found in artifact"}), 400
+                
+                rf_model = pickle.loads(artifact_data['rf_model_final_bytes'])
+                
+                # Apply WOE transformation
+                X_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                X_woe = X_woe.drop(columns=[target], errors='ignore')
+                
+                # Get probabilities
+                probabilities_array = np.clip(rf_model.predict_proba(X_woe)[:, 1], 1e-7, 1 - 1e-7)
+                
+            elif model_type == 'xgboost':
+                # Load XGBoost model
+                if 'xgb_model_final_bytes' not in artifact_data:
+                    return jsonify({"error": "XGBoost model not found in artifact"}), 400
+                
+                xgb_model = pickle.loads(artifact_data['xgb_model_final_bytes'])
+                base_model_configs = artifact_data.get('base_model_configs', {})
+                
+                # Prepare data for XGBoost (no WOE, use raw features)
+                X_xgb = df[selected_variables].copy()
+                
+                # Apply same preprocessing as training (label encoding, missing value handling)
+                from sklearn.preprocessing import LabelEncoder
+                df_train, _, _ = get_train_test_data(dataset_id)
+                
+                for col in selected_variables:
+                    if col in X_xgb.columns:
+                        if X_xgb[col].dtype == 'object' or X_xgb[col].dtype.name == 'category':
+                            le = LabelEncoder()
+                            if df_train is not None and col in df_train.columns:
+                                train_unique = df_train[col].astype(str).unique()
+                                le.fit(train_unique)
+                                test_values = X_xgb[col].astype(str)
+                                unseen_mask = ~test_values.isin(le.classes_)
+                                if unseen_mask.any():
+                                    if '__MISSING__' in le.classes_:
+                                        X_xgb.loc[unseen_mask, col] = '__MISSING__'
+                                    else:
+                                        X_xgb.loc[unseen_mask, col] = le.classes_[0]  # Use first class as default
+                                X_xgb[col] = le.transform(X_xgb[col].astype(str))
+                        else:
+                            if df_train is not None and col in df_train.columns:
+                                median_val = df_train[col].median()
+                            else:
+                                median_val = X_xgb[col].median()
+                            X_xgb[col].fillna(median_val, inplace=True)
+                
+                # Get probabilities
+                probabilities_array = np.clip(xgb_model.predict_proba(X_xgb)[:, 1], 1e-7, 1 - 1e-7)
+                
+            elif model_type == 'stacking_ensemble':
+                # Load stacking ensemble models
+                if 'meta_learner_bytes' not in artifact_data or 'scaler_bytes' not in artifact_data:
+                    return jsonify({"error": "Stacking ensemble models not found in artifact"}), 400
+                
+                meta_learner = pickle.loads(artifact_data['meta_learner_bytes'])
+                scaler = pickle.loads(artifact_data['scaler_bytes'])
+                
+                # Load base models
+                if 'lr_model_final_bytes' not in artifact_data or 'rf_model_final_bytes' not in artifact_data or 'xgb_model_final_bytes' not in artifact_data:
+                    return jsonify({"error": "Base models not found in artifact"}), 400
+                
+                lr_model = pickle.loads(artifact_data['lr_model_final_bytes'])
+                rf_model = pickle.loads(artifact_data['rf_model_final_bytes'])
+                xgb_model = pickle.loads(artifact_data['xgb_model_final_bytes'])
+                
+                # Get base model predictions
+                from statsmodels.tools.tools import add_constant
+                from sklearn.preprocessing import LabelEncoder
+                
+                # LR predictions (WOE)
+                X_lr_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                X_lr_woe = X_lr_woe.drop(columns=[target], errors='ignore')
+                X_lr_woe_const = add_constant(X_lr_woe, has_constant='add')
+                lr_pred = np.clip(lr_model.predict_proba(X_lr_woe_const)[:, 1], 1e-7, 1 - 1e-7)
+                
+                # RF predictions (WOE)
+                X_rf_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                X_rf_woe = X_rf_woe.drop(columns=[target], errors='ignore')
+                rf_pred = np.clip(rf_model.predict_proba(X_rf_woe)[:, 1], 1e-7, 1 - 1e-7)
+                
+                # XGBoost predictions (raw features)
+                X_xgb = df[selected_variables].copy()
+                df_train, _, _ = get_train_test_data(dataset_id)
+                for col in selected_variables:
+                    if col in X_xgb.columns:
+                        if X_xgb[col].dtype == 'object' or X_xgb[col].dtype.name == 'category':
+                            le = LabelEncoder()
+                            if df_train is not None and col in df_train.columns:
+                                train_unique = df_train[col].astype(str).unique()
+                                le.fit(train_unique)
+                                test_values = X_xgb[col].astype(str)
+                                unseen_mask = ~test_values.isin(le.classes_)
+                                if unseen_mask.any():
+                                    if '__MISSING__' in le.classes_:
+                                        X_xgb.loc[unseen_mask, col] = '__MISSING__'
+                                    else:
+                                        X_xgb.loc[unseen_mask, col] = le.classes_[0]
+                                X_xgb[col] = le.transform(X_xgb[col].astype(str))
+                        else:
+                            if df_train is not None and col in df_train.columns:
+                                median_val = df_train[col].median()
+                            else:
+                                median_val = X_xgb[col].median()
+                            X_xgb[col].fillna(median_val, inplace=True)
+                xgb_pred = np.clip(xgb_model.predict_proba(X_xgb)[:, 1], 1e-7, 1 - 1e-7)
+                
+                # Combine base model predictions into meta-features
+                def _logit_transform(preds, eps=1e-6):
+                    clipped = np.clip(preds, eps, 1 - eps)
+                    return np.log(clipped / (1 - clipped))
+                
+                meta_features = np.column_stack([lr_pred, rf_pred, xgb_pred])
+                logit_features = np.column_stack([
+                    _logit_transform(lr_pred),
+                    _logit_transform(rf_pred),
+                    _logit_transform(xgb_pred)
+                ])
+                meta_features_aug = np.hstack([meta_features, logit_features])
+                
+                # Scale meta-features
+                meta_features_scaled = scaler.transform(meta_features_aug)
+                
+                # Get meta-learner predictions
+                meta_learner_pred = np.clip(meta_learner.predict_proba(meta_features_scaled)[:, 1], 1e-7, 1 - 1e-7)
+                
+                # Hybrid ensemble: 70% meta-learner + 30% weighted average
+                if 'performance_weights' in artifact_data:
+                    performance_weights = artifact_data['performance_weights']
+                else:
+                    performance_weights = [1/3, 1/3, 1/3]  # Equal weights fallback
+                
+                weighted_avg_pred = (
+                    performance_weights[0] * lr_pred + 
+                    performance_weights[1] * rf_pred +
+                    performance_weights[2] * xgb_pred
+                )
+                
+                ensemble_pred = 0.7 * meta_learner_pred + 0.3 * weighted_avg_pred
+                probabilities_array = np.clip(ensemble_pred, 1e-7, 1 - 1e-7)
+            
+            # Convert probabilities to scores
+            scores_array = _probability_to_score(probabilities_array, DEFAULT_SCORECARD_CONFIG)
+            
+        # Method 2: Scorecard-based prediction
+        else:  # prediction_method == 'scorecard'
+            print(f"[PREDICT-CREDIT-SCORE] Using scorecard method")
+            
+            if not scorecard_bins:
+                return jsonify({"error": "Scorecard bins not found in artifact. Generate scorecard first."}), 400
+            
+            # Apply WOE transformation
+            X_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+            
+            # Build a lookup dictionary: variable -> list of bins
+            bins_by_variable = {}
+            for bin_data in scorecard_bins:
+                var = bin_data.get('variable')
+                if var not in bins_by_variable:
+                    bins_by_variable[var] = []
+                bins_by_variable[var].append(bin_data)
+            
+            print(f"[PREDICT-CREDIT-SCORE] Built bin lookup: {len(bins_by_variable)} variables with bins")
+            
+            # Calculate scores from scorecard bins
+            scores_list = []
+            debug_first_n_rows = 5  # Debug first 5 rows
+            
+            for idx, row in df.iterrows():
+                total_score = 0.0
+                debug_row = idx < debug_first_n_rows
+                
+                if debug_row:
+                    print(f"\n[PREDICT-CREDIT-SCORE] ========== ROW {idx} CALCULATION ==========")
+                
+                # For each variable, find the matching bin and add its score contribution
+                for var in selected_variables:
+                    if var not in bins_by_variable:
+                        if debug_row:
+                            print(f"[PREDICT-CREDIT-SCORE] Row {idx}, {var}: No bins found")
+                        continue
+                    
+                    woe_col = f'{var}_WOE'
+                    if woe_col not in X_woe.columns:
+                        if debug_row:
+                            print(f"[PREDICT-CREDIT-SCORE] Row {idx}, {var}: WOE column not found")
+                        continue
+                    
+                    woe_value = X_woe.iloc[idx][woe_col]
+                    
+                    if debug_row:
+                        print(f"[PREDICT-CREDIT-SCORE] Row {idx}, {var}: WOE value = {woe_value:.4f}")
+                        print(f"[PREDICT-CREDIT-SCORE] Row {idx}, {var}: Available bins ({len(bins_by_variable[var])}):")
+                    
+                    # Find matching bin by comparing WOE values
+                    matched = False
+                    for bin_idx, bin_data in enumerate(bins_by_variable[var]):
+                        bin_woe = bin_data.get('woe', 0)  # WOE is stored as percentage, same format as woe_value
+                        bin_range = bin_data.get('bin_range', 'N/A')
+                        score_contrib = bin_data.get('score', 0)
+                        diff = abs(woe_value - bin_woe)
+                        
+                        if debug_row:
+                            print(f"  Bin {bin_idx}: range={bin_range}, WOE={bin_woe:.4f}, score={score_contrib:.2f}, diff={diff:.4f}")
+                        
+                        # Check if this row's WOE matches this bin (with tolerance)
+                        if diff < 0.01:  # Small tolerance for floating point
+                            total_score += score_contrib
+                            matched = True
+                            if debug_row:
+                                print(f"  ✓ MATCHED! Adding score contribution: {score_contrib:.2f}")
+                            break
+                    
+                    if not matched:
+                        if debug_row:
+                            print(f"  ✗ NO MATCH found for {var} (WOE={woe_value:.4f})")
+                        elif idx == 0:  # Only log for first row to avoid spam
+                            print(f"[PREDICT-CREDIT-SCORE] Warning: No matching bin found for variable {var}, WOE={woe_value:.4f}")
+                
+                if debug_row:
+                    print(f"[PREDICT-CREDIT-SCORE] Row {idx}: TOTAL SCORE = {total_score:.2f}")
+                    print(f"[PREDICT-CREDIT-SCORE] ==========================================\n")
+                
+                scores_list.append(total_score)
+            
+            scores_array = np.array(scores_list)
+
+            # Add base score components (offset and intercept) to total scores
+            # The scorecard bins store only contributions, so we need to add the base score
+            if score_parameters:
+                factor = score_parameters.get('factor')
+                offset = score_parameters.get('offset', 0)
+                intercept = score_parameters.get('intercept', 0)
+                N = score_parameters.get('n_variables', len(selected_variables))
+                
+                if factor and offset is not None:
+                    # Calculate base score per variable: (offset + intercept_factor) / N
+                    # Since we sum contributions from all N variables, total base = offset + intercept_factor
+                    intercept_factor = intercept * factor if intercept else 0
+                    base_score_total = offset + intercept_factor
+                    
+                    # Add base score to all calculated scores
+                    scores_array = scores_array + base_score_total
+                    
+                    print(f"[PREDICT-CREDIT-SCORE] Added base score components: offset={offset:.4f}, intercept_factor={intercept_factor:.4f}, total_base={base_score_total:.4f}")
+                else:
+                    print(f"[PREDICT-CREDIT-SCORE] Warning: Missing factor or offset in score_parameters, using scores without base adjustment")
+            
+            
+            print(f"[PREDICT-CREDIT-SCORE] Calculated {len(scores_array)} scores, range: {np.min(scores_array):.2f} - {np.max(scores_array):.2f}")
+            
+            # Check if scores were calculated successfully
+            if len(scores_array) == 0 or np.all(scores_array == 0):
+                print(f"[PREDICT-CREDIT-SCORE] Warning: Scorecard method produced no valid scores, falling back to probability method")
+                # Fallback: use probability method
+                if model_type == 'logistic' and 'lr_model_final_bytes' in artifact_data:
+                    from statsmodels.tools.tools import add_constant
+                    lr_model = pickle.loads(artifact_data['lr_model_final_bytes'])
+                    X_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                    X_woe = X_woe.drop(columns=[target], errors='ignore')
+                    X_woe_const = add_constant(X_woe, has_constant='add')
+                    probabilities_array = np.clip(lr_model.predict_proba(X_woe_const)[:, 1], 1e-7, 1 - 1e-7)
+                    scores_array = _probability_to_score(probabilities_array, DEFAULT_SCORECARD_CONFIG)
+                else:
+                    return jsonify({"error": "Scorecard method failed and no fallback available"}), 400
+        
+        # Normalize scores to 0-600 using training data min/max
+        if score_parameters and 'score_min_raw' in score_parameters and 'score_max_raw' in score_parameters:
+            scores_array = _normalize_scores_to_range(
+                scores_array,
+                score_parameters['score_min_raw'],
+                score_parameters['score_max_raw']
+            )
+            print(f"[PREDICT-CREDIT-SCORE] Normalized scores using training data range: {score_parameters['score_min_raw']:.2f} - {score_parameters['score_max_raw']:.2f}")
+        else:
+            # Fallback: normalize using current data min/max
+            score_min_raw = float(np.min(scores_array))
+            score_max_raw = float(np.max(scores_array))
+            scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
+            print(f"[PREDICT-CREDIT-SCORE] Normalized scores using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
+        
+        # Calculate risk bands from score percentiles
+        score_min = float(np.min(scores_array))
+        score_max = float(np.max(scores_array))
+        
+        p20 = float(np.percentile(scores_array, 20))
+        p40 = float(np.percentile(scores_array, 40))
+        p60 = float(np.percentile(scores_array, 60))
+        p80 = float(np.percentile(scores_array, 80))
+        
+        risk_bands = [
+            {
+                "label": "Very High Risk",
+                "description": "Likely bad",
+                "min": score_min,
+                "max": p20,
+                "color": "#da3633"  # Red
+            },
+            {
+                "label": "High Risk",
+                "description": "",
+                "min": p20,
+                "max": p40,
+                "color": "#ed8936"  # Orange
+            },
+            {
+                "label": "Medium Risk",
+                "description": "",
+                "min": p40,
+                "max": p60,
+                "color": "#d29922"  # Yellow
+            },
+            {
+                "label": "Low Risk",
+                "description": "",
+                "min": p60,
+                "max": p80,
+                "color": "#58a6ff"  # Blue
+            },
+            {
+                "label": "Very Low Risk",
+                "description": "Good customer",
+                "min": p80,
+                "max": score_max,
+                "color": "#2ea043"  # Green
+            }
+        ]
+        
+        # Map each score to its risk band
+        def get_risk_band(score):
+            for band in risk_bands:
+                if band["min"] <= score <= band["max"]:
+                    return band
+            # Fallback to last band
+            return risk_bands[-1]
+        
+        # Build predictions list
+        predictions = []
+        for idx, row in df.iterrows():
+            score = float(scores_array[idx])
+            risk_band = get_risk_band(score)
+            
+            prediction = {
+                "id": str(row.get(identifier_column, f"Row_{idx + 1}")),
+                "score": round(score, 2),
+                "risk_band": {
+                    "label": risk_band["label"],
+                    "color": risk_band["color"],
+                    "description": risk_band["description"]
+                }
+            }
+            
+            # Add probability if available
+            if probabilities_array is not None:
+                prediction["probability"] = round(float(probabilities_array[idx]), 4)
+            
+            # Add all original row data
+            for col in df.columns:
+                if col != identifier_column:  # Don't duplicate id
+                    prediction[col] = row[col]
+            
+            predictions.append(prediction)
+        
+        print(f"[PREDICT-CREDIT-SCORE] Generated {len(predictions)} predictions")
+        print(f"[PREDICT-CREDIT-SCORE] Score range: {score_min:.2f} - {score_max:.2f}")
+        
+        return jsonify({
+            "success": True,
+            "predictions": predictions,
+            "risk_bands": risk_bands,
+            "summary": {
+                "total_predictions": len(predictions),
+                "score_range": {
+                    "min": score_min,
+                    "max": score_max,
+                    "mean": float(np.mean(scores_array))
+                },
+                "method": prediction_method,
+                "model_type": model_type
+            }
+        })
+        
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"ERROR in predict_credit_score: {tb}")
+        return jsonify({"error": f"Failed to predict credit scores ({type(e).__name__}): {str(e)}"}), 500
     
     
 def classify_with_heuristics(column_name, samples):

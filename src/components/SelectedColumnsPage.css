@@ -1,7 +1,7 @@
 /* Scorecard loading skeleton styles */
 .scorecard-results-loading {
-  margin-top: 24px;
-  padding: 24px;
+  margin: 0; /* Reduced margins */
+  padding: var(--spacing-sm); /* Reduced padding */
   background: var(--bg-tertiary);
   border-radius: var(--radius-large);
   box-shadow: var(--shadow-modern);
@@ -10,7 +10,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin-top: 16px;
+  margin-top: 0; /* Remove top margin */
 }
 .skeleton-header {
   height: 32px;
@@ -471,9 +471,12 @@ h4 { font-size: 0.95rem; }
 .content-section:has(.scorecard-container) {
   max-height: calc(100vh - 180px); /* Standardized to match other sections */
   height: calc(100vh - 180px);
-  overflow-y: auto;
+  overflow-y: hidden; /* Container doesn't scroll, inner boxes do */
   overflow-x: hidden;
+  padding: var(--spacing-sm);
   padding-bottom: 8px; /* Minimal consistent bottom padding */
+  display: flex;
+  flex-direction: column;
 }
 
 .preprocessing-step {
@@ -1231,10 +1234,284 @@ tr[style*="21262d"]:hover {
   box-sizing: border-box;
 }
 
+/* Scorecard Container - Three Column Layout */
+.scorecard-container {
+  display: flex;
+  gap: var(--spacing-md);
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+/* Left Box: Score Card (wider, scrollable) */
+.scorecard-left-box {
+  flex: 2; /* Takes 2/3 of the space (wider) */
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-large);
+  padding: var(--spacing-sm); /* Reduced padding like binning section */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
+  min-width: 0; /* Allow flex item to shrink */
+}
+
+.scorecard-left-box .scorecard-results {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  margin: 0; /* Remove margins */
+}
+
+/* Middle Box: Controls, Risk Scale, KS Chart */
+.scorecard-middle-box {
+  flex: 1; /* Takes 1/3 of the space */
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-large);
+  padding: var(--spacing-sm); /* Reduced padding like binning section */
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Right Box: Score Target Mapping (narrower) */
+.scorecard-right-box {
+  flex: 1; /* Takes 1/3 of the space (narrower) */
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-large);
+  padding: var(--spacing-sm); /* Reduced padding like binning section */
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
 .scorecard-controls {
   display: flex;
+  flex-direction: row;
+  gap: var(--spacing-xs); /* Reduced gap */
+  margin: 0; /* Push to top, no margin */
+  margin-bottom: var(--spacing-sm);
+  border-top: none; /* Remove border above buttons */
+  padding-top: 0; /* Remove any top padding */
+}
+
+.scorecard-controls .scorecard-btn-small {
+  flex: 1;
+  padding: 0.4rem 0.75rem; /* Smaller padding */
+  font-size: 12px; /* Smaller font */
+  font-weight: 500;
+}
+
+/* Scrollable scorecard table */
+.scorecard-scrollable {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+  margin-top: 0; /* Remove top margin */
+  min-height: 0;
+}
+
+/* Scrollable test results */
+.scorecard-test-scrollable {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+  margin-top: 0;
+  min-height: 0;
+}
+
+.scorecard-test-results {
+  margin: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.scorecard-test-results h5 {
+  display: none; /* Hide the heading */
+}
+
+/* Risk Scale Styles */
+.scorecard-risk-scale {
+  margin-top: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  background: var(--bg-quaternary);
+  border-radius: var(--radius-medium);
+  border: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.scorecard-risk-scale h5 {
+  margin-bottom: var(--spacing-xs);
+  margin-top: 0;
+  font-size: 13px;
+  color: var(--fg-primary);
+}
+
+.risk-bands-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.risk-band-item {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-small);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.risk-band-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-weight: 600;
+}
+
+.risk-band-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.risk-band-desc {
+  font-size: 11px;
+  color: var(--fg-secondary);
+  font-style: italic;
+}
+
+.risk-band-range {
+  font-size: 11px;
+  color: var(--fg-primary);
+  font-family: monospace;
+  font-weight: 500;
+}
+
+.risk-band-stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--fg-tertiary);
+  margin-top: 0.25rem;
+}
+
+.scorecard-ks-chart {
+  margin-top: 0;
+  padding: var(--spacing-xs);
+  background: var(--bg-quaternary);
+  border-radius: var(--radius-medium);
+  border: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.ks-chart-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.ks-chart-container h5 {
+  margin-bottom: var(--spacing-xs);
+  margin-top: 0;
+}
+
+.ks-graph-wrapper {
+  display: flex;
   justify-content: center;
-  margin-bottom: var(--spacing-md);
+  align-items: center;
+  width: 100%;
+}
+
+.ks-chart-container .roc-svg {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-small);
+  width: 100%;
+  max-width: 420px;
+  height: auto;
+  min-height: 200px;
+}
+
+/* Responsive adjustments for KS chart */
+@media (max-width: 1400px) {
+  .ks-chart-container .roc-svg {
+    max-width: 100%;
+    min-height: 180px;
+  }
+  
+  .scorecard-ks-chart {
+    padding: var(--spacing-xs);
+  }
+  
+  .ks-chart-container h5 {
+    font-size: 12px;
+    margin-bottom: var(--spacing-xs);
+  }
+  
+  .ks-threshold-block {
+    min-width: 80px;
+    height: 240px;
+    padding: var(--spacing-xs);
+  }
+  
+  .ks-threshold-value {
+    font-size: 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  .ks-chart-container h5 {
+    font-size: 11px;
+    margin-bottom: 0.5rem;
+  }
+  
+  .scorecard-ks-chart {
+    padding: 0.5rem;
+  }
+  
+  .ks-chart-container .roc-svg {
+    min-height: 160px;
+  }
+  
+  .ks-chart-layout {
+    flex-direction: column;
+    gap: var(--spacing-xs);
+  }
+  
+  .ks-threshold-block {
+    width: 100%;
+    height: auto;
+    min-height: 60px;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--spacing-xs);
+  }
+  
+  .ks-threshold-label {
+    margin-bottom: 0;
+    margin-right: var(--spacing-xs);
+  }
+  
+  .ks-threshold-value {
+    font-size: 16px;
+  }
+  
+  .ks-graph-wrapper {
+    justify-content: center;
+  }
 }
 
 .scorecard-summary {
@@ -1251,30 +1528,39 @@ tr[style*="21262d"]:hover {
   font-size: 13px;
 }
 
-.score-parameters {
-  margin-top: var(--spacing-md);
-  padding: var(--spacing-md);
-  background: var(--bg-quaternary);
-  border-radius: var(--radius-medium);
-  border: 1px solid var(--border-primary);
-}
-
-.parameters-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: var(--spacing-sm);
-}
-
-.parameter-item {
+/* Score Card Parameters - Individual Boxes */
+.scorecard-parameters-boxes {
   display: flex;
-  justify-content: space-between;
-  padding: var(--spacing-xs) 0;
-  border-bottom: 1px solid var(--border-secondary);
+  flex-direction: row;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-sm);
+  flex-wrap: wrap;
 }
 
-.parameter-item label {
+.parameter-box {
+  background: var(--bg-quaternary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-medium);
+  padding: 0.5rem 0.75rem; /* Smaller padding */
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1;
+  min-width: 120px; /* Minimum width for each box */
+}
+
+.parameter-label {
+  font-size: 10px;
+  color: var(--fg-tertiary);
   font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.parameter-value {
+  font-size: 12px;
   color: var(--fg-primary);
+  font-weight: 600;
 }
 
 .parameter-item span {
