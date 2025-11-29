@@ -12,11 +12,12 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 1,
-      text: 'Hello! I\'m your AI assistant. How can I help you with credit scoring today?',
+      text: "Hello! I'm your AI assistant. How can I help you with credit scoring today?",
       sender: 'ai',
       timestamp: new Date()
     }
   ]);
+
   const [inputText, setInputText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -28,7 +29,18 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
     scrollToBottom();
   }, [messages]);
 
-  const handleSend = () => {
+  // Helper function to convert newlines and markdown-like headings into HTML
+  const formatAIMessage = (text: string) => {
+    // Replace headings (e.g., **Heading**) with bold div
+    let formatted = text
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n- /g, '<br>• ')
+      .replace(/\n/g, '<br>');
+
+    return formatted;
+  };
+
+  const handleSend = async () => {
     if (!inputText.trim()) return;
 
     const userMessage: Message = {
@@ -39,18 +51,37 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
     };
 
     setMessages(prev => [...prev, userMessage]);
+    const userText = inputText;
     setInputText('');
 
-    // Dummy AI response
-    setTimeout(() => {
+    try {
+      const res = await fetch("http://127.0.0.1:5000/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userText })
+      });
+
+      const data = await res.json();
+
       const aiMessage: Message = {
         id: messages.length + 2,
-        text: 'Thank you for your message. This is a dummy response. The AI engine will be integrated soon.',
+        text: data.reply || "AI did not respond.",
         sender: 'ai',
         timestamp: new Date()
       };
+
       setMessages(prev => [...prev, aiMessage]);
-    }, 1000);
+
+    } catch (error) {
+      const errorMessage: Message = {
+        id: messages.length + 2,
+        text: "⚠️ Error connecting to AI backend.",
+        sender: 'ai',
+        timestamp: new Date()
+      };
+
+      setMessages(prev => [...prev, errorMessage]);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -65,6 +96,8 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
   return (
     <div className="chat-overlay" onClick={onClose}>
       <div className="chat-container" onClick={(e) => e.stopPropagation()}>
+
+        {/* HEADER */}
         <div className="chat-header">
           <div className="chat-header-info">
             <div className="chat-ai-avatar">
@@ -76,7 +109,7 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
             </div>
             <div>
               <div className="chat-header-title">AI Assistant</div>
-              <div className="chat-header-subtitle">Powered by Generative AI</div>
+              <div className="chat-header-subtitle"></div>
             </div>
           </div>
           <button className="chat-close-btn" onClick={onClose}>
@@ -86,11 +119,16 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
             </svg>
           </button>
         </div>
+
+        {/* MESSAGES */}
         <div className="chat-messages">
           {messages.map((message) => (
             <div key={message.id} className={`chat-message ${message.sender}`}>
-              <div className="chat-message-content">
-                {message.text}
+              <div
+                className="chat-message-content"
+                dangerouslySetInnerHTML={message.sender === 'ai' ? { __html: formatAIMessage(message.text) } : undefined}
+              >
+                {message.sender === 'user' ? message.text : null}
               </div>
               <div className="chat-message-time">
                 {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -99,6 +137,8 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
           ))}
           <div ref={messagesEndRef} />
         </div>
+
+        {/* INPUT BOX */}
         <div className="chat-input-container">
           <input
             type="text"
@@ -122,4 +162,3 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
 };
 
 export default ChatOverlay;
-

@@ -439,6 +439,44 @@ h4 { font-size: 0.95rem; }
   height: 100%;
 }
 
+/* AI Classification Loading Overlay */
+.column-selection-step .loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(1, 4, 9, 0.92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.column-selection-step .loading-spinner {
+  width: 56px;
+  height: 56px;
+  border: 4px solid var(--border-primary);
+  border-top: 4px solid var(--fg-accent-green);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: var(--spacing-lg);
+}
+
+.column-selection-step .loading-overlay p {
+  font-size: 16px;
+  color: var(--fg-primary);
+  font-weight: 500;
+  margin-top: var(--spacing-md);
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
 .content-section:has(.column-selection-step) {
   max-height: calc(100vh - 180px); /* Standardized to match other sections */
   overflow-y: hidden;

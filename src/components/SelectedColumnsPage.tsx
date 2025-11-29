@@ -340,6 +340,7 @@ const SelectedColumnsPage = () => {
   const [loadingColumns] = useState<Set<string>>(new Set());
   const [isLoadingCoarseBins, setIsLoadingCoarseBins] = useState(false);
   const [isLoadingAllAutoMonotonic, setIsLoadingAllAutoMonotonic] = useState(false);
+  const [isLoadingAIClassification, setIsLoadingAIClassification] = useState(false);
   const updateLocalWoeState = useCallback(
     (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
       if (!payload) {
@@ -3466,9 +3467,16 @@ const SelectedColumnsPage = () => {
             {/* Step 0: Classification */}
             {currentStep === 0 && (
               <div className="column-selection-step" style={{ width: '100%' }}>
-                <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginTop: '24px', marginBottom: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginTop: '24px', marginBottom: '16px', position: 'relative' }}>
+                  {isLoadingAIClassification && (
+                    <div className="loading-overlay">
+                      <div className="loading-spinner"></div>
+                      <p>Running AI classification...</p>
+                    </div>
+                  )}
                   <button
                     className="progress-action-btn"
+                    disabled={isLoadingAIClassification}
                     onClick={async () => {
                       try {
                         const colsToClassify = columns;
@@ -3477,7 +3485,7 @@ const SelectedColumnsPage = () => {
                           return;
                         }
 
-                        alert(`Starting AI classification for ${colsToClassify.length} columns...`);
+                        setIsLoadingAIClassification(true);
 
                         let sampleData: Record<string, any[]> = {};
                         try {
@@ -3521,10 +3529,12 @@ const SelectedColumnsPage = () => {
                         }
                       } catch (e) {
                         alert('AI classification failed. See console for details.');
+                      } finally {
+                        setIsLoadingAIClassification(false);
                       }
                     }}
                   >
-                    <span className="btn-text">AI Enabled Classification of Discrete and Continuous</span>
+                    <span className="btn-text">{isLoadingAIClassification ? 'Classifying...' : 'AI Recommendation on Classification of Discrete and Continuous'}</span>
                   </button>
                 </div>
                 <div style={{ width: '100%', flex: 1, display: 'flex', flexDirection: 'column' }}>
