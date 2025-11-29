@@ -4,6 +4,10 @@
  * This file contains all configuration constants that should be changed in one place.
  */
 
+// API Configuration
+// ===============================
+export const API_BASE_URL = 'http://localhost:5000';
+
 // Train/Test Split Configuration
 // ===============================
 // Default test size for train/test split (0.2 = 20% test, 80% train)

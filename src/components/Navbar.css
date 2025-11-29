@@ -161,3 +161,125 @@
 .developer-mode-container:hover {
   border-color: var(--fg-accent-green);
 }
+
+/* User Menu Styles */
+.navbar-user-container {
+  position: relative;
+}
+
+.navbar-user-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-medium);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all var(--duration-fast) var(--transition-smooth);
+}
+
+.navbar-user-btn:hover {
+  background: var(--bg-quaternary);
+  border-color: var(--fg-accent-green);
+  color: var(--fg-primary);
+}
+
+.navbar-user-avatar {
+  width: 28px;
+  height: 28px;
+  background: var(--fg-accent-green);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--fg-primary);
+}
+
+.navbar-user-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navbar-user-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-medium);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  animation: slideDown 0.15s var(--transition-smooth);
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.navbar-user-menu-header {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.navbar-user-menu-name {
+  font-weight: 600;
+  color: var(--fg-primary);
+  font-size: 14px;
+}
+
+.navbar-user-menu-email {
+  font-size: 12px;
+  color: var(--fg-tertiary);
+}
+
+.navbar-user-menu-divider {
+  height: 1px;
+  background: var(--border-primary);
+  margin: 0;
+}
+
+.navbar-user-menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--transition-smooth);
+  text-align: left;
+}
+
+.navbar-user-menu-item:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.navbar-user-menu-item svg {
+  opacity: 0.7;
+}
+
+.navbar-user-menu-item:hover svg {
+  opacity: 1;
+}

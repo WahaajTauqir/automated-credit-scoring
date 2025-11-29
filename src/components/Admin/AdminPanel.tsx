@@ -11,10 +11,12 @@ const AdminPanel: React.FC = () => {
 
   useEffect(() => {
     setLoading(true);
-    fetch('http://localhost:5000/api/records')
+    const token = localStorage.getItem('credit_scoring_auth_token');
+    const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+    fetch('http://localhost:5000/api/records', { headers })
       .then(res => res.json())
       .then(data => {
-        setRecords(data);
+        setRecords(Array.isArray(data) ? data : []);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -23,8 +25,10 @@ const AdminPanel: React.FC = () => {
   // When view is clicked, fetch the full record and navigate to selected columns page with state
   const handleView = async (id: number) => {
     try {
-      // Fetch the record
-      const res = await fetch(`http://localhost:5000/api/record/${id}`);
+      // Fetch the record with auth token
+      const token = localStorage.getItem('credit_scoring_auth_token');
+      const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+      const res = await fetch(`http://localhost:5000/api/record/${id}`, { headers });
       const data = await res.json();
       
       console.log('📊 Loaded record:', data);
@@ -77,7 +81,9 @@ const AdminPanel: React.FC = () => {
   // Delete record
   const handleDelete = (id: number) => {
     if (!window.confirm('Are you sure you want to delete this record?')) return;
-    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE' })
+    const token = localStorage.getItem('credit_scoring_auth_token');
+    const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE', headers })
       .then(res => {
         if (res.ok) {
           setRecords(records => records.filter(r => r.id !== id));

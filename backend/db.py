@@ -96,6 +96,146 @@ def init_db():
     # Note: Schema should be created using validate_and_migrate_schema.py
     pass
 
+
+# =====================================================
+# USER AUTHENTICATION OPERATIONS
+# =====================================================
+
+def ensure_users_table():
+    """Ensure the users table exists with all required columns."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        # Create table if not exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                name VARCHAR(255) NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                is_active BOOLEAN DEFAULT TRUE,
+                last_login TIMESTAMP
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);")
+        
+        # Check if name column exists (for existing tables that might be missing it)
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='users' AND column_name='name'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE users ADD COLUMN name VARCHAR(255) NOT NULL DEFAULT ''")
+            print("[DB] Added missing 'name' column to users table")
+        
+        conn.commit()
+        print("[DB] Users table ensured")
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Error ensuring users table: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+
+def ensure_user_id_column():
+    """Ensure the user_id column exists in the records table."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='records' AND column_name='user_id'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE records ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_records_user_id ON records(user_id)")
+            conn.commit()
+            print("[DB] Added user_id column to records table")
+        else:
+            print("[DB] user_id column already exists in records")
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Error ensuring user_id column: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+
+def create_user(email: str, password_hash: str, name: str) -> Optional[int]:
+    """
+    Create a new user.
+    
+    Returns:
+        int: The ID of the created user, or None if email already exists
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO users (email, password_hash, name)
+            VALUES (%s, %s, %s)
+            RETURNING id;
+        """, (email, password_hash, name))
+        user_id = cur.fetchone()[0]
+        conn.commit()
+        return user_id
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Error creating user: {e}")
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_user_by_email(email: str) -> Optional[Dict]:
+    """Get a user by email address."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
+        return dict(user) if user else None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_user_by_id(user_id: int) -> Optional[Dict]:
+    """Get a user by ID."""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT id, email, name, created_at, is_active, last_login FROM users WHERE id = %s", (user_id,))
+        user = cur.fetchone()
+        return dict(user) if user else None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def update_user_last_login(user_id: int) -> bool:
+    """Update the last_login timestamp for a user."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE users SET last_login = NOW() WHERE id = %s", (user_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Error updating last login: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+
 def ensure_final_selected_column():
     """Ensure the final_selected column exists in the features table."""
     conn = get_db_connection()
@@ -222,9 +362,10 @@ def sync_model_ready_to_final_selected(dataset_id: int) -> bool:
 # DATASET OPERATIONS
 # =====================================================
 
-def create_dataset(name: str, file_path: str, total_features: int,
-                  discrete_features: int, continuous_features: int,
-                  target_variable: str, identifier: Optional[str] = None) -> int:
+def create_dataset(name: str, file_path: str = '', total_features: int = 0,
+                  discrete_features: int = 0, continuous_features: int = 0,
+                  target_variable: str = '', identifier: Optional[str] = None,
+                  user_id: Optional[int] = None) -> int:
     """
     Create a new dataset record.
     
@@ -236,10 +377,10 @@ def create_dataset(name: str, file_path: str, total_features: int,
     
     cur.execute("""
         INSERT INTO records (name, file_path, total_features, discrete_features, 
-                            continuous_features, target_variable, identifier)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            continuous_features, target_variable, identifier, user_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
-    """, (name, file_path, total_features, discrete_features, continuous_features, target_variable, identifier))
+    """, (name, file_path, total_features, discrete_features, continuous_features, target_variable, identifier, user_id))
     
     dataset_id = cur.fetchone()[0]
     conn.commit()
@@ -263,12 +404,15 @@ def get_dataset(dataset_id: int) -> Optional[Dict]:
     return dict(dataset) if dataset else None
 
 
-def get_all_datasets() -> List[Dict]:
-    """Get all datasets."""
+def get_all_datasets(user_id: Optional[int] = None) -> List[Dict]:
+    """Get all datasets, optionally filtered by user."""
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    cur.execute("SELECT * FROM records ORDER BY created_at DESC")
+    if user_id is not None:
+        cur.execute("SELECT * FROM records WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+    else:
+        cur.execute("SELECT * FROM records ORDER BY created_at DESC")
     datasets = cur.fetchall()
     
     cur.close()
@@ -277,15 +421,19 @@ def get_all_datasets() -> List[Dict]:
     return [dict(d) for d in datasets]
 
 
-def get_all_datasets_with_features() -> List[Dict]:
+def get_all_datasets_with_features(user_id: Optional[int] = None) -> List[Dict]:
     """
     Return all datasets with their feature lists attached using a small,
     fixed number of queries (no per-dataset round trips).
+    Optionally filtered by user_id.
     """
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    cur.execute("SELECT * FROM records ORDER BY created_at DESC")
+    if user_id is not None:
+        cur.execute("SELECT * FROM records WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+    else:
+        cur.execute("SELECT * FROM records ORDER BY created_at DESC")
     datasets = [dict(row) for row in cur.fetchall()]
     dataset_ids = [d['id'] for d in datasets]
     features_by_dataset: Dict[int, List[Dict]] = {d['id']: [] for d in datasets}
@@ -311,12 +459,31 @@ def get_all_datasets_with_features() -> List[Dict]:
     return datasets
 
 
-def get_latest_dataset() -> Optional[Dict]:
-    """Get the most recently created dataset."""
+def user_owns_dataset(user_id: int, dataset_id: int) -> bool:
+    """Check if a user owns a specific dataset."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT user_id FROM records WHERE id = %s", (dataset_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        # If user_id is NULL in DB, allow access (legacy data)
+        return row[0] is None or row[0] == user_id
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_latest_dataset(user_id: int = None) -> Optional[Dict]:
+    """Get the most recently created dataset, optionally filtered by user."""
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    cur.execute("SELECT * FROM records ORDER BY created_at DESC LIMIT 1")
+    if user_id:
+        cur.execute("SELECT * FROM records WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
+    else:
+        cur.execute("SELECT * FROM records ORDER BY created_at DESC LIMIT 1")
     dataset = cur.fetchone()
     
     cur.close()

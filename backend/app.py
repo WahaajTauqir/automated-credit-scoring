@@ -34,9 +34,17 @@ from dotenv import load_dotenv
 # Import XGBoost raw training module
 from xgboost_raw_training import train_xgboost_on_raw_features, apply_xgboost_scorecard
 
+# Import authentication module
+from auth import (
+    hash_password, verify_password, generate_token, decode_token,
+    login_required, optional_auth, get_current_user_id
+)
+
 # Import ONLY new database layer functions - NO MORE db_old imports!
 from db import (
     get_db_connection, init_db, ensure_final_selected_column, ensure_model_ready_column, ensure_dataset_identifier_column, sync_model_ready_to_final_selected,
+    # User operations
+    ensure_users_table, ensure_user_id_column, create_user, get_user_by_email, get_user_by_id, update_user_last_login, user_owns_dataset,
     # Dataset operations
     create_dataset, get_dataset, get_all_datasets, get_all_datasets_with_features,
     get_latest_dataset, update_dataset, delete_dataset,
@@ -97,6 +105,9 @@ try:
     ensure_final_selected_column()
     ensure_model_ready_column()
     ensure_dataset_identifier_column()
+    # Ensure user authentication tables exist
+    ensure_users_table()
+    ensure_user_id_column()
 except Exception as e:
     print(f"[APP] Warning: Could not ensure required columns: {e}")
 
@@ -1763,6 +1774,7 @@ def clear_preprocessed_data_cache(dataset_id: int = None, stage: str = None):
 # =============================================================================
 
 @app.route('/api/preprocessing-steps-detailed', methods=['POST'])
+@optional_auth
 def preprocessing_steps_detailed():
     """
     Returns detailed information about each preprocessing step for visualization.
@@ -1778,6 +1790,11 @@ def preprocessing_steps_detailed():
         
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, int(dataset_id)):
+            return jsonify({"error": "Access denied"}), 403
         
         # Load dataset
         artifact_payload = None
@@ -2117,6 +2134,7 @@ def preprocessing_steps_detailed():
         return jsonify({"error": f"Preprocessing visualization failed: {str(e)}"}), 500
 
 @app.route('/api/preprocessing-column-changes', methods=['POST'])
+@optional_auth
 def preprocessing_column_changes():
     """
     Returns detailed column-level changes for the preprocessing preview.
@@ -2130,6 +2148,11 @@ def preprocessing_column_changes():
         
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, int(dataset_id)):
+            return jsonify({"error": "Access denied"}), 403
         
         # Load TRAIN dataset explicitly for preprocessing
         try:
@@ -2424,6 +2447,7 @@ def preprocessing_column_changes():
         return jsonify({"error": f"Column changes analysis failed: {str(e)}"}), 500
 
 @app.route('/api/preprocessing-step-preview', methods=['POST'])
+@optional_auth
 def preprocessing_step_preview():
     """
     Preview individual preprocessing steps with before/after comparison.
@@ -2436,6 +2460,11 @@ def preprocessing_step_preview():
         
         if not dataset_id or not step_name:
             return jsonify({"error": "Missing dataset_id or step_name"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, int(dataset_id)):
+            return jsonify({"error": "Access denied"}), 403
         
         # Load dataset
         try:
@@ -2704,6 +2733,7 @@ def dataset_quality_metrics():
         return jsonify({"error": f"Quality metrics calculation failed: {str(e)}"}), 500
     
 @app.route('/api/preprocess-dataset', methods=['POST'])
+@optional_auth
 def preprocess_dataset_api():
     """
     Main preprocessing endpoint that applies preprocessing and creates a new dataset.
@@ -2724,6 +2754,11 @@ def preprocess_dataset_api():
         
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, int(dataset_id)):
+            return jsonify({"error": "Access denied"}), 403
         
         # Load TRAIN dataset explicitly for preprocessing
         try:
@@ -2912,6 +2947,135 @@ def db_health():
                 "port": os.getenv('PG_PORT')
             }
         }), 500
+
+
+# =====================================================
+# AUTHENTICATION ROUTES
+# =====================================================
+
+@app.route('/api/auth/signup', methods=['POST'])
+def signup():
+    """Register a new user."""
+    try:
+        data = request.get_json()
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        name = data.get('name', '').strip()
+        
+        # Validation
+        if not email or not password or not name:
+            return jsonify({'error': 'Email, password, and name are required'}), 400
+        
+        if len(password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
+        
+        # Check if email already exists
+        existing_user = get_user_by_email(email)
+        if existing_user:
+            return jsonify({'error': 'Email already registered'}), 409
+        
+        # Create user
+        password_hashed = hash_password(password)
+        user_id = create_user(email, password_hashed, name)
+        
+        if not user_id:
+            return jsonify({'error': 'Failed to create user'}), 500
+        
+        # Generate token
+        token = generate_token(user_id, email)
+        
+        return jsonify({
+            'message': 'User created successfully',
+            'token': token,
+            'user': {
+                'id': user_id,
+                'email': email,
+                'name': name
+            }
+        }), 201
+        
+    except Exception as e:
+        logging.exception("Signup error")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """Authenticate user and return JWT token."""
+    try:
+        data = request.get_json()
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        
+        if not email or not password:
+            return jsonify({'error': 'Email and password are required'}), 400
+        
+        # Get user
+        user = get_user_by_email(email)
+        if not user:
+            return jsonify({'error': 'Invalid email or password'}), 401
+        
+        # Verify password
+        if not verify_password(password, user['password_hash']):
+            return jsonify({'error': 'Invalid email or password'}), 401
+        
+        # Check if user is active
+        if not user.get('is_active', True):
+            return jsonify({'error': 'Account is deactivated'}), 403
+        
+        # Update last login
+        update_user_last_login(user['id'])
+        
+        # Generate token
+        token = generate_token(user['id'], email)
+        
+        return jsonify({
+            'message': 'Login successful',
+            'token': token,
+            'user': {
+                'id': user['id'],
+                'email': user['email'],
+                'name': user['name']
+            }
+        })
+        
+    except Exception as e:
+        logging.exception("Login error")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auth/me', methods=['GET'])
+@login_required
+def get_current_user():
+    """Get the current authenticated user's info."""
+    try:
+        user_id = get_current_user_id()
+        user = get_user_by_id(user_id)
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        return jsonify({
+            'user': {
+                'id': user['id'],
+                'email': user['email'],
+                'name': user['name'],
+                'created_at': str(user.get('created_at', '')),
+                'last_login': str(user.get('last_login', ''))
+            }
+        })
+        
+    except Exception as e:
+        logging.exception("Get current user error")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auth/verify', methods=['GET'])
+@login_required
+def verify_token():
+    """Verify if the token is valid."""
+    return jsonify({'valid': True, 'user_id': get_current_user_id()})
+
 
 # ----------- Missing Values Diagnostic -----------
 def _run_missing_values_diagnostic(dataset_id, selected_variables=None):
@@ -3880,12 +4044,15 @@ def _run_model_performance_diagnostic(dataset_id, selected_variables=None):
 
 # ----------- Upload CSV -----------
 @app.route('/api/upload-csv', methods=['POST'])
+@login_required
 def upload_csv():
     """
     Handles CSV file uploads, saves the file, creates dataset and feature records.
     Returns dataset_id and column information.
     Optimized to save file directly and read only header for column names.
+    Requires authentication - user must be logged in to upload files.
     """
+    user_id = get_current_user_id()
     if 'file' not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
     file = request.files['file']
@@ -3987,7 +4154,8 @@ def upload_csv():
                 total_features=len(columns),
                 discrete_features=0,  # Will be updated after classification
                 continuous_features=0,  # Will be updated after classification
-                target_variable=None  # Will be updated when target is selected
+                target_variable=None,  # Will be updated when target is selected
+                user_id=user_id  # Associate with authenticated user
             )
             
             # Create feature records for all columns (initially unclassified)
@@ -4017,6 +4185,7 @@ def upload_csv():
 
 # ----------- Target Distribution -----------
 @app.route('/api/target-distribution', methods=['POST'])
+@optional_auth
 def target_distribution():
     """
     Computes and returns the value counts for a specified target column.
@@ -4031,6 +4200,11 @@ def target_distribution():
             or data.get('recordId')
             or data.get('datasetId')
         )
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and dataset_id and not user_owns_dataset(user_id, int(dataset_id)):
+            return jsonify({"error": "Access denied"}), 403
 
         csv_path = None
         # Prefer explicitly provided dataset_path (helps for older records missing DB path)
@@ -4068,6 +4242,7 @@ def target_distribution():
 
 # ----------- Train/Test Split -----------
 @app.route('/api/train-test-split', methods=['POST'])
+@optional_auth
 def create_train_test_split():
     """
     Create or get train/test split for a dataset.
@@ -4113,6 +4288,11 @@ def create_train_test_split():
             dataset_id = int(dataset_id)
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
         
         # Get dataset info
         dataset = get_dataset(dataset_id)
@@ -4323,6 +4503,7 @@ def create_train_test_split():
 
 
 @app.route('/api/train-test-split/<int:dataset_id>', methods=['GET'])
+@optional_auth
 def get_train_test_split_info_api(dataset_id):
     """
     Get train/test split information for a dataset.
@@ -4330,6 +4511,11 @@ def get_train_test_split_info_api(dataset_id):
     Returns split metadata if it exists, or null if no split has been created.
     """
     try:
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         split_info = get_train_test_split_info(dataset_id)
         
         if not split_info:
@@ -5011,6 +5197,7 @@ def fine_bin_discrete(df, var, target, bin_merges=None, bin_mapping=None):
 
 # ----------- Fine Binning API -----------
 @app.route('/api/fine-bin', methods=['POST'])
+@optional_auth
 def fine_bin_api():
     print("\n[API] /api/fine-bin (POST) called")
     try:
@@ -5038,6 +5225,11 @@ def fine_bin_api():
             dataset_id = int(dataset_id)
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
         
         # Load data using data_loader to get TRAIN set if split exists
         try:
@@ -5407,6 +5599,7 @@ def log_binning_stats(stats_df, var_name, stage_name, df=None, target=None):
 
 # ----------- Automated Monotonic Binning API -----------
 @app.route('/api/auto-monotonic-binning', methods=['POST'])
+@optional_auth
 def auto_monotonic_binning_api():
     """
     Automatically merge bins to achieve monotonic WOE (Weight of Evidence).
@@ -5454,6 +5647,11 @@ def auto_monotonic_binning_api():
             or req.get('recordId')
             or req.get('datasetId')
         )
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and dataset_id and not user_owns_dataset(user_id, int(dataset_id)):
+            return jsonify({"error": "Access denied"}), 403
         
         # CRITICAL: Check if train/test split exists
         if dataset_id:
@@ -6019,6 +6217,7 @@ def cross_tab_api():
 
 # ----------- Univariate Analysis API -----------
 @app.route('/api/univariate-analysis', methods=['POST'])
+@optional_auth
 def univariate_analysis():
     """
     Performs univariate analysis (coarse binning) for a list of variables.
@@ -6038,6 +6237,11 @@ def univariate_analysis():
         
         if not target:
             return jsonify({"error": "Missing required field: target"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and record_id and not user_owns_dataset(user_id, int(record_id)):
+            return jsonify({"error": "Access denied"}), 403
         
         # CRITICAL: Check if train/test split exists
         if record_id:
@@ -7180,6 +7384,7 @@ def calculate_woe_iv(df, variable, target, bin_merges=None, var_type=None):
 # ----------- WOE/IV API -----------
 # ----------- WOE/IV API -----------
 @app.route("/api/woe-iv", methods=["POST"])
+@optional_auth
 def woe_iv_api():
     try:
         data = request.get_json()
@@ -7188,6 +7393,11 @@ def woe_iv_api():
         record_id = data.get("record_id")
         global_type = data.get("type")
         types_map = data.get("types", {}) if isinstance(data.get("types", {}), dict) else {}
+
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and record_id and not user_owns_dataset(user_id, int(record_id)):
+            return jsonify({"error": "Access denied"}), 403
 
         raw_bin_merges = data.get("bin_merges")
 
@@ -7656,6 +7866,7 @@ def woe_iv_api():
         return jsonify({"error": f"WOE/IV calculation failed: {str(e)}"}), 500
 # ----------- Save Record -----------
 @app.route('/api/save-record', methods=['POST'])
+@optional_auth
 def save_record():
     """
     DEPRECATED: This endpoint is now a no-op. Use /api/upsert-single-record instead.
@@ -7663,8 +7874,9 @@ def save_record():
     """
     print("\n[API] /api/save-record (POST) called - DEPRECATED endpoint")
     try:
-        # Get the latest dataset ID to return
-        latest = get_latest_dataset()
+        # Get the latest dataset ID for the current user
+        user_id = get_current_user_id()
+        latest = get_latest_dataset(user_id=user_id)
         dataset_id = latest['id'] if latest else None
         return jsonify({"success": True, "id": dataset_id})
     except Exception as e:
@@ -7675,16 +7887,19 @@ def save_record():
 
 # ----------- Upsert Single Record -----------
 @app.route('/api/upsert-single-record', methods=['POST'])
+@optional_auth
 def upsert_single_record():
     """
     Create or update a single dataset record.
     If record_id is provided, update that specific record.
     If record_id is not provided, always create a new record to prevent data mixing.
+    Records are associated with the authenticated user.
     """
     print("\n[API] /api/upsert-single-record called")
     try:
+        user_id = get_current_user_id()
         data = request.get_json()
-        print(f"[upsert_single_record] Payload keys: {list(data.keys()) if data else 'None'}")
+        print(f"[upsert_single_record] Payload keys: {list(data.keys()) if data else 'None'}, user_id={user_id}")
         try:
             print('[backend] upsert_single_record payload keys:', list(data.keys()) if isinstance(data, dict) else type(data))
         except Exception:
@@ -7732,6 +7947,10 @@ def upsert_single_record():
             # Use the specific record provided
             dataset = get_dataset(record_id)
             if dataset:
+                # Check ownership if user is authenticated
+                if user_id and not user_owns_dataset(user_id, record_id):
+                    return jsonify({'error': 'Access denied to this record'}), 403
+                    
                 dataset_id = dataset['id']
                 # If dataset_path not provided, use existing one
                 if not dataset_path:
@@ -7756,7 +7975,8 @@ def upsert_single_record():
                 dataset_id = create_dataset(
                     name=dataset_name,
                     file_path=dataset_path or '',
-                    target_variable=target_variable
+                    target_variable=target_variable,
+                    user_id=user_id
                 )
                 print(f'[backend] Created new dataset with id: {dataset_id}')
         else:
@@ -7768,7 +7988,8 @@ def upsert_single_record():
             dataset_id = create_dataset(
                 name=dataset_name,
                 file_path=dataset_path or '',
-                target_variable=target_variable
+                target_variable=target_variable,
+                user_id=user_id
             )
             print(f'[backend] Created new dataset with id: {dataset_id} (no record_id provided)')
         
@@ -7881,6 +8102,7 @@ def upsert_single_record():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/update-feature-modeling', methods=['POST'])
+@optional_auth
 def update_feature_modeling():
     """
     Fast endpoint to update feature's model_ready when checkbox is checked.
@@ -7902,6 +8124,11 @@ def update_feature_modeling():
             dataset_id = int(dataset_id)
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
         
         # Fast path: Direct SQL update in single query (assumes column exists)
         conn = get_db_connection()
@@ -7951,6 +8178,7 @@ def update_feature_modeling():
             return jsonify({"error": str(e)}), 500
 
 @app.route('/api/sync-model-ready-to-final-selected', methods=['POST'])
+@optional_auth
 def sync_model_ready_to_final_selected_endpoint():
     """
     Copy model_ready values to final_selected for all features in a dataset.
@@ -7969,6 +8197,11 @@ def sync_model_ready_to_final_selected_endpoint():
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
         
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         success = sync_model_ready_to_final_selected(dataset_id)
         if success:
             return jsonify({"success": True, "message": "Synced model_ready to final_selected"})
@@ -7981,9 +8214,14 @@ def sync_model_ready_to_final_selected_endpoint():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/dataset/<int:dataset_id>/features', methods=['GET'])
+@optional_auth
 def get_dataset_features(dataset_id):
     """Get all features for a dataset with their model_ready, final_selected status, and is_monotonic from fine binning."""
     try:
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         # FIX: Use get_features_with_fine_binning_metadata to include is_monotonic status
         features = get_features_with_fine_binning_metadata(dataset_id)
         return jsonify(features)
@@ -8013,6 +8251,7 @@ def clear_features_sorted_cache(dataset_id: int = None):
             print(f"[CACHE] Cleared features-sorted cache for dataset {dataset_id}")
 
 @app.route('/api/dataset/<int:dataset_id>/features-sorted', methods=['GET'])
+@optional_auth
 def get_dataset_features_sorted(dataset_id):
     """
     Get all features for a dataset with their fine binning metadata, sorted by:
@@ -8026,6 +8265,10 @@ def get_dataset_features_sorted(dataset_id):
     Uses caching to reduce database queries (2 second TTL).
     """
     try:
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         import time
         
         # Check cache first
@@ -8083,6 +8326,7 @@ def get_dataset_features_sorted(dataset_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/dataset/<int:dataset_id>/mark-monotonic-as-model-ready', methods=['POST'])
+@optional_auth
 def mark_monotonic_as_model_ready(dataset_id):
     """
     Mark all features with monotonic fine binning and IV >= threshold as model_ready.
@@ -8090,6 +8334,11 @@ def mark_monotonic_as_model_ready(dataset_id):
     stored in the database and updates the is_monotonic flag if needed.
     """
     try:
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         from auto_monotonic_binning import is_monotonic
         
         payload = request.get_json(silent=True) or {}
@@ -8234,6 +8483,7 @@ def mark_monotonic_as_model_ready(dataset_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/update-feature-final-selected', methods=['POST'])
+@optional_auth
 def update_feature_final_selected():
     """
     Update feature's final_selected when checkbox is checked in Model Training module.
@@ -8252,6 +8502,11 @@ def update_feature_final_selected():
             dataset_id = int(dataset_id)
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
         
         # Get feature
         feature = get_feature_by_name(dataset_id, feature_name)
@@ -8280,6 +8535,7 @@ def update_feature_final_selected():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/update-feature-selection', methods=['POST'])
+@optional_auth
 def update_feature_selection():
     """
     Update feature's selected status from preprocessing details page.
@@ -8307,6 +8563,11 @@ def update_feature_selection():
         except (ValueError, TypeError):
             print(f"[UPDATE-FEATURE-SELECTION] ❌ Invalid dataset_id: {dataset_id}")
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
         
         # Check if this is the target variable - always set to False
         dataset = get_dataset(dataset_id)
@@ -8342,6 +8603,7 @@ def update_feature_selection():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/save-preprocess-selection', methods=['POST'])
+@optional_auth
 def save_preprocess_selection():
     """
     Save the preprocess_selection flag for a record.
@@ -8354,6 +8616,11 @@ def save_preprocess_selection():
         
         if not record_id:
             return jsonify({"error": "Missing record_id"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, int(record_id)):
+            return jsonify({"error": "Access denied"}), 403
         
         # Update the preprocess_selection flag
         success = update_dataset(record_id, preprocess_selection=True)
@@ -8369,14 +8636,22 @@ def save_preprocess_selection():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/records', methods=['GET'])
+@optional_auth
 def get_records():
     """
     List all analysis records (summary only) - returns datasets in NEW format.
+    If authenticated, returns only the user's records.
+    If not authenticated, returns empty list.
     """
     print("\\n[API] /api/records (GET) called")
     try:
-        datasets = get_all_datasets_with_features()
-        print(f"[get_records] Found {len(datasets)} datasets (batched fetch)")
+        user_id = get_current_user_id()
+        # Return empty list if not authenticated - users must login to see their records
+        if not user_id:
+            print("[get_records] No user authenticated, returning empty list")
+            return jsonify([])
+        datasets = get_all_datasets_with_features(user_id=user_id)
+        print(f"[get_records] Found {len(datasets)} datasets (batched fetch) for user_id={user_id}")
         
         result = []
         for dataset in datasets:
@@ -8408,12 +8683,14 @@ def get_records():
 
 # ----------- Latest Record Dataset Path -----------
 @app.route('/api/latest-record-dataset-path', methods=['GET'])
+@optional_auth
 def latest_record_dataset_path():
     """
-    Returns the dataset_path of the latest record and whether the file exists.
+    Returns the dataset_path of the latest record for the current user.
     """
     try:
-        dataset = get_latest_dataset()
+        user_id = get_current_user_id()
+        dataset = get_latest_dataset(user_id=user_id)
         if not dataset:
             return jsonify({"dataset_path": None, "resolved_path": None, "valid": False})
         
@@ -8433,12 +8710,20 @@ def latest_record_dataset_path():
 
 # ----------- Get Record -----------
 @app.route('/api/record/<int:record_id>', methods=['GET'])
+@optional_auth
 def get_record(record_id):
     """
     Get a specific analysis record with binning data in NEW format.
+    Only returns record if user owns it (or if record has no owner for legacy data).
     """
     try:
-        print(f"\n[get_record] Loading record {record_id}")
+        user_id = get_current_user_id()
+        
+        # Check ownership
+        if user_id and not user_owns_dataset(user_id, record_id):
+            return jsonify({"error": "Access denied"}), 403
+        
+        print(f"\n[get_record] Loading record {record_id} for user {user_id}")
         dataset_context = get_dataset_with_all_results(record_id)
         if not dataset_context:
             print(f"[get_record] ❌ Dataset {record_id} not found")
@@ -8530,11 +8815,19 @@ def get_record(record_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/record/<int:record_id>/load-dataset', methods=['GET'])
+@optional_auth
 def load_record_dataset(record_id):
     """
     Loads the dataset for a given record and returns it as JSON.
+    Only returns data if user owns the record.
     """
     try:
+        user_id = get_current_user_id()
+        
+        # Check ownership
+        if user_id and not user_owns_dataset(user_id, record_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         dataset = get_dataset(record_id)
         if not dataset:
             return jsonify({"error": "Record/Dataset not found"}), 404
@@ -8556,11 +8849,19 @@ def load_record_dataset(record_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/datasets/<int:dataset_id>/models', methods=['GET'])
+@optional_auth
 def get_dataset_available_models(dataset_id: int):
     """
     Return list of all available model artifacts for a dataset.
+    Only returns models if user owns the dataset.
     """
     try:
+        user_id = get_current_user_id()
+        
+        # Check ownership
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         dataset = get_dataset(dataset_id)
         if not dataset:
             return jsonify({"error": "Dataset not found"}), 404
@@ -8596,13 +8897,19 @@ def get_dataset_available_models(dataset_id: int):
         return jsonify({"error": f"Failed to load available models: {str(e)}"}), 500
 
 @app.route('/api/datasets/<int:dataset_id>/model', methods=['GET'])
+@optional_auth
 def get_dataset_model_artifact(dataset_id: int):
     """
     Return metadata about the persisted model artifact for a dataset.
     Returns the most recent model if no specific model is requested.
     Accepts optional query parameter 'model_label' to get a specific model.
+    Only returns model if user owns the dataset.
     """
     try:
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         dataset = get_dataset(dataset_id)
         if not dataset:
             return jsonify({"error": "Dataset not found"}), 404
@@ -8629,6 +8936,7 @@ def get_dataset_model_artifact(dataset_id: int):
         return jsonify({"error": f"Failed to load model artifact: {str(e)}"}), 500
 # ----------- Logistic Regression Analysis -----------
 @app.route('/api/logistic-regression', methods=['POST'])
+@optional_auth
 def logistic_regression_analysis():
     """
     Perform logistic regression analysis on selected variables.
@@ -8658,6 +8966,11 @@ def logistic_regression_analysis():
             dataset_id = int(dataset_id)
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
 
         if not selected_variables or not target:
             return jsonify({"error": "Missing selected_variables or target"}), 400
@@ -10434,6 +10747,7 @@ def logistic_regression_analysis():
 
 # ----------- Random Forest Analysis -----------
 @app.route('/api/random-forest', methods=['POST'])
+@optional_auth
 def random_forest_analysis():
     """
     Perform Random Forest analysis on selected variables.
@@ -10468,6 +10782,11 @@ def random_forest_analysis():
             return jsonify({"error": "Missing selected_variables or target"}), 400
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id/record_id"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
 
         # CRITICAL: Load train set using data_loader (same as binning/WOE endpoints)
         try:
@@ -11104,6 +11423,7 @@ def random_forest_analysis():
 
 # ----------- XGBoost Analysis (FIXED - Uses RAW Features) -----------
 @app.route('/api/xgboost', methods=['POST'])
+@optional_auth
 def xgboost_analysis():
     """
     Perform XGBoost analysis on selected variables.
@@ -11137,6 +11457,11 @@ def xgboost_analysis():
             return jsonify({"error": "Missing selected_variables or target"}), 400
         if not dataset_id:
             return jsonify({"error": "Missing dataset_id/record_id"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
 
         # CRITICAL: Load train set using data_loader (same as Logistic Regression and Random Forest)
         try:
@@ -12431,6 +12756,7 @@ def get_stacking_config(train_size, imbalance_ratio, base_model_performance=None
 
 # ----------- Stacking Ensemble Analysis -----------
 @app.route('/api/stacking', methods=['POST'])
+@optional_auth
 def stacking_analysis():
     """
     Perform stacking ensemble analysis combining LR, RF, and XGBoost (per paper methodology).
@@ -12454,6 +12780,11 @@ def stacking_analysis():
             record_id = int(record_id)
         except (ValueError, TypeError):
             return jsonify({"success": False, "error": f"Invalid dataset_id: {record_id}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, record_id):
+            return jsonify({"error": "Access denied"}), 403
         
         if not selected_variables:
             return jsonify({"success": False, "error": "No variables selected"}), 400
@@ -14804,14 +15135,20 @@ def _create_woe_mask(df, var, bin_range):
 
 # ----------- Delete Record -----------
 @app.route('/api/record/<int:record_id>', methods=['DELETE'])
+@optional_auth
 def delete_record(record_id):
     """
     Delete a specific analysis record/dataset by ID.
     Cascade delete handles all related features, binning_steps, bins, etc.
+    Only allows deletion if user owns the record.
     """
     try:
+        user_id = get_current_user_id()
         dataset = get_dataset(record_id)
         if dataset:
+            # Check ownership if user is authenticated
+            if user_id and not user_owns_dataset(user_id, record_id):
+                return jsonify({"error": "Access denied"}), 403
             delete_dataset(record_id)
             return jsonify({"success": True})
         return jsonify({"error": "Dataset not found"}), 404
@@ -14822,6 +15159,7 @@ def delete_record(record_id):
 
 # ----------- Finebin Details API -----------
 @app.route('/api/finebin-details', methods=['POST'])
+@optional_auth
 def save_finebin_details():
     """
     Save fine binning details (merged bins) for a specific dataset and feature.
@@ -14847,6 +15185,11 @@ def save_finebin_details():
             dataset_id = int(dataset_id_raw)
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id_raw}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
         
         # Get the feature for this dataset/column
         feature = get_feature_by_name(dataset_id, column_name)
@@ -14966,6 +15309,7 @@ def save_finebin_details():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/finebin-details/<int:record_id>/<string:column_name>', methods=['GET'])
+@optional_auth
 def get_finebin_details(record_id, column_name):
     """
     Retrieve fine binning details (merged bins) for a specific dataset and feature.
@@ -14974,6 +15318,11 @@ def get_finebin_details(record_id, column_name):
     print(f"\n[API] /api/finebin-details/{record_id}/{column_name} (GET) called")
     try:
         dataset_id = record_id  # Frontend still uses record_id
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
         
         # Get the feature
         feature = get_feature_by_name(dataset_id, column_name)
@@ -15047,6 +15396,7 @@ def get_finebin_details(record_id, column_name):
 
 
 @app.route('/api/finebin-cache/<int:record_id>/<string:column_name>', methods=['GET'])
+@optional_auth
 def get_finebin_cache(record_id: int, column_name: str):
     """
     Retrieve persisted fine binning stats + merges without recalculating algorithms.
@@ -15055,6 +15405,12 @@ def get_finebin_cache(record_id: int, column_name: str):
     print(f"\n[API] /api/finebin-cache/{record_id}/{column_name} (GET) called")
     try:
         dataset_id = record_id
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
+        
         print(f"[get_finebin_cache] DEBUG: dataset_id={dataset_id}, column_name={column_name}")
         
         feature = get_feature_by_name(dataset_id, column_name)
@@ -15211,6 +15567,7 @@ def debug_binning(variable):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/generate-scorecard', methods=['POST'])
+@optional_auth
 def generate_scorecard():
     """
     Generates a score card using pre-computed model results.
@@ -15236,6 +15593,11 @@ def generate_scorecard():
                 dataset_id = int(dataset_id)
             except (ValueError, TypeError):
                 return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and dataset_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
 
         # Input validation
         if not selected_variables or not target or not woe_transformed_data:
@@ -15977,6 +16339,7 @@ def generate_scorecard():
     
 # ----------- Apply Score Card to All Records -----------
 @app.route('/api/apply-scorecard', methods=['POST'])
+@optional_auth
 def apply_scorecard():
     """
     Applies the score card to all records in the uploaded dataset using pre-computed model results.
@@ -16002,6 +16365,11 @@ def apply_scorecard():
                 dataset_id = int(dataset_id)
             except (ValueError, TypeError):
                 return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and dataset_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
 
         # Input validation
         if not selected_variables or not target or not woe_transformed_data:
@@ -16610,6 +16978,7 @@ def apply_scorecard():
 
 # ----------- Predict Credit Score for User-Uploaded Data -----------
 @app.route('/api/predict-credit-score', methods=['POST'])
+@optional_auth
 def predict_credit_score():
     """
     Predict credit scores for user-uploaded CSV data.
@@ -16669,6 +17038,11 @@ def predict_credit_score():
             dataset_id = int(dataset_id)
         except (ValueError, TypeError):
             return jsonify({"error": f"Invalid dataset_id: {dataset_id}"}), 400
+        
+        # Verify user owns this dataset
+        user_id = get_current_user_id()
+        if user_id and not user_owns_dataset(user_id, dataset_id):
+            return jsonify({"error": "Access denied"}), 403
         
         if not csv_data or len(csv_data) == 0:
             return jsonify({"error": "No CSV data provided"}), 400

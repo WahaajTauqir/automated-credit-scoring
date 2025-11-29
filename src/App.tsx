@@ -38,20 +38,27 @@ function App() {
   const [editingRecordId, setEditingRecordId] = useState<number | null>(null);
   const [editingRecordName, setEditingRecordName] = useState<string>('');
 
-  // Fetch existing analysis records on mount
+  // Fetch existing analysis records on mount (with auth headers)
   useEffect(() => {
-    setRecordsLoading(true);
-    fetch('http://localhost:5000/api/records')
-      .then(res => res.json())
-      .then(data => {
+    const fetchRecords = async () => {
+      setRecordsLoading(true);
+      try {
+        const token = localStorage.getItem('credit_scoring_auth_token');
+        const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+        const res = await fetch('http://localhost:5000/api/records', { headers });
+        const data = await res.json();
         const list: AnalysisRecord[] = Array.isArray(data) ? data : [];
         setRecords(list);
         if (list.length > 0) {
           setActiveRecordId((prev) => prev ?? list[0].id);
         }
-      })
-      .catch(() => {})
-      .finally(() => setRecordsLoading(false));
+      } catch (err) {
+        console.error('Failed to fetch records:', err);
+      } finally {
+        setRecordsLoading(false);
+      }
+    };
+    fetchRecords();
   }, []);
 
   // Restore state from navigation (AdminPanel)
@@ -97,9 +104,14 @@ function App() {
     }
 
     try {
+      const token = localStorage.getItem('credit_scoring_auth_token');
+      const headers: HeadersInit = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
       const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           dataset_path: datasetPath,
           discrete_columns: discreteColumns,
