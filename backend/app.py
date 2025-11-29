@@ -1340,8 +1340,15 @@ def encode_categorical_variables(df, cols_to_encode, target_col=None):
                 'nan_count': int(nan_count)
             }
             
+            # Debug: Print the mapping of categories to encoded values
             print(f"[ENCODE_CATEGORICAL] Column '{col}': Encoded {len(le.classes_)} categories "
                   f"(dtype={col_dtype}, {len(le.classes_)} unique values)")
+            mapping = encoding_info[col]['mapping']
+            print(f"[ENCODE_CATEGORICAL] Column '{col}': Label Encoding Mapping (Category → Encoded Value):")
+            # Show all mappings for debugging
+            for category, encoded_value in mapping.items():
+                print(f"[ENCODE_CATEGORICAL]   '{category}' → {encoded_value}")
+            print(f"[ENCODE_CATEGORICAL] Column '{col}': Completed mapping display ({len(mapping)} total mappings)")
         else:
             print(f"[ENCODE_CATEGORICAL] Column '{col}': Skipping (dtype={col_dtype}, appears numeric, not categorical)")
     
@@ -2003,8 +2010,18 @@ def preprocessing_steps_detailed():
         if preprocessing_steps.get('encode_categorical', True) and discrete_cols:
             step_info = {
                 'step_name': 'Categorical Encoding',
-                'description': 'Convert categorical variables to numerical using label encoding',
-                'status': 'pending'
+                'description': 'Convert categorical variables to numerical using label encoding. Label encoding assigns a unique integer to each category, starting from 0. Missing values are handled by filling them with a special marker "__MISSING__" before encoding.',
+                'status': 'pending',
+                'encoding_method': 'LabelEncoder (sklearn.preprocessing)',
+                'method_details': {
+                    'technique': 'Label Encoding',
+                    'library': 'sklearn.preprocessing.LabelEncoder',
+                    'how_it_works': 'Each unique category value is assigned a unique integer label (0, 1, 2, ...) based on alphabetical order of the categories',
+                    'missing_value_handling': 'NaN values are first filled with "__MISSING__" marker, then encoded as a separate category',
+                    'output_type': 'Integer (int64)',
+                    'preserves_order': False,
+                    'suitable_for': 'Categorical variables with high cardinality or when maintaining category relationships is not critical'
+                }
             }
             
             try:
@@ -2014,7 +2031,8 @@ def preprocessing_steps_detailed():
                         encoding_info_before[col] = {
                             'dtype_before': str(current_df[col].dtype),
                             'unique_values': current_df[col].nunique(),
-                            'sample_values': current_df[col].dropna().unique()[:5].tolist()
+                            'sample_values': current_df[col].dropna().unique()[:5].tolist(),
+                            'missing_count': int(current_df[col].isna().sum())
                         }
                 
                 current_df, encoding_info, label_encoders = encode_categorical_variables(
@@ -2022,19 +2040,53 @@ def preprocessing_steps_detailed():
                 )
                 
                 encoding_info_after = {}
+                total_categories_encoded = 0
+                total_missing_handled = 0
+                
                 for col in discrete_cols:
                     if col in current_df.columns and col != target_column:
+                        col_encoding_info = encoding_info.get(col, {})
+                        num_categories = len(col_encoding_info.get('original_categories', []))
+                        missing_count = col_encoding_info.get('nan_count', 0)
+                        total_categories_encoded += num_categories
+                        total_missing_handled += missing_count
+                        
                         encoding_info_after[col] = {
                             'dtype_after': str(current_df[col].dtype),
-                            'mapping': encoding_info.get(col, {}).get('mapping', {})
+                            'num_categories': num_categories,
+                            'mapping': col_encoding_info.get('mapping', {}),
+                            'original_categories': col_encoding_info.get('original_categories', []),
+                            'encoded_values': col_encoding_info.get('encoded_values', []),
+                            'missing_values_handled': missing_count,
+                            'sample_mapping': dict(list(col_encoding_info.get('mapping', {}).items())[:10])  # First 10 mappings
                         }
+                
+                # Calculate summary statistics
+                columns_encoded = len(encoding_info)
+                avg_categories_per_column = total_categories_encoded / columns_encoded if columns_encoded > 0 else 0
                 
                 step_info.update({
                     'status': 'completed',
+                    'summary': {
+                        'columns_encoded': columns_encoded,
+                        'total_categories_encoded': total_categories_encoded,
+                        'average_categories_per_column': round(avg_categories_per_column, 2),
+                        'total_missing_values_handled': total_missing_handled,
+                        'encoding_method': 'LabelEncoder'
+                    },
                     'changes': {
                         'encoding_before': encoding_info_before,
                         'encoding_after': encoding_info_after,
                         'encoding_mappings': encoding_info
+                    },
+                    'detailed_info': {
+                        'per_column_details': encoding_info_after,
+                        'label_encoder_info': {
+                            'method': 'sklearn.preprocessing.LabelEncoder',
+                            'encoding_strategy': 'Alphabetical ordering of categories',
+                            'missing_value_strategy': 'Fill with "__MISSING__" marker before encoding',
+                            'output_format': 'Integer labels starting from 0'
+                        }
                     },
                     'sample_data': current_df.head(10).to_dict('records')
                 })
@@ -2125,6 +2177,9 @@ def preprocessing_column_changes():
         # Get outlier information from preprocessing report
         outlier_info = preprocessing_report.get('details', {}).get('outliers', {})
         
+        # Get encoding information from preprocessing report
+        encoding_info = preprocessing_report.get('details', {}).get('encoding', {})
+        
         # Generate column-level change analysis
         column_changes = []
         
@@ -2173,7 +2228,17 @@ def preprocessing_column_changes():
                 original_unique = original_series.nunique()
                 processed_unique = processed_series.nunique()
                 if original_unique != processed_unique and 'object' in original_dtype:
-                    changes.append(f"Encoded from {original_unique} categories to numerical")
+                    # Check if we have detailed encoding info for this column
+                    col_encoding_info = encoding_info.get(col, {})
+                    if col_encoding_info:
+                        num_categories = len(col_encoding_info.get('original_categories', []))
+                        missing_handled = col_encoding_info.get('nan_count', 0)
+                        encoding_method = 'Label Encoding (sklearn LabelEncoder)'
+                        changes.append(f"Label encoded: {num_categories} categories converted to integers (0-{num_categories-1}) using {encoding_method}")
+                        if missing_handled > 0:
+                            changes.append(f"Missing values handled: {missing_handled} NaN values filled with '__MISSING__' marker before encoding")
+                    else:
+                        changes.append(f"Encoded from {original_unique} categories to numerical")
                 
                 # Outlier removal information
                 if col in outlier_info:
@@ -15650,7 +15715,10 @@ def generate_scorecard():
 
                         # Unified bin scoring: show per-bin score contribution only (not full record score)
                         woe_real = woe_value / 100.0  # Stored WOE scaled by 100
-                        score_contribution = -factor * beta * woe_real  # Negative: higher default risk lowers score
+                        # Standard scorecard formula: Score = Factor × (β × WOE)
+                        # Positive WOE (more good customers) → positive score contribution → higher total score
+                        # Negative WOE (more bad customers) → negative score contribution → lower total score
+                        score_contribution = factor * beta * woe_real
                         score = score_contribution
                         bin_data = {
                             'variable': var,
@@ -16121,477 +16189,193 @@ def apply_scorecard():
         # Verify alignment: predictions should match row_ids
         print(f"[APPLY-SCORECARD] Row IDs extracted: {len(row_ids)} IDs, range: {min(row_ids) if row_ids else 'N/A'} to {max(row_ids) if row_ids else 'N/A'}")
         y = filtered_df[target]
+        
+        # Load scorecard bins from artifact FIRST (use scorecard method for all model types)
+        model_label_map = {
+            'logistic': 'LR',
+            'random_forest': 'RandomForest',
+            'xgboost': 'XGBoost',
+            'stacking_ensemble': 'stacking_ensemble'
+        }
+        model_label = model_label_map.get(model_type)
+        
+        if not model_label:
+            return jsonify({"error": f"Unsupported model type: {model_type}"}), 400
+        
+        # Load artifact to get scorecard bins and score parameters
+        artifact_data, _ = load_model_artifact(dataset_id, model_label)
+        if not artifact_data:
+            return jsonify({"error": f"Model artifact not found for {model_type}. Please generate scorecard first."}), 400
+        
+        scorecard_bins = artifact_data.get('scorecard_bins', [])
+        score_parameters = artifact_data.get('score_parameters', {})
+        
+        if not scorecard_bins:
+            return jsonify({"error": "Scorecard bins not found in artifact. Please generate scorecard first."}), 400
+        
+        print(f"[APPLY-SCORECARD] Using scorecard method with {len(scorecard_bins)} bins")
+        
+        # Build a lookup dictionary: variable -> list of bins
+        bins_by_variable = {}
+        for bin_data in scorecard_bins:
+            var = bin_data.get('variable')
+            if var not in bins_by_variable:
+                bins_by_variable[var] = []
+            bins_by_variable[var].append(bin_data)
+        
+        print(f"[APPLY-SCORECARD] Built bin lookup: {len(bins_by_variable)} variables with bins")
+        
+        # Apply WOE transformation to the filtered data (after filtering to ensure alignment)
+        # Get the original rows from df that match filtered_df indices
+        filtered_indices = filtered_df.index
+        df_filtered_for_woe = df.loc[filtered_indices].copy() if hasattr(df, 'loc') else df.iloc[filtered_indices].copy()
+        X_woe = _apply_woe_to_test_data(df_filtered_for_woe, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+        
+        # Ensure X_woe has the same index as filtered_df
+        if not X_woe.index.equals(filtered_df.index):
+            X_woe = X_woe.reindex(filtered_df.index)
+        
         X_logistic = filtered_df[selected_variables]
         tree_feature_names = [f'{var}_WOE' for var in selected_variables if f'{var}_WOE' in filtered_df.columns]
         X_tree = filtered_df[tree_feature_names] if tree_feature_names else pd.DataFrame()
-
-        # Calculate scores based on model type
-        scores = []
-        probabilities_for_roc = None  # Initialize for ROC curve calculation
         
-        if model_type == 'logistic':
-            if not model_results or 'coefficients' not in model_results:
-                return jsonify({"error": "Logistic scorecard application requires model coefficients"}), 400
-            
-            coefficients = {}
-            intercept = 0.0
-            for coef_info in model_results.get('coefficients', []):
-                var_name = coef_info.get('variable')
-                if var_name and var_name != 'Intercept':
-                    coefficients[var_name] = coef_info.get('coefficient', 0.0)
-                elif var_name == 'Intercept':
-                    intercept = coef_info.get('coefficient', 0.0)
-            
-            logit = np.full(len(filtered_df), intercept, dtype=float)
-            for var in selected_variables:
-                beta = coefficients.get(var, 0.0)
-                if beta == 0.0 or var not in X_logistic.columns:
-                    continue
-                logit += beta * X_logistic[var].values
-            
-            prob_bad = 1.0 / (1.0 + np.exp(-logit))
-            # Store probabilities for ROC curve calculation
-            probabilities_for_roc = prob_bad.copy()
-            scores = _probability_to_score(prob_bad, DEFAULT_SCORECARD_CONFIG).astype(float).tolist()
-                
-        elif model_type in ['random_forest', 'xgboost']:
-            # KEY FIX: For XGBoost, use the trained model on RAW features
-            try:
-                y_pred_proba_bad = None
-                artifact_used = False
-                
-                # Try to load persisted model artifact
-                artifact_data, artifact_label = load_model_artifact(dataset_id, model_type)
-                
-                if model_type == 'xgboost' and artifact_data and artifact_data.get('model_bytes'):
-                    print(f"[apply_scorecard] Loading XGBoost model from artifact")
-                    
-                    # Check if model uses raw features (new) or WOE features (old)
-                    uses_raw_features = artifact_data.get('uses_raw_features', False)
-                    
-                    if uses_raw_features:
-                        # NEW: Model trained on RAW features
-                        print(f"[apply_scorecard] Applying XGBoost trained on RAW features")
-                        try:
-                            scoring_result = apply_xgboost_scorecard(df, target, artifact_data)
-                            y_pred_proba_bad = scoring_result['probabilities']
-                            y = scoring_result['target']
-                            row_ids = scoring_result['row_ids']
-                            artifact_used = True
-                            print(f"[apply_scorecard] Successfully applied XGBoost on raw features")
-                        except Exception as raw_err:
-                            print(f"[apply_scorecard] Failed to apply XGBoost on raw features: {raw_err}")
-                            import traceback
-                            traceback.print_exc()
-                            return jsonify({"error": f"Failed to apply XGBoost model: {str(raw_err)}"}), 500
+        # Calculate scores from scorecard bins
+        scores_list = []
+        probabilities_for_roc = None  # Will be calculated from model if needed for ROC
+        
+        # Get probabilities for ROC curve calculation (still need model predictions)
+        # This is for evaluation metrics only, not for scoring
+        try:
+            if model_type == 'logistic':
+                if not model_results or 'coefficients' not in model_results:
+                    # Try to get from artifact
+                    coef_dict = artifact_data.get('coefficients', {})
+                    intercept_val = artifact_data.get('intercept', 0)
+                    if not coef_dict:
+                        print(f"[APPLY-SCORECARD] Warning: Cannot get probabilities for ROC (no coefficients)")
                     else:
-                        # OLD: Model trained on WOE features (backward compatibility)
-                        print(f"[apply_scorecard] Using old WOE-based XGBoost model")
-                        if not X_tree.empty:
-                            import pickle
-                            try:
-                                xgb_model = pickle.loads(artifact_data['model_bytes'])
-                                y_pred_proba_bad = xgb_model.predict_proba(X_tree)[:, 1]
-                                artifact_used = True
-                                print(f"[apply_scorecard] Successfully applied old WOE-based XGBoost model")
-                            except Exception as old_err:
-                                print(f"[apply_scorecard] Failed to use old WOE model: {old_err}")
-                                return jsonify({"error": "Old XGBoost model failed. Please retrain with current version."}), 400
-                        else:
-                            return jsonify({"error": "No WOE-transformed features available for old XGBoost model"}), 400
-                
-                elif model_type == 'random_forest':
-                    # Random Forest still uses WOE features
-                    if X_tree.empty:
-                        return jsonify({"error": "No WOE-transformed features available for Random Forest"}), 400
-                    
-                    # Try to load persisted model artifact (CRITICAL FIX: Don't re-train!)
-                    if artifact_data and artifact_data.get('model_bytes'):
+                        logit = np.full(len(filtered_df), intercept_val, dtype=float)
+                        for var in selected_variables:
+                            beta = coef_dict.get(var, 0.0)
+                            if beta == 0.0 or f'{var}_WOE' not in X_woe.columns:
+                                continue
+                            logit += beta * X_woe[f'{var}_WOE'].values
+                        prob_bad = 1.0 / (1.0 + np.exp(-logit))
+                        probabilities_for_roc = prob_bad.copy()
+            elif model_type in ['random_forest', 'xgboost']:
+                # Get probabilities from model for ROC (if available)
+                try:
+                    artifact_data_prob, _ = load_model_artifact(dataset_id, model_type)
+                    if artifact_data_prob and artifact_data_prob.get('model_bytes'):
                         import pickle
-                        try:
-                            rf_model = pickle.loads(artifact_data['model_bytes'])
-                            y_pred_proba_bad = rf_model.predict_proba(X_tree)[:, 1]
-                            artifact_used = True
-                            print(f"[apply_scorecard] Loaded and applied Random Forest model from artifact")
-                        except Exception as rf_err:
-                            print(f"[apply_scorecard] Failed to load RF model from artifact: {rf_err}")
-                            return jsonify({"error": "Random Forest model artifact found but failed to load. Please retrain the model."}), 400
-                    else:
-                        # Fallback: if no artifact, return error (don't re-train on test data!)
-                        return jsonify({"error": "Random Forest model not found. Please train the model first."}), 400
-                
-                if y_pred_proba_bad is None:
-                    return jsonify({"error": f"{model_type} model could not generate predictions"}), 400
-                
-                # CRITICAL FIX: Verify predictions length matches expected rows
-                if model_type != 'xgboost' or not (artifact_data and artifact_data.get('uses_raw_features', False)):
-                    # For RF and old XGBoost, predictions should match filtered_df length
-                    expected_len = len(filtered_df)
-                    actual_len = len(y_pred_proba_bad)
-                    if expected_len != actual_len:
-                        print(f"[APPLY-SCORECARD] WARNING: Prediction length mismatch! Expected {expected_len}, got {actual_len}")
-                        print(f"[APPLY-SCORECARD] This may cause missing rows in results")
-                
-                # Store probabilities for ROC curve calculation (CRITICAL FIX: Use probabilities, not scores)
-                probabilities_for_roc = y_pred_proba_bad.copy()
-                
-                # Convert probabilities to credit scores
-                scores_array = _probability_to_score(y_pred_proba_bad, DEFAULT_SCORECARD_CONFIG)
-                
-                # Apply normalization ONLY for training data (Create Ranges)
-                # Test data should use natural score ranges
-                if data_source == 'training':
-                    try:
-                        model_label_map = {
-                            'logistic': 'LR',
-                            'random_forest': 'RandomForest',
-                            'xgboost': 'XGBoost',
-                            'stacking_ensemble': 'stacking_ensemble'
-                        }
-                        model_label = model_label_map.get(model_type)
-                        
-                        if model_label:
-                            # Load artifact to get normalization parameters
-                            artifact_data, _ = load_model_artifact(dataset_id, model_label)
-                            if artifact_data and 'score_parameters' in artifact_data:
-                                score_params = artifact_data['score_parameters']
-                                if 'score_min_raw' in score_params and 'score_max_raw' in score_params:
-                                    # Use stored normalization parameters (Approach 2)
-                                    scores_array = _normalize_scores_to_range(
-                                        scores_array,
-                                        score_params['score_min_raw'],
-                                        score_params['score_max_raw']
-                                    )
-                                    print(f"[apply_scorecard] Applied normalization using training data range: {score_params['score_min_raw']:.2f} - {score_params['score_max_raw']:.2f}")
-                                else:
-                                    # Fallback: calculate from current data
-                                    score_min_raw = float(np.min(scores_array))
-                                    score_max_raw = float(np.max(scores_array))
-                                    scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
-                                    print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
-                            else:
-                                # No artifact: normalize using current data
-                                score_min_raw = float(np.min(scores_array))
-                                score_max_raw = float(np.max(scores_array))
-                                scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
-                                print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
-                        else:
-                            # Unknown model type: normalize using current data
-                            score_min_raw = float(np.min(scores_array))
-                            score_max_raw = float(np.max(scores_array))
-                            scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
-                            print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
-                    except Exception as norm_err:
-                        print(f"[apply_scorecard] Warning: Normalization failed: {norm_err}, using raw scores")
-                        import traceback
-                        traceback.print_exc()
-                        # Continue with unnormalized scores
-                else:
-                    # Test/evaluation data: use natural score ranges (no normalization)
-                    print(f"[apply_scorecard] Using natural score ranges for {data_source} data (no normalization)")
-                
-                scores = scores_array.astype(float).tolist()
-                
-                print(f"[apply_scorecard] {model_type} scoring - Predictions: {len(y_pred_proba_bad)}, Row IDs: {len(row_ids)}")
-                print(f"[apply_scorecard] {model_type} scoring - Bad probabilities range: {np.min(y_pred_proba_bad):.4f} to {np.max(y_pred_proba_bad):.4f}")
-                print(f"[apply_scorecard] {model_type} scoring - Scores range (normalized): {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
-                
-            except Exception as model_err:
-                print(f"[apply_scorecard] {model_type} model scoring failed: {model_err}")
-                import traceback
-                traceback.print_exc()
-                return jsonify({"error": f"Failed to calculate scores for {model_type}: {str(model_err)}"}), 500
+                        if model_type == 'random_forest' and not X_tree.empty:
+                            rf_model = pickle.loads(artifact_data_prob['model_bytes'])
+                            probabilities_for_roc = rf_model.predict_proba(X_tree)[:, 1]
+                        elif model_type == 'xgboost':
+                            # For XGBoost, probabilities may not be available easily
+                            # We'll skip ROC probabilities for now
+                            pass
+                except Exception as prob_err:
+                    print(f"[APPLY-SCORECARD] Warning: Could not get probabilities for ROC: {prob_err}")
+            elif model_type == 'stacking_ensemble':
+                # Stacking ensemble probabilities are complex, skip for now
+                pass
+        except Exception as prob_calc_err:
+            print(f"[APPLY-SCORECARD] Warning: Probability calculation for ROC failed: {prob_calc_err}")
         
-        elif model_type == 'stacking_ensemble':
-            # Stacking ensemble: combine predictions from LR, RF, and XGBoost using meta-learner
-            # XGBOOST-STYLE APPROACH: Filter data FIRST, then predict (ensures perfect alignment)
-            try:
-                print(f"[apply_scorecard] Loading stacking ensemble model from artifact")
+        # Calculate scores using scorecard bins
+        for idx, row_idx in enumerate(filtered_df.index):
+            total_score = 0.0
+            
+            # For each variable, find the matching bin and add its score contribution
+            for var in selected_variables:
+                if var not in bins_by_variable:
+                    continue
                 
-                # Load stacking ensemble artifact
-                artifact_data, artifact_label = load_model_artifact(dataset_id, 'stacking_ensemble')
-                if not artifact_data:
-                    return jsonify({"error": "Stacking ensemble model not found. Please train the stacking model first."}), 400
+                woe_col = f'{var}_WOE'
+                if woe_col not in X_woe.columns:
+                    continue
                 
-                import pickle
-                from sklearn.linear_model import LogisticRegression as SklearnLR
-                from sklearn.ensemble import RandomForestClassifier
-                from sklearn.preprocessing import StandardScaler
-                import xgboost as xgb
-                from sklearn.metrics import roc_curve, auc, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-                from sklearn.preprocessing import LabelEncoder
-                from statsmodels.tools.tools import add_constant
+                # Get WOE value for this row (X_woe should have same index as filtered_df)
+                try:
+                    woe_value = X_woe.loc[row_idx, woe_col] if row_idx in X_woe.index else X_woe.iloc[idx][woe_col]
+                except (KeyError, IndexError):
+                    woe_value = 0
+                    if idx == 0:
+                        print(f"[APPLY-SCORECARD] Warning: Could not get WOE value for {var} at row {row_idx}")
                 
-                # Load meta-learner, scaler, and saved base models
-                meta_learner = pickle.loads(artifact_data['meta_learner_bytes'])
-                scaler = pickle.loads(artifact_data['scaler_bytes'])
-                
-                # Try to load saved base models (preferred - ensures consistency with training)
-                if 'lr_model_final_bytes' in artifact_data and 'rf_model_final_bytes' in artifact_data and 'xgb_model_final_bytes' in artifact_data:
-                    print(f"[apply_scorecard] Loading saved base models from artifact (ensures consistency)")
-                    lr_model_final = pickle.loads(artifact_data['lr_model_final_bytes'])
-                    rf_model_final = pickle.loads(artifact_data['rf_model_final_bytes'])
-                    xgb_model_final = pickle.loads(artifact_data['xgb_model_final_bytes'])
-                    use_saved_models = True
-                else:
-                    print(f"[apply_scorecard] WARNING: Saved base models not found, will retrain (may cause inconsistency)")
-                    use_saved_models = False
-                
-                # Get base model configurations
-                base_model_configs = artifact_data.get('base_model_configs', {})
-                selected_vars = artifact_data.get('selected_variables', selected_variables)
-                
-                # XGBOOST-STYLE: Filter data FIRST (like XGBoost does)
-                # Remove rows with missing target - use same mask as filtered_df
-                target_series = pd.to_numeric(df[target], errors='coerce').fillna(0).astype(int)
-                valid_mask = target_series.isin([0, 1])
-                df_filtered = df[valid_mask].copy()
-                y_filtered = target_series[valid_mask]
-                row_ids_filtered = np.where(valid_mask)[0].tolist()
-                
-                print(f"[apply_scorecard] XGBoost-style filtering: {len(df)} rows -> {len(df_filtered)} valid rows")
-                
-                # Now make predictions ONLY on filtered data (ensures perfect alignment)
-                # 1. Logistic Regression predictions (on WOE features)
-                print(f"[apply_scorecard] Getting LR predictions for stacking (on filtered data)")
-                # Apply WOE to filtered rows only
-                X_lr_woe = _apply_woe_to_test_data(df_filtered, selected_vars, woe_transformed_data, target, dataset_id=dataset_id)
-                X_lr_woe = X_lr_woe.drop(columns=[target], errors='ignore')
-                X_lr_woe_const = add_constant(X_lr_woe, has_constant='add')
-                
-                if use_saved_models:
-                    # Use saved model (ensures consistency with training)
-                    lr_pred = np.clip(lr_model_final.predict_proba(X_lr_woe_const)[:, 1], 1e-7, 1 - 1e-7)
-                else:
-                    # Fallback: Retrain model (legacy support)
-                    df_train, _, _ = get_train_test_data(dataset_id)
-                    if df_train is not None and len(df_train) > 0:
-                        y_train = df_train[target].values
-                        X_train_lr_woe = _apply_woe_to_test_data(df_train, selected_vars, woe_transformed_data, target, dataset_id=dataset_id)
-                        X_train_lr_woe = X_train_lr_woe.drop(columns=[target], errors='ignore')
-                        X_train_lr_woe_const = add_constant(X_train_lr_woe, has_constant='add')
-                        lr_config = base_model_configs.get('lr', {})
-                        lr_model = SklearnLR(**lr_config)
-                        lr_model.fit(X_train_lr_woe_const, y_train)
-                        lr_pred = np.clip(lr_model.predict_proba(X_lr_woe_const)[:, 1], 1e-7, 1 - 1e-7)
-                    else:
-                        return jsonify({"error": "Training data not found for stacking ensemble"}), 400
-                
-                # 2. Random Forest predictions (on WOE features)
-                print(f"[apply_scorecard] Getting RF predictions for stacking (on filtered data)")
-                X_rf_woe = X_lr_woe.copy()  # RF uses same WOE features as LR
-                
-                if use_saved_models:
-                    # Use saved model (ensures consistency with training)
-                    rf_pred = np.clip(rf_model_final.predict_proba(X_rf_woe)[:, 1], 1e-7, 1 - 1e-7)
-                else:
-                    # Fallback: Retrain model (legacy support)
-                    rf_config = base_model_configs.get('rf', {})
-                    rf_model = RandomForestClassifier(**rf_config)
-                    rf_model.fit(X_train_lr_woe, y_train)
-                    rf_pred = np.clip(rf_model.predict_proba(X_rf_woe)[:, 1], 1e-7, 1 - 1e-7)
-                
-                # 3. XGBoost predictions (on raw features)
-                print(f"[apply_scorecard] Getting XGBoost predictions for stacking (on filtered data)")
-                df_processed, _ = preprocess_dataset(
-                    df_filtered,  # Use filtered data
-                    target_col=target,
-                    preprocessing_steps={
-                        'detect_types': True,
-                        'handle_missing': True,
-                        'remove_duplicates': False,
-                        'handle_outliers': False,
-                        'encode_categorical': True
-                    },
-                    missing_threshold=0.5,
-                    treat_negative_one_as_missing=True
-                )
-                
-                X_xgb_raw = df_processed[selected_vars].copy()
-                # Handle missing values and encoding (same as stacking training)
-                if not use_saved_models:
-                    # Only need df_train for encoding if retraining
-                    df_train, _, _ = get_train_test_data(dataset_id)
-                
-                for col in selected_vars:
-                    if col in X_xgb_raw.columns:
-                        if X_xgb_raw[col].dtype == 'object' or X_xgb_raw[col].dtype.name == 'category':
-                            X_xgb_raw[col] = X_xgb_raw[col].fillna('__MISSING__')
-                            le = LabelEncoder()
-                            if use_saved_models:
-                                # For saved models, we need to use the same encoding as training
-                                # Load training data just for encoding reference
-                                df_train_enc, _, _ = get_train_test_data(dataset_id)
-                                train_unique = df_train_enc[col].astype(str).unique() if df_train_enc is not None and col in df_train_enc.columns else []
-                            else:
-                                train_unique = df_train[col].astype(str).unique() if col in df_train.columns else []
-                            if len(train_unique) > 0:
-                                le.fit(train_unique)
-                                seen_categories = set(le.classes_)
-                                test_values = X_xgb_raw[col].astype(str)
-                                test_unseen_mask = ~test_values.isin(seen_categories)
-                                if test_unseen_mask.any():
-                                    if '__MISSING__' in seen_categories:
-                                        X_xgb_raw.loc[test_unseen_mask, col] = '__MISSING__'
-                                X_xgb_raw[col] = le.transform(X_xgb_raw[col].astype(str))
-                        else:
-                            if use_saved_models:
-                                df_train_enc, _, _ = get_train_test_data(dataset_id)
-                                median_val = df_train_enc[col].median() if df_train_enc is not None and col in df_train_enc.columns else 0
-                            else:
-                                median_val = df_train[col].median() if col in df_train.columns else 0
-                            X_xgb_raw[col].fillna(median_val, inplace=True)
-                
-                if use_saved_models:
-                    # Use saved model (ensures consistency with training)
-                    xgb_pred = np.clip(xgb_model_final.predict_proba(X_xgb_raw)[:, 1], 1e-7, 1 - 1e-7)
-                else:
-                    # Fallback: Retrain model (legacy support)
-                    xgb_config = base_model_configs.get('xgb', {})
-                    xgb_model = xgb.XGBClassifier(**xgb_config)
-                    xgb_model.fit(df_train[selected_vars], y_train)
-                    xgb_pred = np.clip(xgb_model.predict_proba(X_xgb_raw)[:, 1], 1e-7, 1 - 1e-7)
-                
-                # XGBOOST-STYLE: All predictions are already on filtered data - perfect alignment!
-                # lr_pred, rf_pred, xgb_pred, y_filtered, and row_ids_filtered are all aligned
-                print(f"[apply_scorecard] XGBoost-style alignment: LR={len(lr_pred)}, RF={len(rf_pred)}, XGB={len(xgb_pred)}, y={len(y_filtered)}, row_ids={len(row_ids_filtered)}")
-                
-                # Verify all arrays have same length (they should!)
-                if not (len(lr_pred) == len(rf_pred) == len(xgb_pred) == len(y_filtered) == len(row_ids_filtered)):
-                    min_len = min(len(lr_pred), len(rf_pred), len(xgb_pred), len(y_filtered), len(row_ids_filtered))
-                    print(f"[apply_scorecard] WARNING: Length mismatch detected! Truncating to {min_len}")
-                    lr_pred = lr_pred[:min_len]
-                    rf_pred = rf_pred[:min_len]
-                    xgb_pred = xgb_pred[:min_len]
-                    y_filtered = y_filtered[:min_len]
-                    row_ids_filtered = row_ids_filtered[:min_len]
-                
-                # Combine base model predictions into meta-features
-                def _logit_transform(preds, eps=1e-6):
-                    clipped = np.clip(preds, eps, 1 - eps)
-                    return np.log(clipped / (1 - clipped))
-                
-                meta_features = np.column_stack([lr_pred, rf_pred, xgb_pred])
-                logit_features = np.column_stack([
-                    _logit_transform(lr_pred),
-                    _logit_transform(rf_pred),
-                    _logit_transform(xgb_pred)
-                ])
-                meta_features_aug = np.hstack([meta_features, logit_features])
-                
-                # Scale meta-features
-                meta_features_scaled = scaler.transform(meta_features_aug)
-                
-                # Get meta-learner predictions
-                meta_learner_pred = np.clip(meta_learner.predict_proba(meta_features_scaled)[:, 1], 1e-7, 1 - 1e-7)
-                
-                # CRITICAL FIX: Use same hybrid approach as training (70% meta-learner + 30% weighted average)
-                # This ensures consistency between training and scoring
-                # Use saved performance weights from training (CRITICAL for consistency!)
-                if 'performance_weights' in artifact_data:
-                    performance_weights = artifact_data['performance_weights']
-                    print(f"[apply_scorecard] Using saved performance weights from training: LR={performance_weights[0]:.3f}, RF={performance_weights[1]:.3f}, XGB={performance_weights[2]:.3f}")
-                else:
-                    # Fallback: Calculate from current data (may cause inconsistency)
-                    print(f"[apply_scorecard] WARNING: Performance weights not found in artifact, calculating from current data (may cause inconsistency)")
-                    base_model_aucs = []
-                    # Use y_filtered (from filtered data) - perfect alignment!
-                    y_values = y_filtered.values if hasattr(y_filtered, 'values') else np.array(y_filtered)
-                    for model_name, test_pred in [('LR', lr_pred), ('RF', rf_pred), ('XGB', xgb_pred)]:
-                        try:
-                            from sklearn.metrics import roc_curve, auc
-                            if len(y_values) == len(test_pred):
-                                fpr_temp, tpr_temp, _ = roc_curve(y_values, test_pred)
-                                auc_temp = auc(fpr_temp, tpr_temp)
-                                base_model_aucs.append(auc_temp)
-                            else:
-                                # Fallback: use equal weights if length mismatch
-                                base_model_aucs.append(0.5)
-                        except Exception as auc_err:
-                            # Fallback: use equal weights if AUC calculation fails
-                            print(f"[apply_scorecard] Warning: Could not calculate AUC for {model_name}: {auc_err}")
-                            base_model_aucs.append(0.5)
+                # Find matching bin by comparing WOE values
+                matched = False
+                for bin_data in bins_by_variable[var]:
+                    bin_woe = bin_data.get('woe', 0)  # WOE is stored as percentage
+                    score_contrib = bin_data.get('score', 0)
+                    diff = abs(woe_value - bin_woe)
                     
-                    # Normalize AUCs to get weights
-                    total_auc = sum(base_model_aucs) if sum(base_model_aucs) > 0 else 1
-                    performance_weights = [auc / total_auc for auc in base_model_aucs]
+                    # Check if this row's WOE matches this bin (with tolerance)
+                    if diff < 0.01:  # Small tolerance for floating point
+                        total_score += score_contrib
+                        matched = True
+                        break
                 
-                # Weighted average prediction (same as training)
-                weighted_avg_pred = (
-                    performance_weights[0] * lr_pred + 
-                    performance_weights[1] * rf_pred +
-                    performance_weights[2] * xgb_pred
-                )
-                
-                # Combine meta-learner (70%) with weighted average (30%) - SAME AS TRAINING
-                ensemble_pred = 0.7 * meta_learner_pred + 0.3 * weighted_avg_pred
-                ensemble_pred = np.clip(ensemble_pred, 1e-7, 1 - 1e-7)
-                
-                print(f"[apply_scorecard] Hybrid ensemble: 70% meta-learner + 30% weighted average")
-                print(f"[apply_scorecard] Performance weights: LR={performance_weights[0]:.3f}, RF={performance_weights[1]:.3f}, XGB={performance_weights[2]:.3f}")
-                
-                # Store probabilities for ROC curve
-                probabilities_for_roc = ensemble_pred.copy()
-                
-                # Convert to scores
-                scores_array = _probability_to_score(ensemble_pred, DEFAULT_SCORECARD_CONFIG)
-                
-                # Apply normalization ONLY for training data (Create Ranges)
-                # Test data should use natural score ranges
-                if data_source == 'training':
-                    try:
-                        # Load artifact to get normalization parameters
-                        artifact_data, _ = load_model_artifact(dataset_id, 'stacking_ensemble')
-                        if artifact_data and 'score_parameters' in artifact_data:
-                            score_params = artifact_data['score_parameters']
-                            if 'score_min_raw' in score_params and 'score_max_raw' in score_params:
-                                # Use stored normalization parameters (Approach 2)
-                                scores_array = _normalize_scores_to_range(
-                                    scores_array,
-                                    score_params['score_min_raw'],
-                                    score_params['score_max_raw']
-                                )
-                                print(f"[apply_scorecard] Applied normalization using training data range: {score_params['score_min_raw']:.2f} - {score_params['score_max_raw']:.2f}")
-                            else:
-                                # Fallback: calculate from current data
-                                score_min_raw = float(np.min(scores_array))
-                                score_max_raw = float(np.max(scores_array))
-                                scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
-                                print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
-                        else:
-                            # No artifact: normalize using current data
-                            score_min_raw = float(np.min(scores_array))
-                            score_max_raw = float(np.max(scores_array))
-                            scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
-                            print(f"[apply_scorecard] Applied normalization using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
-                    except Exception as norm_err:
-                        print(f"[apply_scorecard] Warning: Normalization failed: {norm_err}, using raw scores")
-                        import traceback
-                        traceback.print_exc()
-                        # Continue with unnormalized scores
-                else:
-                    # Test/evaluation data: use natural score ranges (no normalization)
-                    print(f"[apply_scorecard] Using natural score ranges for {data_source} data (no normalization)")
-                
-                scores = scores_array.astype(float).tolist()
-                
-                # XGBOOST-STYLE: Set variables for result preparation (perfect alignment!)
-                y = y_filtered  # Use filtered y
-                row_ids = row_ids_filtered  # Use filtered row_ids
-                
-                print(f"[apply_scorecard] Stacking ensemble scoring - Predictions: {len(ensemble_pred)}, Row IDs: {len(row_ids)}")
-                print(f"[apply_scorecard] Stacking ensemble scoring - Bad probabilities range: {np.min(ensemble_pred):.4f} to {np.max(ensemble_pred):.4f}")
-                print(f"[apply_scorecard] Stacking ensemble scoring - Scores range (normalized): {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
-                print(f"[apply_scorecard] XGBoost-style alignment verified: scores={len(scores)}, y={len(y)}, row_ids={len(row_ids)}")
-                
-            except Exception as stacking_err:
-                print(f"[apply_scorecard] Stacking ensemble model scoring failed: {stacking_err}")
-                import traceback
-                traceback.print_exc()
-                return jsonify({"error": f"Failed to calculate scores for stacking ensemble: {str(stacking_err)}"}), 500
+                if not matched and idx == 0:  # Only log for first row to avoid spam
+                    print(f"[APPLY-SCORECARD] Warning: No matching bin found for variable {var}, WOE={woe_value:.4f}")
+            
+            scores_list.append(total_score)
         
-        else:
-            return jsonify({"error": f"Unsupported model type or missing model results: {model_type}"}), 400
+        scores_array = np.array(scores_list)
+        
+        # Add base score components (offset and intercept) to total scores
+        # The scorecard bins store only contributions, so we need to add the base score
+        if score_parameters:
+            factor = score_parameters.get('factor')
+            offset = score_parameters.get('offset', 0)
+            intercept = score_parameters.get('intercept', 0)
+            N = score_parameters.get('n_variables', len(selected_variables))
+            
+            if factor and offset is not None:
+                # Calculate base score per variable: (offset + intercept_factor) / N
+                # Since we sum contributions from all N variables, total base = offset + intercept_factor
+                intercept_factor = intercept * factor if intercept else 0
+                base_score_total = offset + intercept_factor
+                
+                # Add base score to all calculated scores
+                scores_array = scores_array + base_score_total
+                
+                print(f"[APPLY-SCORECARD] Added base score components: offset={offset:.4f}, intercept_factor={intercept_factor:.4f}, total_base={base_score_total:.4f}")
+            else:
+                print(f"[APPLY-SCORECARD] Warning: Missing factor or offset in score_parameters, using scores without base adjustment")
+        
+        # Normalize scores to 0-600 using training data min/max
+        if data_source == 'training' and score_parameters and 'score_min_raw' in score_parameters and 'score_max_raw' in score_parameters:
+            scores_array = _normalize_scores_to_range(
+                scores_array,
+                score_parameters['score_min_raw'],
+                score_parameters['score_max_raw']
+            )
+            print(f"[APPLY-SCORECARD] Normalized scores using training data range: {score_parameters['score_min_raw']:.2f} - {score_parameters['score_max_raw']:.2f}")
+        elif data_source == 'evaluation':
+            # Test/evaluation data: normalize using training data range if available
+            if score_parameters and 'score_min_raw' in score_parameters and 'score_max_raw' in score_parameters:
+                scores_array = _normalize_scores_to_range(
+                    scores_array,
+                    score_parameters['score_min_raw'],
+                    score_parameters['score_max_raw']
+                )
+                print(f"[APPLY-SCORECARD] Normalized scores using training data range: {score_parameters['score_min_raw']:.2f} - {score_parameters['score_max_raw']:.2f}")
+            else:
+                print(f"[APPLY-SCORECARD] Using raw scorecard scores (no normalization parameters available)")
+        
+        scores = scores_array.astype(float).tolist()
+        
+        print(f"[APPLY-SCORECARD] Scorecard method - Calculated {len(scores)} scores")
+        print(f"[APPLY-SCORECARD] Scorecard method - Scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
+        
+        # All model types now use scorecard bins (code above handles all cases)
+        # Old probability-based code removed - using unified scorecard method
+        
+        # Verify we have scores
+        if not scores or len(scores) == 0:
+            return jsonify({"error": "Failed to calculate scores using scorecard bins"}), 400
 
         # Prepare results
         scores_np = np.asarray(scores, dtype=float)
@@ -16968,32 +16752,40 @@ def predict_credit_score():
             traceback.print_exc()
             df_processed = df.copy()
         
-        # Step 2: Load training data and create encoders
+        # Step 2: Load RAW training data to create encoders (not preprocessed data)
+        # We need the original categories, not encoded values
         # LabelEncoder sorts classes alphabetically, so mapping is deterministic regardless of data order
-        df_train, _, _ = get_train_test_data(dataset_id)
+        from sklearn.preprocessing import LabelEncoder
         
-        if df_train is not None:
+        # Load raw CSV to get original categories (before encoding)
+        csv_path = get_csv_path(dataset_id)
+        if csv_path and os.path.exists(csv_path):
+            print(f"[PREDICT-CREDIT-SCORE] Loading raw CSV to extract original categories: {csv_path}")
+            df_raw = pd.read_csv(csv_path)
+            
+            # Preprocess raw data WITHOUT encoding to get original categories
             try:
-                df_train_processed, _ = preprocess_dataset(
-                    df_train,
+                df_raw_processed, _ = preprocess_dataset(
+                    df_raw,
                     target_col=target,
                     preprocessing_steps={
                         'detect_types': True,
                         'handle_missing': True,
                         'remove_duplicates': True,
                         'handle_outliers': False,
-                        'encode_categorical': False  # Don't encode - we'll create encoders manually
+                        'encode_categorical': False  # CRITICAL: Don't encode - we need original categories
                     },
                     missing_threshold=0.5,
                     treat_negative_one_as_missing=True
                 )
+                print(f"[PREDICT-CREDIT-SCORE] Raw data preprocessed (without encoding). Shape: {df_raw_processed.shape}")
             except Exception as e:
-                print(f"[PREDICT-CREDIT-SCORE] WARNING: Training data preprocessing failed: {str(e)}")
-                df_train_processed = df_train.copy()
+                print(f"[PREDICT-CREDIT-SCORE] WARNING: Raw data preprocessing failed: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                df_raw_processed = df_raw.copy()
             
-            # Step 3: For each categorical variable, create encoder from training data
-            from sklearn.preprocessing import LabelEncoder
-            
+            # Step 3: For each categorical variable, create encoder from RAW training data
             for var in selected_variables:
                 if var not in df_processed.columns:
                     continue
@@ -17007,15 +16799,15 @@ def predict_credit_score():
                         range_clean = first_bin_range.replace(',', '').replace(' ', '').strip()
                         # Check if range is numeric
                         if range_clean and all(c.isdigit() or c == '-' for c in range_clean.replace(',', '')):
-                            # Need to encode - create encoder from training data
-                            if var in df_train_processed.columns:
-                                # Get training data's unique values
-                                train_col = df_train_processed[var].copy()
+                            # Need to encode - create encoder from RAW training data (original categories)
+                            if var in df_raw_processed.columns:
+                                # Get RAW training data's unique values (original categories like 'A', 'B', 'C', etc.)
+                                train_col = df_raw_processed[var].copy()
                                 train_col = train_col.fillna('__MISSING__')
                                 train_col = train_col.astype(str)
                                 train_unique = train_col.unique()
                                 
-                                # Create encoder and fit on training data
+                                # Create encoder and fit on RAW training data (original categories)
                                 # LabelEncoder sorts classes alphabetically, so mapping is deterministic
                                 le = LabelEncoder()
                                 le.fit(train_unique)
@@ -17037,13 +16829,40 @@ def predict_credit_score():
                                 # Transform using training encoder
                                 df_processed[var] = le.transform(test_col)
                                 
-                                print(f"[PREDICT-CREDIT-SCORE] Encoded variable '{var}': "
-                                      f"{dict(zip(le.classes_, range(len(le.classes_))))} "
-                                      f"({len(le.classes_)} categories)")
+                                # Create mapping for debug output
+                                encoding_mapping = dict(zip(le.classes_, range(len(le.classes_))))
+                                
+                                # Debug: Print detailed label encoding information
+                                print(f"[PREDICT-CREDIT-SCORE] ========== Label Encoding for Variable '{var}' ==========")
+                                print(f"[PREDICT-CREDIT-SCORE] Variable '{var}': Encoding {len(le.classes_)} categories using RAW training data encoder")
+                                print(f"[PREDICT-CREDIT-SCORE] Variable '{var}': Label Encoding Mapping (Category → Encoded Value):")
+                                for category, encoded_value in encoding_mapping.items():
+                                    print(f"[PREDICT-CREDIT-SCORE]   '{category}' → {encoded_value}")
+                                
+                                # Check for unseen categories in prediction data
+                                test_unique = test_col.unique()
+                                unseen_categories = [cat for cat in test_unique if cat not in le.classes_]
+                                if unseen_categories:
+                                    print(f"[PREDICT-CREDIT-SCORE] Variable '{var}': WARNING - Found {len(unseen_categories)} unseen categories in prediction data:")
+                                    for unseen_cat in unseen_categories:
+                                        count = (test_col == unseen_cat).sum()
+                                        print(f"[PREDICT-CREDIT-SCORE]   '{unseen_cat}' (appears {count} times) - will be mapped to '__MISSING__' or first training category")
+                                else:
+                                    print(f"[PREDICT-CREDIT-SCORE] Variable '{var}': All categories in prediction data are present in training data")
+                                
+                                # Show sample of encoded values
+                                sample_encoded = df_processed[var].head(10).tolist()
+                                sample_original = test_col.head(10).tolist()
+                                print(f"[PREDICT-CREDIT-SCORE] Variable '{var}': Sample encoding (first 10 rows):")
+                                for i, (orig, enc) in enumerate(zip(sample_original, sample_encoded)):
+                                    print(f"[PREDICT-CREDIT-SCORE]   Row {i+1}: '{orig}' → {enc}")
+                                
+                                print(f"[PREDICT-CREDIT-SCORE] Variable '{var}': Completed encoding ({len(le.classes_)} total categories)")
+                                print(f"[PREDICT-CREDIT-SCORE] ================================================================")
                             else:
-                                print(f"[PREDICT-CREDIT-SCORE] WARNING: Variable '{var}' not in training data, cannot encode")
+                                print(f"[PREDICT-CREDIT-SCORE] WARNING: Variable '{var}' not in raw training data, cannot encode")
         else:
-            print(f"[PREDICT-CREDIT-SCORE] WARNING: Training data not available, cannot recreate encoding")
+            print(f"[PREDICT-CREDIT-SCORE] WARNING: Raw CSV file not found at {csv_path}, cannot create encoders from original categories")
         
         # Use df_processed instead of df for all subsequent operations
         df = df_processed
