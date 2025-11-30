@@ -26,6 +26,8 @@ interface FeaturePreprocessingDetail {
     original_stats?: FeatureStats; // Original statistical information
     missingPercentage?: number; // Percentage of missing values
     isRemoved?: boolean; // Whether the column was removed
+    is_warning?: boolean; // Whether this is a warning feature (e.g., ordered counting)
+    removal_reason?: string; // Reason for removal (e.g., 'ordered_counting')
 }
 
 interface DatasetStats {
@@ -223,6 +225,10 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                             
                             // Check if column is removed
                             const isRemoved = col.processed_dtype === 'REMOVED' || col.removed === true;
+                            
+                            // Check if this is a warning feature (e.g., ordered counting)
+                            const isWarning = col.is_warning === true || col.removal_reason === 'ordered_counting';
+                            const removalReason = col.removal_reason;
                             
                             // Check for low variance (CV < 5%) - only for numeric columns
                             // FIX: Don't check low variance for categorical columns
@@ -505,7 +511,9 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                                 processed_stats: col.processed_stats,
                                 original_stats: col.original_stats,
                                 missingPercentage: missingPercentage,
-                                isRemoved: isRemoved
+                                isRemoved: isRemoved,
+                                is_warning: isWarning,
+                                removal_reason: removalReason
                             };
                         });
                     // Filter out target variable - it should not be visible in preprocessing
@@ -724,6 +732,7 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
         const hasHighMissing = feature.missingPercentage !== undefined && feature.missingPercentage > 95;
         const hasLowVariance = !isCategorical && feature.coefficient_of_variation !== undefined && feature.coefficient_of_variation < 5 && feature.coefficient_of_variation > 0;
         const hasHighRepeatRate = feature.type === 'continuous' && feature.repeat_rate !== undefined && feature.repeat_rate > 95;
+        const isWarning = feature.is_warning === true || feature.removal_reason === 'ordered_counting';
         // Low variance and high repeat rate features are selectable (not disabled), but zero variance, high missing, and removed are disabled
         const shouldDisable = hasZeroVariance || hasHighMissing || feature.isRemoved;
         const disableReason = hasZeroVariance ? "This feature has zero variance and cannot be selected" 
@@ -733,7 +742,7 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
         return (
             <div
                 key={feature.name}
-                className={`feature-card ${feature.selected ? 'selected' : ''} ${hasZeroVariance ? 'zero-variance' : ''} ${hasHighMissing ? 'high-missing' : ''} ${hasLowVariance ? 'low-variance' : ''} ${hasHighRepeatRate ? 'high-repeat-rate' : ''}`}
+                className={`feature-card ${feature.selected ? 'selected' : ''} ${hasZeroVariance ? 'zero-variance' : ''} ${hasHighMissing ? 'high-missing' : ''} ${hasLowVariance ? 'low-variance' : ''} ${hasHighRepeatRate ? 'high-repeat-rate' : ''} ${isWarning ? 'warning-feature' : ''}`}
             >
                 <div className="feature-header">
                     <div className="checkbox-wrapper">
@@ -769,6 +778,11 @@ const PreprocessingDetails: React.FC<PreprocessingDetailsProps> = ({ datasetId, 
                         {hasHighRepeatRate && !hasZeroVariance && !hasHighMissing && !hasLowVariance && feature.repeat_rate !== undefined && (
                             <div className="quality-badge" style={{ backgroundColor: '#eab308', color: 'white', marginLeft: '8px' }}>
                                 High Repeat Rate ({feature.repeat_rate.toFixed(1)}%)
+                            </div>
+                        )}
+                        {isWarning && feature.removal_reason === 'ordered_counting' && (
+                            <div className="quality-badge" style={{ backgroundColor: '#d29922', color: 'white', marginLeft: '8px' }}>
+                                Ordered Counting
                             </div>
                         )}
                     </div>

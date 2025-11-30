@@ -456,7 +456,7 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
                         {onGenerateScoreCard && (
                             <div className="detail-card">
                                 <button
-                                    className="generate-scorecard-btn"
+                                    className="auto-monotonic-btn"
                                     onClick={() => {
                                         try {
                                             if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
@@ -465,6 +465,7 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
                                     }}
                                     disabled={generatingScoreCard || selectedVariables.length === 0}
                                 >
+                                    <span className="btn-icon">⚡</span>
                                     {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                                 </button>
                     </div>

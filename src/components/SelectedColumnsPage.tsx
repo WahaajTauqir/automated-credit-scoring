@@ -1254,6 +1254,80 @@ const SelectedColumnsPage = () => {
       generateScoreCard();
     }, 50);
   };
+
+  const handleDownloadScorecard = () => {
+    if (!scoreCardData || !scoreCardData.scorecard_bins) {
+      alert('No scorecard data available to download');
+      return;
+    }
+
+    try {
+      // Prepare CSV data
+      const csvRows: string[] = [];
+      
+      // Header row
+      const headers = ['Bin #', 'Variable', 'Bin Range', 'WOE', 
+        (selectedModelForScorecard === 'logistic' || selectedModelForScorecard === 'stacking') ? 'Coefficient (β)' : 'Feature Importance',
+        'Score'];
+      csvRows.push(headers.join(','));
+
+      // Group bins by variable
+      const grouped: Record<string, any[]> = {};
+      const varsToUse = selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling;
+      
+      scoreCardData.scorecard_bins.forEach((b: any) => {
+        if (varsToUse.includes(b.variable)) {
+          grouped[b.variable] = grouped[b.variable] || [];
+          grouped[b.variable].push(b);
+        }
+      });
+
+      // Add data rows
+      Object.keys(grouped).sort().forEach(variable => {
+        grouped[variable].forEach((bin: any, index: number) => {
+          const row = [
+            index + 1,
+            `"${variable}"`,
+            `"${bin.bin_range || bin.range || ''}"`,
+            bin.woe !== undefined ? bin.woe.toFixed(4) : '',
+            bin.coefficient !== undefined ? bin.coefficient.toFixed(4) : 
+            bin.feature_importance !== undefined ? bin.feature_importance.toFixed(4) : '',
+            bin.score !== undefined ? bin.score.toFixed(2) : ''
+          ];
+          csvRows.push(row.join(','));
+        });
+      });
+
+      // Add score parameters section
+      if (scoreCardData.score_parameters) {
+        csvRows.push('');
+        csvRows.push('Score Parameters');
+        csvRows.push(`Factor,${scoreCardData.score_parameters.factor?.toFixed(4) || ''}`);
+        csvRows.push(`Offset,${scoreCardData.score_parameters.offset?.toFixed(4) || ''}`);
+        csvRows.push(`Score Range,${scoreCardData.score_parameters.min_score || ''} - ${scoreCardData.score_parameters.max_score || ''}`);
+      }
+
+      // Create CSV content
+      const csvContent = csvRows.join('\n');
+      
+      // Create blob and download
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `scorecard_${selectedModelForScorecard}_${new Date().toISOString().split('T')[0]}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      
+      showNotification('Scorecard downloaded successfully');
+    } catch (error) {
+      console.error('Error downloading scorecard:', error);
+      alert('Failed to download scorecard. Please try again.');
+    }
+  };
+
   const runFineBinPassThrough = async (
     col: string,
     varType: string,
@@ -3442,7 +3516,7 @@ const SelectedColumnsPage = () => {
                 )}
                 {selectedModel === 'stacking' && (
                   <button
-                    className="run-regression-btn-sidebar"
+                    className="auto-monotonic-btn"
                     onClick={() => {
                       setTriggerStacking(prev => prev + 1);
                     }}
@@ -3456,6 +3530,7 @@ const SelectedColumnsPage = () => {
                       !Object.values(significanceData).some(s => s.pValue !== null)
                     }
                   >
+                    <span className="btn-icon">⚡</span>
                     Run Stacking Ensemble
                   </button>
                 )}
@@ -3475,7 +3550,7 @@ const SelectedColumnsPage = () => {
                     </div>
                   )}
                   <button
-                    className="progress-action-btn"
+                    className="auto-monotonic-btn"
                     disabled={isLoadingAIClassification}
                     onClick={async () => {
                       try {
@@ -3534,6 +3609,7 @@ const SelectedColumnsPage = () => {
                       }
                     }}
                   >
+                    <span className="btn-icon">⚡</span>
                     <span className="btn-text">{isLoadingAIClassification ? 'Classifying...' : 'AI Recommendation on Classification of Discrete and Continuous'}</span>
                   </button>
                 </div>
@@ -3607,6 +3683,14 @@ const SelectedColumnsPage = () => {
                     <button
                       className="all-auto-monotonic-btn"
                       onClick={runAllAutoMonotonicFineBinning}
+                      disabled={
+                        isLoadingAllAutoMonotonic ||
+                        isLoadingCoarseBins ||
+                        selectedColumns.some(col => {
+                          if (col === targetVariable) return false;
+                          return !Array.isArray(coarseBinResults[col]) || coarseBinResults[col].length === 0;
+                        })
+                      }
                       aria-label="Run auto-monotonic fine binning for all columns"
                       title="Automatically merge bins to achieve monotonic WOE trend for all columns"
                     >
@@ -4595,28 +4679,45 @@ const SelectedColumnsPage = () => {
                   <div className="scorecard-middle-box">
                     <div className="scorecard-controls">
                       <button
-                        className="run-regression-btn scorecard-btn-small"
+                        className="auto-monotonic-btn scorecard-btn-small"
                         onClick={generateScoreCard}
                         disabled={generatingScoreCard || selectedForModeling.length === 0}
                         aria-label="Generate score card"
                       >
+                        <span className="btn-icon">⚡</span>
                         {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                       </button>
                       <button
-                        className="run-regression-btn scorecard-btn-small"
+                        className="auto-monotonic-btn scorecard-btn-small"
                         onClick={() => handleCreateRanges(selectedModelForScorecard)}
-                        disabled={createRangesLoading || !scoreCardData}
+                        disabled={generatingScoreCard || createRangesLoading || !scoreCardData || !scoreCardData.scorecard_bins}
                         aria-label="Create ranges from training data"
                       >
+                        <span className="btn-icon">⚡</span>
                         {createRangesLoading ? 'Creating...' : 'Create Ranges'}
                       </button>
                       <button
                         className="run-regression-btn scorecard-btn-small"
                         onClick={() => handleTestScoreCard(selectedModelForScorecard)}
-                        disabled={testScoreLoading || !scoreCardData}
+                        disabled={generatingScoreCard || testScoreLoading || !scoreCardData || !scoreCardData.scorecard_bins}
                         aria-label="Test Score Card on Data"
                       >
                         {testScoreLoading ? 'Testing...' : 'Test Score Card'}
+                      </button>
+                    </div>
+                    <div className="scorecard-controls scorecard-download-controls">
+                      <button
+                        className="run-regression-btn scorecard-btn-small"
+                        onClick={handleDownloadScorecard}
+                        disabled={!scoreCardData || !scoreCardData.scorecard_bins}
+                        aria-label="Download score card"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: '6px' }}>
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                          <polyline points="7 10 12 15 17 10"></polyline>
+                          <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Download Score Card
                       </button>
                     </div>
 

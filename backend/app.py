@@ -2171,6 +2171,84 @@ def preprocessing_steps_detailed():
     except Exception as e:
         return jsonify({"error": f"Preprocessing visualization failed: {str(e)}"}), 500
 
+def is_ordered_counting_feature(series, threshold=0.95):
+    """
+    Detect if a column appears to be an ordered counting feature like customer number/ID.
+    These are complete sequential sequences (e.g., 1, 2, 3, 4... or 0, 1, 2, 3...) 
+    that start from 0 or 1 and continue without gaps - essentially row identifiers.
+    
+    Args:
+        series: pandas Series to check
+        threshold: Minimum percentage of values that should match the ordered pattern (default 0.95)
+    
+    Returns:
+        bool: True if the column appears to be an ordered counting/ID feature
+    """
+    if series.empty or len(series) < 10:  # Need at least 10 values to be meaningful
+        return False
+    
+    # Only check numeric columns
+    if not pd.api.types.is_numeric_dtype(series):
+        return False
+    
+    # Remove NaN values
+    clean_series = series.dropna()
+    if len(clean_series) < 10:  # Need at least 10 non-null values
+        return False
+    
+    # Convert to numeric, handling any non-numeric values
+    try:
+        numeric_series = pd.to_numeric(clean_series, errors='coerce').dropna()
+        if len(numeric_series) < 10:
+            return False
+    except:
+        return False
+    
+    # Check if values are integers (or very close to integers)
+    is_integer_like = numeric_series.apply(lambda x: abs(x - round(x)) < 1e-6).all()
+    if not is_integer_like:
+        return False
+    
+    # Convert to integers
+    int_series = numeric_series.round().astype(int)
+    
+    # Get unique values sorted
+    unique_vals = sorted(int_series.unique())
+    if len(unique_vals) < 10:  # Need at least 10 unique values
+        return False
+    
+    # Check if unique values form a COMPLETE sequential sequence (no gaps)
+    # This is the key: all values from min to max must be present
+    min_val = unique_vals[0]
+    max_val = unique_vals[-1]
+    expected_count = max_val - min_val + 1
+    
+    # If the number of unique values equals the expected count, it's a complete sequence
+    if len(unique_vals) == expected_count:
+        # Check if it's a sequential sequence (each value is exactly 1 more than previous)
+        is_sequential = all(unique_vals[i+1] - unique_vals[i] == 1 for i in range(len(unique_vals)-1))
+        
+        if is_sequential:
+            # Check if most values in the series are within this range
+            matching = (int_series >= min_val) & (int_series <= max_val)
+            match_ratio = matching.sum() / len(int_series)
+            
+            # Also check that the sequence starts from a reasonable starting point (0, 1, or small positive number)
+            # This helps identify ID/counter features vs. other sequential data
+            starts_from_low = min_val <= 5  # Starts from 0, 1, 2, 3, 4, or 5
+            
+            # The sequence should cover a significant portion of the data
+            # (at least 80% of rows should have values in this sequential range)
+            if match_ratio >= threshold and starts_from_low:
+                # Additional check: the max value should be close to the number of rows
+                # (ID features typically go from 1 to n or 0 to n-1 where n is number of rows)
+                total_rows = len(series)
+                # Allow some flexibility: max_val should be within 20% of total rows
+                if abs(max_val - total_rows) <= total_rows * 0.2 or abs(max_val - (total_rows - 1)) <= total_rows * 0.2:
+                    return True
+    
+    return False
+
 @app.route('/api/preprocessing-column-changes', methods=['POST'])
 @optional_auth
 def preprocessing_column_changes():
@@ -2257,7 +2335,44 @@ def preprocessing_column_changes():
                 "column_changes": []
             }), 400
         
+        # First, detect ordered counting features and mark them for removal
+        ordered_counting_features = []
         for col in df_original.columns:
+            original_series = df_original[col]
+            if is_ordered_counting_feature(original_series):
+                ordered_counting_features.append(col)
+        
+        for col in df_original.columns:
+            # Skip ordered counting features - they will be marked as removed
+            if col in ordered_counting_features:
+                original_series = df_original[col]
+                missing_count = original_series.isna().sum()
+                negative_one_count = (original_series == -1).sum() if pd.api.types.is_numeric_dtype(original_series) else 0
+                
+                # Calculate variance for reference
+                variance = 0.0
+                if pd.api.types.is_numeric_dtype(original_series):
+                    if not original_series.empty:
+                        var_val = original_series.var()
+                        if var_val is not None and not (isinstance(var_val, float) and (np.isnan(var_val) or np.isinf(var_val))):
+                            variance = float(var_val)
+                
+                column_changes.append({
+                    'column': col,
+                    'changes': ["Column removed: Ordered counting feature (sequential numbers like 1, 2, 3, 4...) - not suitable for credit scoring"],
+                    'original_dtype': str(original_series.dtype),
+                    'processed_dtype': 'REMOVED',
+                    'original_missing': int(missing_count),
+                    'processed_missing': 0,
+                    'negative_one_count': int(negative_one_count),
+                    'variance': variance,
+                    'has_changes': True,
+                    'removed': True,
+                    'removal_reason': 'ordered_counting',
+                    'is_warning': True
+                })
+                continue
+            
             if col in df_processed.columns:
                 # Column was retained
                 original_series = df_original[col]
