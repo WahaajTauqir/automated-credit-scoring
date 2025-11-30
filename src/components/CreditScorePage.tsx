@@ -38,8 +38,7 @@ const CreditScorePage = () => {
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
   const [csvData, setCsvData] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [selectedModel, setSelectedModel] = useState<string>('logistic');
-  const [predictionMethod, setPredictionMethod] = useState<'probability' | 'scorecard'>('scorecard');
+  const [selectedModel, setSelectedModel] = useState<string>('stacking_ensemble');
   const [selectedIdentifier, setSelectedIdentifier] = useState<string>('');
   const [predictions, setPredictions] = useState<PredictionRow[]>([]);
   const [riskBands, setRiskBands] = useState<Array<{label: string, min: number, max: number, color: string, description: string}>>([]);
@@ -88,17 +87,19 @@ const CreditScorePage = () => {
       .then(payload => {
         if (!isCancelled) {
           const models = payload.available_models || [];
-          const modelOptions = models.map((m: any) => ({
+          // Filter to only show stacking_ensemble
+          const stackingModels = models.filter((m: any) => m.model_type === 'stacking_ensemble');
+          const modelOptions = stackingModels.map((m: any) => ({
             value: m.model_type,
             label: m.model_name
           }));
           setAvailableModels(modelOptions);
           
-          // If models are available, select the first one and load its metadata
-          if (models.length > 0) {
-            const firstModel = models[0];
-            setSelectedModel(firstModel.model_type);
-            setModelInfo(firstModel.metadata);
+          // If stacking model is available, select it and load its metadata
+          if (stackingModels.length > 0) {
+            const stackingModel = stackingModels[0];
+            setSelectedModel(stackingModel.model_type);
+            setModelInfo(stackingModel.metadata);
           } else {
             setAvailableModels([]);
             setModelInfo(null);
@@ -297,7 +298,7 @@ const CreditScorePage = () => {
         body: JSON.stringify({
           dataset_id: recordId,
           model_type: selectedModel,
-          prediction_method: predictionMethod,
+          prediction_method: 'probability', // Default to probability method
           csv_data: csvData,
           identifier_column: selectedIdentifier
         }),
@@ -326,15 +327,79 @@ const CreditScorePage = () => {
     }
   };
 
-  // Handle PDF download (placeholder - will be implemented later)
-  const handleDownloadPDF = () => {
+  // Handle PDF download
+  const handleDownloadPDF = async () => {
     if (predictions.length === 0) {
       setError('No predictions to download');
       return;
     }
 
-    // TODO: Implement actual PDF generation
-    alert('PDF download functionality will be implemented later');
+    try {
+      setError(null);
+      
+      // Calculate summary statistics
+      const scores = predictions.map(p => p.score);
+      const probabilities = predictions.filter(p => p.probability !== undefined).map(p => p.probability!);
+      
+      const summary = {
+        total_predictions: predictions.length,
+        score_range: {
+          min: Math.min(...scores),
+          max: Math.max(...scores),
+          mean: scores.reduce((a, b) => a + b, 0) / scores.length
+        },
+        method: 'probability', // Default method
+        model_type: selectedModel
+      };
+
+      // Prepare request data
+      const requestData = {
+        predictions: predictions,
+        risk_bands: riskBands,
+        summary: summary,
+        dataset_id: recordId,
+        model_type: selectedModel
+      };
+
+      // Call backend to generate PDF
+      const response = await fetch('http://localhost:5000/api/download-pdf-report', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestData),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to generate PDF report');
+      }
+
+      // Get PDF blob and download
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      
+      // Get filename from Content-Disposition header or use default
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let filename = 'credit_score_report.pdf';
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+      
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      setError('Error downloading PDF report: ' + (err as Error).message);
+      console.error('PDF download error:', err);
+    }
   };
 
   // Trigger file input
@@ -484,24 +549,6 @@ const CreditScorePage = () => {
                       </p>
                     </>
                   )}
-                </div>
-
-                {/* Prediction Method Selection */}
-                <div className="config-item">
-                  <label className="config-label">Prediction Method</label>
-                  <select
-                    className="config-select"
-                    value={predictionMethod}
-                    onChange={(e) => setPredictionMethod(e.target.value as 'probability' | 'scorecard')}
-                  >
-                    <option value="scorecard">Scorecard Method</option>
-                    <option value="probability">Probability Method</option>
-                  </select>
-                  <p className="config-help">
-                    {predictionMethod === 'scorecard' 
-                      ? 'Uses scorecard bins for fast, interpretable scoring. Requires scorecard to be generated first.'
-                      : 'Uses model probabilities for scoring. Works with any trained model.'}
-                  </p>
                 </div>
 
                 {/* Identifier Selection */}

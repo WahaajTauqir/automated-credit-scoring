@@ -7,7 +7,16 @@ import datetime
 from functools import wraps
 from flask import request, jsonify, g
 import bcrypt
+# Import PyJWT - ensure PyJWT package is installed, not the 'jwt' package
 import jwt
+# Verify we have the correct jwt module with encode method at import time
+if not hasattr(jwt, 'encode'):
+    raise ImportError(
+        "Wrong JWT library installed. The 'jwt' module does not have 'encode' method. "
+        "Please install PyJWT: pip install PyJWT\n"
+        "If using system Python, you may need to use a virtual environment or install with: "
+        "pip install --user PyJWT"
+    )
 from typing import Optional, Dict, Any, Tuple
 
 # JWT Configuration
@@ -29,6 +38,12 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 def generate_token(user_id: int, email: str) -> str:
     """Generate a JWT token for a user."""
+    # Runtime check to ensure jwt.encode is available
+    if not hasattr(jwt, 'encode'):
+        raise RuntimeError(
+            "JWT library error: 'encode' method not found. "
+            "Please ensure PyJWT is installed: pip install PyJWT"
+        )
     payload = {
         'user_id': user_id,
         'email': email,

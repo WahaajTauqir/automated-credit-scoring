@@ -505,12 +505,6 @@ function App() {
     return recordNames[id] || `Record ${id}`;
   };
 
-  // Dummy credit check history data
-  const creditCheckHistory = [
-    { id: 1, recordId: 1, checkedAt: '2024-01-15 10:30:00', score: 750, status: 'Approved' },
-    { id: 2, recordId: 1, checkedAt: '2024-01-14 14:20:00', score: 720, status: 'Approved' },
-    { id: 3, recordId: 2, checkedAt: '2024-01-13 09:15:00', score: 680, status: 'Pending' },
-  ];
 
   // Check if score card is generated (dummy for now - always return true for records with id > 0)
   const hasScoreCard = (recordId: number): boolean => {
@@ -523,6 +517,76 @@ function App() {
         path="/"
         element={
           <div className="main-page-wrapper">
+            {/* Optimized Animated Graph Background */}
+            <div className="animated-graph-background">
+              <svg className="graph-svg" viewBox="0 0 1200 600" preserveAspectRatio="xMidYMid slice">
+                <defs>
+                  <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="rgba(46, 160, 67, 0.5)" />
+                    <stop offset="50%" stopColor="rgba(46, 160, 67, 0.7)" />
+                    <stop offset="100%" stopColor="rgba(46, 160, 67, 0.5)" />
+                  </linearGradient>
+                </defs>
+                
+                {/* Simplified grid lines - reduced from 32 to 12 */}
+                <g className="grid-lines">
+                  {[0, 2, 4, 6, 8, 10].map((i) => (
+                    <line
+                      key={`h-${i}`}
+                      x1="0"
+                      y1={i * 60}
+                      x2="1200"
+                      y2={i * 60}
+                      stroke="rgba(46, 160, 67, 0.2)"
+                      strokeWidth="1"
+                    />
+                  ))}
+                  {[0, 4, 8, 12, 16, 20].map((i) => (
+                    <line
+                      key={`v-${i}`}
+                      x1={i * 60}
+                      y1="0"
+                      x2={i * 60}
+                      y2="600"
+                      stroke="rgba(46, 160, 67, 0.2)"
+                      strokeWidth="1"
+                    />
+                  ))}
+                </g>
+                
+                {/* Reduced to 2 graph lines instead of 4 */}
+                <path
+                  className="graph-line graph-line-1"
+                  d="M 0,400 Q 300,350 600,300 T 1200,200"
+                  fill="none"
+                  stroke="url(#lineGradient)"
+                  strokeWidth="3"
+                />
+                
+                <path
+                  className="graph-line graph-line-2"
+                  d="M 0,500 Q 400,450 800,400 T 1200,350"
+                  fill="none"
+                  stroke="url(#lineGradient)"
+                  strokeWidth="3"
+                />
+                
+                {/* Reduced data points from 6 to 3 */}
+                <g className="data-points">
+                  {[300, 600, 900].map((x, i) => (
+                    <circle
+                      key={`point-${i}`}
+                      className="data-point"
+                      cx={x}
+                      cy={300 + Math.sin(i) * 50}
+                      r="3"
+                      fill="rgba(46, 160, 67, 0.6)"
+                    />
+                  ))}
+                </g>
+              </svg>
+            </div>
+            
             <Navbar />
             {/* Full-width Info Section with Process Diagram */}
             <div className="info-hero-section">
@@ -547,13 +611,36 @@ function App() {
                   <div className="process-step-label">Upload Dataset</div>
                 </div>
                 <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.1s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Classification</div>
+                </div>
+                <div className="process-arrow">→</div>
                 <div className="process-step" style={{ animationDelay: '0.2s' }}>
                   <div className="process-step-icon">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                      <line x1="16" y1="13" x2="8" y2="13"></line>
+                      <line x1="16" y1="17" x2="8" y2="17"></line>
                     </svg>
                   </div>
-                  <div className="process-step-label">Univariate Analysis</div>
+                  <div className="process-step-label">Data Preprocessing</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.3s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="18" y1="20" x2="18" y2="10"></line>
+                      <line x1="12" y1="20" x2="12" y2="4"></line>
+                      <line x1="6" y1="20" x2="6" y2="14"></line>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Coarse Binning</div>
                 </div>
                 <div className="process-arrow">→</div>
                 <div className="process-step" style={{ animationDelay: '0.4s' }}>
@@ -564,19 +651,19 @@ function App() {
                       <line x1="6" y1="20" x2="6" y2="14"></line>
                     </svg>
                   </div>
-                  <div className="process-step-label">Binning & WOE</div>
+                  <div className="process-step-label">Fine Binning</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.5s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Monotonicity & Multicolinearity</div>
                 </div>
                 <div className="process-arrow">→</div>
                 <div className="process-step" style={{ animationDelay: '0.6s' }}>
-                  <div className="process-step-icon">
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
-                    </svg>
-                  </div>
-                  <div className="process-step-label">Classification</div>
-                </div>
-                <div className="process-arrow">→</div>
-                <div className="process-step" style={{ animationDelay: '0.8s' }}>
                   <div className="process-step-icon">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
@@ -587,16 +674,16 @@ function App() {
                   <div className="process-step-label">ML Training</div>
                 </div>
                 <div className="process-arrow">→</div>
-                <div className="process-step" style={{ animationDelay: '1s' }}>
+                <div className="process-step" style={{ animationDelay: '0.7s' }}>
                   <div className="process-step-icon">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
                     </svg>
                   </div>
-                  <div className="process-step-label">Model Validation</div>
+                  <div className="process-step-label">Training Analysis</div>
                 </div>
                 <div className="process-arrow">→</div>
-                <div className="process-step" style={{ animationDelay: '1.2s' }}>
+                <div className="process-step" style={{ animationDelay: '0.8s' }}>
                   <div className="process-step-icon">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
@@ -608,10 +695,16 @@ function App() {
                   </div>
                   <div className="process-step-label">Scorecard Generation</div>
                 </div>
-              </div>
-              <div className="gen-ai-badge">
-                <span className="gen-ai-icon">⚡</span>
-                <span>Powered by Generative AI</span>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.9s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M9 11l3 3L22 4"></path>
+                      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Credit Risk Check</div>
+                </div>
               </div>
             </div>
 
@@ -621,35 +714,6 @@ function App() {
                 {/* Upload Section */}
                 <div className="upload-section">
                   <CSVReader onCSVUploaded={handleCSVUploaded} />
-                </div>
-
-                {/* Credit Check History */}
-                <div className="records-section">
-                  <h2 className="records-section-title">
-                    Credit Check History
-                  </h2>
-                  <div className="history-list">
-                    {creditCheckHistory.map(item => (
-                      <div key={item.id} className="history-card">
-                        <div className="history-card-header">
-                          <span className="history-record-id">Record #{item.recordId}</span>
-                          <span className={`history-status history-status-${item.status.toLowerCase()}`}>
-                            {item.status}
-                          </span>
-                        </div>
-                        <div className="history-card-body">
-                          <div className="history-info-item">
-                            <span className="history-info-label">Score:</span>
-                            <span className="history-info-value history-score">{item.score}</span>
-                          </div>
-                          <div className="history-info-item">
-                            <span className="history-info-label">Checked:</span>
-                            <span className="history-info-value">{item.checkedAt}</span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
                 </div>
               </div>
 

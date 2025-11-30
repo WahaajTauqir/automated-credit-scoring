@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import pandas as pd
@@ -817,21 +817,59 @@ def _probability_to_score(probabilities, config: Dict[str, float] = DEFAULT_SCOR
     Intelligent Credit Scoring. John Wiley & Sons.
     """
     factor, offset = _scorecard_scaling_params(config)
+    print(f"[_probability_to_score] [DEBUG] Config: {config}")
+    print(f"[_probability_to_score] [DEBUG] Factor: {factor:.4f}, Offset: {offset:.4f}")
+    
     # Clip probabilities to avoid log(0) or log(inf)
     probs = np.clip(np.asarray(probabilities, dtype=float), 1e-6, 1 - 1e-6)
+    print(f"[_probability_to_score] [DEBUG] Input probabilities: min={probs.min():.6f}, max={probs.max():.6f}, mean={probs.mean():.6f}, first_5={probs[:5]}")
     
     # Academic standard: odds = PD/(1-PD) (odds of default)
     odds_default = probs / (1.0 - probs)
+    print(f"[_probability_to_score] [DEBUG] Odds default: min={odds_default.min():.6f}, max={odds_default.max():.6f}, mean={odds_default.mean():.6f}, first_5={odds_default[:5]}")
     
     # Apply academic standard formula with negative sign to ensure
     # higher scores for lower risk (standard credit scoring convention)
     # Score = Offset - Factor × ln(odds_of_default)
     # This is equivalent to: Score = Offset + Factor × ln((1-PD)/PD)
     raw_scores = offset - factor * np.log(odds_default)
+    print(f"[_probability_to_score] [DEBUG] Raw scores: min={raw_scores.min():.2f}, max={raw_scores.max():.2f}, mean={raw_scores.mean():.2f}, first_5={raw_scores[:5]}")
     
     # Clip to valid score range
     clipped = np.clip(raw_scores, config["min_score"], config["max_score"])
+    print(f"[_probability_to_score] [DEBUG] Clipped scores: min={clipped.min():.2f}, max={clipped.max():.2f}, mean={clipped.mean():.2f}, first_5={clipped[:5]}")
     return clipped
+
+
+def _probability_to_score_raw(probabilities, config: Dict[str, float] = DEFAULT_SCORECARD_CONFIG):
+    """
+    Convert probability to raw scores without clipping (for normalization).
+    Same as _probability_to_score but returns raw scores without clipping.
+    
+    Parameters:
+    -----------
+    probabilities : array-like
+        Probability of default/bad (target=1). Should be between 0 and 1.
+    config : dict
+        Scorecard configuration with factor and offset parameters.
+        
+    Returns:
+    --------
+    numpy.ndarray
+        Raw credit scores (may be negative, not clipped)
+    """
+    factor, offset = _scorecard_scaling_params(config)
+    
+    # Clip probabilities to avoid log(0) or log(inf)
+    probs = np.clip(np.asarray(probabilities, dtype=float), 1e-6, 1 - 1e-6)
+    
+    # Academic standard: odds = PD/(1-PD) (odds of default)
+    odds_default = probs / (1.0 - probs)
+    
+    # Apply academic standard formula
+    raw_scores = offset - factor * np.log(odds_default)
+    
+    return raw_scores
 
 
 def _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw, target_min=0, target_max=600):
@@ -8367,6 +8405,8 @@ def mark_monotonic_as_model_ready(dataset_id):
         verified_features = []
         monotonicity_updates = []
         
+        print(f"[mark_monotonic_as_model_ready] Processing {len(features)} features with IV threshold >= {iv_threshold}")
+        
         for feature in features:
             feature_id = feature.get('id')
             feature_name = feature.get('name')
@@ -8378,25 +8418,82 @@ def mark_monotonic_as_model_ready(dataset_id):
             fine_step = get_binning_step_by_type(feature_id, 'fine')
             if not fine_step:
                 # No fine binning, skip
+                print(f"[mark_monotonic_as_model_ready] Skipping {feature_name}: no fine binning step")
                 continue
+            
+            # FIX: Get IV directly from fine_step first (most reliable source)
+            # Then fall back to feature dict if needed
+            iv_from_step = fine_step.get('iv_value')
+            if iv_from_step is not None:
+                try:
+                    iv_from_step = float(iv_from_step)
+                except (TypeError, ValueError):
+                    iv_from_step = None
             
             # Get all bins for this step
             bins = get_bins_by_step(fine_step['id'])
             if not bins or len(bins) < 2:
                 # Need at least 2 bins to check monotonicity
+                print(f"[mark_monotonic_as_model_ready] Skipping {feature_name}: insufficient bins ({len(bins) if bins else 0})")
                 continue
             
-            # Extract WOE values in bin_number order
+            # Extract WOE values - need to sort correctly based on variable type
+            # For discrete variables, sort by min value extracted from range_text
+            # For continuous variables, sort by min_value or bin_number
+            def get_sort_key_for_bin(bin_row):
+                """Get sort key for bin based on variable type."""
+                # Check if this is a discrete variable (min_value is None but range_text exists)
+                range_text = bin_row.get('range_text')
+                min_value = bin_row.get('min_value')
+                
+                if min_value is not None:
+                    # Continuous variable: use min_value
+                    return (0, float(min_value))  # 0 = continuous
+                elif range_text:
+                    # Discrete variable: extract min value from range_text
+                    # range_text can be "0", "1, 3", "2", etc.
+                    try:
+                        # Try to extract numbers from range_text (re is already imported at module level)
+                        numbers = re.findall(r'-?\d+\.?\d*', str(range_text))
+                        if numbers:
+                            min_val = min(float(n) for n in numbers)
+                            return (1, min_val)  # 1 = discrete
+                    except Exception:
+                        pass
+                
+                # Fallback: use bin_number
+                return (2, bin_row.get('bin_number', 0))
+            
+            # Sort bins by the appropriate key
+            sorted_bins = sorted(bins, key=get_sort_key_for_bin)
+            
             woe_values = []
-            for bin_row in sorted(bins, key=lambda x: x.get('bin_number', 0)):
+            bin_info_list = []  # For debugging
+            for bin_row in sorted_bins:
                 woe = bin_row.get('woe')
+                bin_label = bin_row.get('bin_label', 'unknown')
+                range_text = bin_row.get('range_text', '')
+                min_value = bin_row.get('min_value')
+                
                 if woe is not None:
                     try:
-                        woe_values.append(float(woe))
+                        woe_val = float(woe)
+                        woe_values.append(woe_val)
+                        bin_info_list.append({
+                            'label': bin_label,
+                            'range': range_text or (f"{min_value}" if min_value is not None else 'N/A'),
+                            'woe': woe_val
+                        })
                     except (TypeError, ValueError):
                         pass
             
+            # DEBUG: Log the sorted order
+            if bin_info_list:
+                bin_strs = [f"{b['label']}({b['range']}):WOE={b['woe']:.2f}" for b in bin_info_list]
+                print(f"[mark_monotonic_as_model_ready] {feature_name} sorted bins: {bin_strs}")
+            
             if len(woe_values) < 2:
+                print(f"[mark_monotonic_as_model_ready] Skipping {feature_name}: insufficient WOE values ({len(woe_values)})")
                 continue
             
             # Check monotonicity from actual WOE values
@@ -8440,10 +8537,27 @@ def mark_monotonic_as_model_ready(dataset_id):
             feature['is_monotonic'] = actual_monotonic
             feature['monotonic_direction'] = direction
             
+            # FIX: Extract IV - prefer fine_step iv_value, then fall back to extract_iv helper
+            if iv_from_step is not None:
+                iv = iv_from_step
+            else:
+                iv = extract_iv(feature)
+            
+            # DEBUG: Log IV extraction and qualification status
+            print(f"[mark_monotonic_as_model_ready] Feature {feature_name}: "
+                  f"monotonic={actual_monotonic}, IV={iv:.4f}, threshold={iv_threshold:.4f}, "
+                  f"iv_from_step={iv_from_step}, iv_from_feature={feature.get('iv_value')}, "
+                  f"qualifies={actual_monotonic and iv >= iv_threshold}")
+            
             # Check if feature qualifies (monotonic AND IV >= threshold)
-            iv = extract_iv(feature)
             if actual_monotonic and iv >= iv_threshold:
                 verified_features.append(feature)
+                print(f"[mark_monotonic_as_model_ready] ✓ {feature_name} QUALIFIED (monotonic, IV={iv:.4f} >= {iv_threshold:.4f})")
+            else:
+                if not actual_monotonic:
+                    print(f"[mark_monotonic_as_model_ready] ✗ {feature_name} NOT QUALIFIED: not monotonic")
+                elif iv < iv_threshold:
+                    print(f"[mark_monotonic_as_model_ready] ✗ {feature_name} NOT QUALIFIED: IV={iv:.4f} < {iv_threshold:.4f}")
         
         if monotonicity_updates:
             print(f"[mark_monotonic_as_model_ready] Updated monotonicity for {len(monotonicity_updates)} features")
@@ -17076,16 +17190,27 @@ def predict_credit_score():
         score_parameters = artifact_data.get('score_parameters', {})
         scorecard_bins = artifact_data.get('scorecard_bins', [])
         
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Target: {target}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Selected variables ({len(selected_variables)}): {selected_variables}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] WOE transformed data keys: {list(woe_transformed_data.keys())[:10] if woe_transformed_data else 'None'}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Score parameters keys: {list(score_parameters.keys()) if score_parameters else 'None'}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Number of scorecard bins: {len(scorecard_bins)}")
+        
         if not selected_variables:
             return jsonify({"error": "No selected variables found in artifact"}), 400
         
         # Convert CSV data to DataFrame
         df = pd.DataFrame(csv_data)
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Input CSV data shape: {df.shape}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Input CSV columns: {list(df.columns)}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Input CSV first row sample: {df.iloc[0].to_dict() if len(df) > 0 else 'Empty'}")
         
         # Validate required columns exist
         missing_cols = [var for var in selected_variables if var not in df.columns]
         if missing_cols:
             return jsonify({"error": f"Missing required columns: {missing_cols}"}), 400
+        
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] All required columns present in input data")
         
         # Sanitize data
         for var in selected_variables:
@@ -17105,10 +17230,18 @@ def predict_credit_score():
         if dataset:
             target = dataset.get('target_variable') or target
         
+        # Only use target_col if the target column actually exists in the prediction data
+        # For prediction, we don't need the target column, so we can skip it
+        target_col_for_preprocessing = target if target in df.columns else None
+        if target_col_for_preprocessing:
+            print(f"[PREDICT-CREDIT-SCORE] Target column '{target}' found in prediction data")
+        else:
+            print(f"[PREDICT-CREDIT-SCORE] Target column '{target}' not found in prediction data (expected for prediction)")
+        
         try:
             df_processed, preprocessing_report = preprocess_dataset(
                 df,
-                target_col=target,
+                target_col=target_col_for_preprocessing,  # Use None if target doesn't exist
                 preprocessing_steps={
                     'detect_types': True,
                     'handle_missing': True,
@@ -17139,9 +17272,11 @@ def predict_credit_score():
             
             # Preprocess raw data WITHOUT encoding to get original categories
             try:
+                # Only use target_col if it exists in the raw training data
+                target_col_for_raw = target if target in df_raw.columns else None
                 df_raw_processed, _ = preprocess_dataset(
                     df_raw,
-                    target_col=target,
+                    target_col=target_col_for_raw,  # Use None if target doesn't exist
                     preprocessing_steps={
                         'detect_types': True,
                         'handle_missing': True,
@@ -17340,18 +17475,29 @@ def predict_credit_score():
                 from sklearn.preprocessing import LabelEncoder
                 
                 # LR predictions (WOE)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Starting LR predictions...")
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] df shape: {df.shape}, columns: {list(df.columns)[:10]}")
                 X_lr_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] X_lr_woe shape: {X_lr_woe.shape}, columns: {list(X_lr_woe.columns)[:10]}")
                 X_lr_woe = X_lr_woe.drop(columns=[target], errors='ignore')
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] X_lr_woe after drop shape: {X_lr_woe.shape}")
                 X_lr_woe_const = add_constant(X_lr_woe, has_constant='add')
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] X_lr_woe_const shape: {X_lr_woe_const.shape}")
                 lr_pred = np.clip(lr_model.predict_proba(X_lr_woe_const)[:, 1], 1e-7, 1 - 1e-7)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] LR predictions: min={lr_pred.min():.6f}, max={lr_pred.max():.6f}, mean={lr_pred.mean():.6f}, first_5={lr_pred[:5]}")
                 
                 # RF predictions (WOE)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Starting RF predictions...")
                 X_rf_woe = _apply_woe_to_test_data(df, selected_variables, woe_transformed_data, target, dataset_id=dataset_id)
                 X_rf_woe = X_rf_woe.drop(columns=[target], errors='ignore')
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] X_rf_woe shape: {X_rf_woe.shape}")
                 rf_pred = np.clip(rf_model.predict_proba(X_rf_woe)[:, 1], 1e-7, 1 - 1e-7)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] RF predictions: min={rf_pred.min():.6f}, max={rf_pred.max():.6f}, mean={rf_pred.mean():.6f}, first_5={rf_pred[:5]}")
                 
                 # XGBoost predictions (raw features)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Starting XGBoost predictions...")
                 X_xgb = df[selected_variables].copy()
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] X_xgb initial shape: {X_xgb.shape}, columns: {list(X_xgb.columns)}")
                 df_train, _, _ = get_train_test_data(dataset_id)
                 for col in selected_variables:
                     if col in X_xgb.columns:
@@ -17374,7 +17520,10 @@ def predict_credit_score():
                             else:
                                 median_val = X_xgb[col].median()
                             X_xgb[col].fillna(median_val, inplace=True)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] X_xgb after preprocessing shape: {X_xgb.shape}")
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] X_xgb sample values (first row): {X_xgb.iloc[0].to_dict()}")
                 xgb_pred = np.clip(xgb_model.predict_proba(X_xgb)[:, 1], 1e-7, 1 - 1e-7)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] XGBoost predictions: min={xgb_pred.min():.6f}, max={xgb_pred.max():.6f}, mean={xgb_pred.mean():.6f}, first_5={xgb_pred[:5]}")
                 
                 # Combine base model predictions into meta-features
                 def _logit_transform(preds, eps=1e-6):
@@ -17388,30 +17537,43 @@ def predict_credit_score():
                     _logit_transform(xgb_pred)
                 ])
                 meta_features_aug = np.hstack([meta_features, logit_features])
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Meta features shape: {meta_features_aug.shape}")
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Meta features sample (first row): {meta_features_aug[0]}")
                 
                 # Scale meta-features
                 meta_features_scaled = scaler.transform(meta_features_aug)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Scaled meta features sample (first row): {meta_features_scaled[0]}")
                 
                 # Get meta-learner predictions
                 meta_learner_pred = np.clip(meta_learner.predict_proba(meta_features_scaled)[:, 1], 1e-7, 1 - 1e-7)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Meta-learner predictions: min={meta_learner_pred.min():.6f}, max={meta_learner_pred.max():.6f}, mean={meta_learner_pred.mean():.6f}, first_5={meta_learner_pred[:5]}")
                 
                 # Hybrid ensemble: 70% meta-learner + 30% weighted average
                 if 'performance_weights' in artifact_data:
                     performance_weights = artifact_data['performance_weights']
                 else:
                     performance_weights = [1/3, 1/3, 1/3]  # Equal weights fallback
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Performance weights: {performance_weights}")
                 
                 weighted_avg_pred = (
                     performance_weights[0] * lr_pred + 
                     performance_weights[1] * rf_pred +
                     performance_weights[2] * xgb_pred
                 )
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Weighted avg predictions: min={weighted_avg_pred.min():.6f}, max={weighted_avg_pred.max():.6f}, mean={weighted_avg_pred.mean():.6f}")
                 
                 ensemble_pred = 0.7 * meta_learner_pred + 0.3 * weighted_avg_pred
                 probabilities_array = np.clip(ensemble_pred, 1e-7, 1 - 1e-7)
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Final ensemble probabilities: min={probabilities_array.min():.6f}, max={probabilities_array.max():.6f}, mean={probabilities_array.mean():.6f}, first_5={probabilities_array[:5]}")
+                print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Probabilities array shape: {probabilities_array.shape}, dtype: {probabilities_array.dtype}")
             
-            # Convert probabilities to scores
-            scores_array = _probability_to_score(probabilities_array, DEFAULT_SCORECARD_CONFIG)
+            # Convert probabilities to scores (get raw scores without clipping - normalize first)
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Converting probabilities to scores...")
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Input probabilities stats: min={probabilities_array.min():.6f}, max={probabilities_array.max():.6f}, mean={probabilities_array.mean():.6f}")
+            # Get raw scores without clipping - normalization will handle the range
+            scores_array = _probability_to_score_raw(probabilities_array, DEFAULT_SCORECARD_CONFIG)
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Raw scores after conversion (no clipping): min={scores_array.min():.2f}, max={scores_array.max():.2f}, mean={scores_array.mean():.2f}, first_5={scores_array[:5]}")
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Scores array shape: {scores_array.shape}, dtype: {scores_array.dtype}")
             
         # Method 2: Scorecard-based prediction
         else:  # prediction_method == 'scorecard'
@@ -17531,12 +17693,20 @@ def predict_credit_score():
                     X_woe = X_woe.drop(columns=[target], errors='ignore')
                     X_woe_const = add_constant(X_woe, has_constant='add')
                     probabilities_array = np.clip(lr_model.predict_proba(X_woe_const)[:, 1], 1e-7, 1 - 1e-7)
-                    scores_array = _probability_to_score(probabilities_array, DEFAULT_SCORECARD_CONFIG)
+                    scores_array = _probability_to_score_raw(probabilities_array, DEFAULT_SCORECARD_CONFIG)
                 else:
                     return jsonify({"error": "Scorecard method failed and no fallback available"}), 400
         
         # Normalize scores to 0-600 using training data min/max
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Before normalization - scores: min={scores_array.min():.2f}, max={scores_array.max():.2f}, mean={scores_array.mean():.2f}, first_5={scores_array[:5]}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Score parameters available: {score_parameters is not None}")
+        if score_parameters:
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Score parameters keys: {list(score_parameters.keys())}")
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] score_min_raw: {score_parameters.get('score_min_raw', 'NOT FOUND')}")
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] score_max_raw: {score_parameters.get('score_max_raw', 'NOT FOUND')}")
+        
         if score_parameters and 'score_min_raw' in score_parameters and 'score_max_raw' in score_parameters:
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Normalizing using training data range...")
             scores_array = _normalize_scores_to_range(
                 scores_array,
                 score_parameters['score_min_raw'],
@@ -17545,10 +17715,19 @@ def predict_credit_score():
             print(f"[PREDICT-CREDIT-SCORE] Normalized scores using training data range: {score_parameters['score_min_raw']:.2f} - {score_parameters['score_max_raw']:.2f}")
         else:
             # Fallback: normalize using current data min/max
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Normalizing using current data range (fallback)...")
             score_min_raw = float(np.min(scores_array))
             score_max_raw = float(np.max(scores_array))
+            print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
             scores_array = _normalize_scores_to_range(scores_array, score_min_raw, score_max_raw)
             print(f"[PREDICT-CREDIT-SCORE] Normalized scores using current data range: {score_min_raw:.2f} - {score_max_raw:.2f}")
+        
+        # Clip to valid range AFTER normalization
+        scores_array = np.clip(scores_array, 0, 600)
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] After normalization and clipping - scores: min={scores_array.min():.2f}, max={scores_array.max():.2f}, mean={scores_array.mean():.2f}, first_5={scores_array[:5]}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Final scores array shape: {scores_array.shape}, dtype: {scores_array.dtype}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Number of zero scores: {(scores_array == 0).sum()}")
+        print(f"[PREDICT-CREDIT-SCORE] [DEBUG] Number of non-zero scores: {(scores_array != 0).sum()}")
         
         # Calculate risk bands from score percentiles
         score_min = float(np.min(scores_array))
@@ -17656,6 +17835,236 @@ def predict_credit_score():
         tb = traceback.format_exc()
         print(f"ERROR in predict_credit_score: {tb}")
         return jsonify({"error": f"Failed to predict credit scores ({type(e).__name__}): {str(e)}"}), 500
+
+
+# ----------- Download PDF Report with All Probabilities -----------
+@app.route('/api/download-pdf-report', methods=['POST'])
+@optional_auth
+def download_pdf_report():
+    """
+    Generate and download a PDF report containing all credit score predictions with probabilities.
+    
+    Request body:
+    {
+        "predictions": [
+            {
+                "id": str,
+                "score": float,
+                "probability": float (optional),
+                "risk_band": {
+                    "label": str,
+                    "color": str,
+                    "description": str
+                },
+                ...other row data...
+            }
+        ],
+        "risk_bands": [...],
+        "summary": {
+            "total_predictions": int,
+            "score_range": {...},
+            "method": str,
+            "model_type": str
+        },
+        "dataset_id": int (optional),
+        "model_type": str (optional)
+    }
+    
+    Returns: PDF file as binary response
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter, A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+        from io import BytesIO
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        predictions = data.get('predictions', [])
+        if not predictions or len(predictions) == 0:
+            return jsonify({"error": "No predictions data provided"}), 400
+        
+        risk_bands = data.get('risk_bands', [])
+        summary = data.get('summary', {})
+        dataset_id = data.get('dataset_id', 'N/A')
+        model_type = data.get('model_type', summary.get('model_type', 'N/A'))
+        
+        # Create PDF in memory
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+        
+        # Container for the 'Flowable' objects
+        elements = []
+        
+        # Define styles
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=20,
+            textColor=colors.HexColor('#1f2328'),
+            spaceAfter=30,
+            alignment=TA_CENTER
+        )
+        
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=14,
+            textColor=colors.HexColor('#0969da'),
+            spaceAfter=12
+        )
+        
+        # Title
+        elements.append(Paragraph("Credit Score Prediction Report", title_style))
+        elements.append(Spacer(1, 0.2*inch))
+        
+        # Summary section
+        elements.append(Paragraph("Summary", heading_style))
+        summary_data = [
+            ['Dataset ID:', str(dataset_id)],
+            ['Model Type:', str(model_type)],
+            ['Prediction Method:', summary.get('method', 'N/A')],
+            ['Total Predictions:', str(summary.get('total_predictions', len(predictions)))],
+        ]
+        
+        score_range = summary.get('score_range', {})
+        if score_range:
+            summary_data.append(['Score Range:', f"{score_range.get('min', 'N/A'):.2f} - {score_range.get('max', 'N/A'):.2f}"])
+            summary_data.append(['Mean Score:', f"{score_range.get('mean', 'N/A'):.2f}"])
+        
+        summary_table = Table(summary_data, colWidths=[2*inch, 4*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f6f8fa')),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+        ]))
+        elements.append(summary_table)
+        elements.append(Spacer(1, 0.3*inch))
+        
+        # Risk Bands section
+        if risk_bands:
+            elements.append(Paragraph("Risk Bands", heading_style))
+            risk_band_data = [['Risk Level', 'Score Range', 'Description']]
+            for band in risk_bands:
+                risk_band_data.append([
+                    band.get('label', 'N/A'),
+                    f"{band.get('min', 0):.2f} - {band.get('max', 0):.2f}",
+                    band.get('description', '')
+                ])
+            
+            risk_table = Table(risk_band_data, colWidths=[2*inch, 2*inch, 2.5*inch])
+            risk_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0969da')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f6f8fa')]),
+            ]))
+            elements.append(risk_table)
+            elements.append(Spacer(1, 0.3*inch))
+        
+        # Predictions section
+        elements.append(Paragraph("Detailed Predictions", heading_style))
+        
+        # Build table header - only ID, Score, and Risk Band
+        table_header = ['ID', 'Score', 'Risk Band']
+        
+        # Calculate column widths - only 3 columns
+        available_width = 7.5 * inch
+        col_widths = [
+            2.0 * inch,  # ID
+            1.5 * inch,  # Score
+            4.0 * inch,  # Risk Band
+        ]
+        
+        # Process predictions in batches and create separate tables
+        batch_size = 50  # Can increase batch size since table is simpler
+        for batch_start in range(0, len(predictions), batch_size):
+            batch_end = min(batch_start + batch_size, len(predictions))
+            batch = predictions[batch_start:batch_end]
+            
+            # Build table data for this batch
+            batch_table_data = [table_header]
+            
+            for pred in batch:
+                row = [
+                    str(pred.get('id', 'N/A')),
+                    f"{pred.get('score', 0):.2f}",
+                    pred.get('risk_band', {}).get('label', 'N/A')
+                ]
+                batch_table_data.append(row)
+            
+            # Create table for this batch
+            batch_table = Table(batch_table_data, colWidths=col_widths, repeatRows=1)
+            batch_table.setStyle(TableStyle([
+                # Header style
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0969da')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),  # ID left-aligned
+                ('ALIGN', (1, 0), (1, -1), 'CENTER'),  # Score center-aligned
+                ('ALIGN', (2, 0), (2, -1), 'LEFT'),  # Risk Band left-aligned
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f6f8fa')]),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            
+            elements.append(batch_table)
+            
+            # Add page break after each batch (except the last)
+            if batch_end < len(predictions):
+                elements.append(Spacer(1, 0.2*inch))
+                elements.append(Paragraph(f"Continued... (Showing rows {batch_start + 1}-{batch_end} of {len(predictions)})", 
+                                         ParagraphStyle('Continued', parent=styles['Normal'], fontSize=8, 
+                                                       textColor=colors.grey, alignment=TA_CENTER)))
+                elements.append(PageBreak())
+        
+        # Build PDF
+        doc.build(elements)
+        
+        # Get PDF data
+        buffer.seek(0)
+        pdf_data = buffer.getvalue()
+        buffer.close()
+        
+        # Generate filename
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"credit_score_report_{dataset_id}_{timestamp}.pdf"
+        
+        # Return PDF as response
+        return Response(
+            pdf_data,
+            mimetype='application/pdf',
+            headers={
+                'Content-Disposition': f'attachment; filename={filename}',
+                'Content-Length': str(len(pdf_data))
+            }
+        )
+        
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"ERROR in download_pdf_report: {tb}")
+        return jsonify({"error": f"Failed to generate PDF report ({type(e).__name__}): {str(e)}"}), 500
     
     
 def classify_with_heuristics(column_name, samples):

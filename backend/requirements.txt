@@ -12,3 +12,4 @@ requests
 xgboost
 bcrypt
 PyJWT
+reportlab
