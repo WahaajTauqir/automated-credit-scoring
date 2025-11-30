@@ -36,6 +36,13 @@ const Navbar = ({ developerMode = false, onDeveloperModeChange, currentStep }: N
     navigate('/');
   };
 
+  const handleLoginSuccess = () => {
+    // Navigate to home page and refresh
+    navigate('/');
+    // Force a page refresh to reload all data
+    window.location.reload();
+  };
+
   return (
     <>
       <nav className="navbar">
@@ -104,7 +111,7 @@ const Navbar = ({ developerMode = false, onDeveloperModeChange, currentStep }: N
         </div>
       </nav>
       <ChatOverlay isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} />
-      <LoginPanel isOpen={isLoginOpen} onClose={() => setIsLoginOpen(false)} />
+      <LoginPanel isOpen={isLoginOpen} onClose={() => setIsLoginOpen(false)} onSuccess={handleLoginSuccess} />
     </>
   );
 };

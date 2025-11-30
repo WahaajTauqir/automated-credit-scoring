@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useLocation, useNavigate, Routes, Route } from 'react-router-dom';
 import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
@@ -38,28 +38,37 @@ function App() {
   const [editingRecordId, setEditingRecordId] = useState<number | null>(null);
   const [editingRecordName, setEditingRecordName] = useState<string>('');
 
-  // Fetch existing analysis records on mount (with auth headers)
-  useEffect(() => {
-    const fetchRecords = async () => {
-      setRecordsLoading(true);
-      try {
-        const token = localStorage.getItem('credit_scoring_auth_token');
-        const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
-        const res = await fetch('http://localhost:5000/api/records', { headers });
-        const data = await res.json();
-        const list: AnalysisRecord[] = Array.isArray(data) ? data : [];
-        setRecords(list);
-        if (list.length > 0) {
-          setActiveRecordId((prev) => prev ?? list[0].id);
-        }
-      } catch (err) {
-        console.error('Failed to fetch records:', err);
-      } finally {
-        setRecordsLoading(false);
+  // Fetch existing analysis records on mount and whenever navigating to home page
+  const fetchRecords = useCallback(async () => {
+    setRecordsLoading(true);
+    try {
+      const token = localStorage.getItem('credit_scoring_auth_token');
+      const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+      const res = await fetch('http://localhost:5000/api/records', { headers });
+      const data = await res.json();
+      const list: AnalysisRecord[] = Array.isArray(data) ? data : [];
+      setRecords(list);
+      if (list.length > 0) {
+        setActiveRecordId((prev) => prev ?? list[0].id);
       }
-    };
-    fetchRecords();
+    } catch (err) {
+      console.error('Failed to fetch records:', err);
+    } finally {
+      setRecordsLoading(false);
+    }
   }, []);
+
+  // Fetch records on mount
+  useEffect(() => {
+    fetchRecords();
+  }, [fetchRecords]);
+
+  // Auto-refresh records whenever navigating to home page
+  useEffect(() => {
+    if (location.pathname === '/') {
+      fetchRecords();
+    }
+  }, [location.pathname, fetchRecords]);
 
   // Restore state from navigation (AdminPanel)
   useEffect(() => {

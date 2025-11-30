@@ -674,10 +674,17 @@ def _resolve_dataset_file_path(file_path: Optional[str]) -> Optional[str]:
     candidate = os.path.join(base_dir, file_path)
     if os.path.exists(candidate):
         return candidate
+    # Check backend/uploads (for backward compatibility)
     uploads_dir = os.path.join(base_dir, 'uploads')
     fallback = os.path.join(uploads_dir, os.path.basename(file_path))
     if os.path.exists(fallback):
         return fallback
+    # Check project root uploads directory (where train/test files are stored)
+    project_root = os.path.dirname(base_dir)
+    project_uploads_dir = os.path.join(project_root, 'uploads')
+    project_fallback = os.path.join(project_uploads_dir, os.path.basename(file_path))
+    if os.path.exists(project_fallback):
+        return project_fallback
     return None
 
 
@@ -15369,6 +15376,7 @@ def delete_record(record_id):
     """
     Delete a specific analysis record/dataset by ID.
     Cascade delete handles all related features, binning_steps, bins, etc.
+    Also deletes associated artifacts and uploaded CSV files.
     Only allows deletion if user owns the record.
     """
     try:
@@ -15378,6 +15386,124 @@ def delete_record(record_id):
             # Check ownership if user is authenticated
             if user_id and not user_owns_dataset(user_id, record_id):
                 return jsonify({"error": "Access denied"}), 403
+            
+            # Delete uploaded CSV file if it exists
+            dataset_path = dataset.get('dataset_path') or dataset.get('file_path')
+            if dataset_path:
+                resolved_path = _resolve_dataset_file_path(dataset_path)
+                if resolved_path and os.path.exists(resolved_path):
+                    try:
+                        os.remove(resolved_path)
+                        print(f"[DELETE RECORD] Deleted uploaded file: {resolved_path}")
+                    except OSError as e:
+                        print(f"[DELETE RECORD] Warning: Failed to delete uploaded file {resolved_path}: {e}")
+            
+            # Delete train and test dataset files
+            # Uploads directory is at project root, not in backend folder
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            uploads_dir = os.path.join(project_root, 'uploads')
+            
+            # First, try to delete using paths from database
+            train_path = dataset.get('train_path')
+            test_path = dataset.get('test_path')
+            
+            if train_path:
+                resolved_train_path = _resolve_dataset_file_path(train_path)
+                if resolved_train_path and os.path.exists(resolved_train_path):
+                    try:
+                        os.remove(resolved_train_path)
+                        print(f"[DELETE RECORD] Deleted train dataset (from DB path): {resolved_train_path}")
+                    except OSError as e:
+                        print(f"[DELETE RECORD] Warning: Failed to delete train dataset {resolved_train_path}: {e}")
+            
+            if test_path:
+                resolved_test_path = _resolve_dataset_file_path(test_path)
+                if resolved_test_path and os.path.exists(resolved_test_path):
+                    try:
+                        os.remove(resolved_test_path)
+                        print(f"[DELETE RECORD] Deleted test dataset (from DB path): {resolved_test_path}")
+                    except OSError as e:
+                        print(f"[DELETE RECORD] Warning: Failed to delete test dataset {resolved_test_path}: {e}")
+            
+            # Always search for train/test files matching the pattern (more reliable)
+            if os.path.exists(uploads_dir):
+                # Pattern: train_set_dataset_{record_id}_*.csv
+                train_pattern = os.path.join(uploads_dir, f"train_set_dataset_{record_id}_*.csv")
+                test_pattern = os.path.join(uploads_dir, f"test_set_dataset_{record_id}_*.csv")
+                
+                # Also try without .csv extension in case files were saved differently
+                train_pattern_no_ext = os.path.join(uploads_dir, f"train_set_dataset_{record_id}_*")
+                test_pattern_no_ext = os.path.join(uploads_dir, f"test_set_dataset_{record_id}_*")
+                
+                print(f"[DELETE RECORD] Searching for train files with pattern: {train_pattern}")
+                print(f"[DELETE RECORD] Searching for test files with pattern: {test_pattern}")
+                
+                train_files = glob.glob(train_pattern)
+                test_files = glob.glob(test_pattern)
+                
+                # Also check pattern without extension
+                train_files_no_ext = [f for f in glob.glob(train_pattern_no_ext) if f not in train_files and not f.endswith('.csv')]
+                test_files_no_ext = [f for f in glob.glob(test_pattern_no_ext) if f not in test_files and not f.endswith('.csv')]
+                
+                # Additional approach: list all files and filter by record_id pattern
+                try:
+                    all_files = os.listdir(uploads_dir)
+                    train_files_manual = [
+                        os.path.join(uploads_dir, f) 
+                        for f in all_files 
+                        if f.startswith(f"train_set_dataset_{record_id}_") and os.path.isfile(os.path.join(uploads_dir, f))
+                    ]
+                    test_files_manual = [
+                        os.path.join(uploads_dir, f) 
+                        for f in all_files 
+                        if f.startswith(f"test_set_dataset_{record_id}_") and os.path.isfile(os.path.join(uploads_dir, f))
+                    ]
+                    
+                    # Combine all found files (remove duplicates)
+                    all_train_files = list(set(train_files + train_files_no_ext + train_files_manual))
+                    all_test_files = list(set(test_files + test_files_no_ext + test_files_manual))
+                except OSError as e:
+                    print(f"[DELETE RECORD] Warning: Failed to list uploads directory: {e}")
+                    all_train_files = train_files + train_files_no_ext
+                    all_test_files = test_files + test_files_no_ext
+                
+                print(f"[DELETE RECORD] Found {len(all_train_files)} train file(s), {len(all_test_files)} test file(s)")
+                
+                # Delete all train files
+                for train_file in all_train_files:
+                    try:
+                        if os.path.exists(train_file) and os.path.isfile(train_file):
+                            os.remove(train_file)
+                            print(f"[DELETE RECORD] ✓ Deleted train dataset: {train_file}")
+                        else:
+                            print(f"[DELETE RECORD] Train file not found or not a file (already deleted?): {train_file}")
+                    except OSError as e:
+                        print(f"[DELETE RECORD] Warning: Failed to delete train dataset {train_file}: {e}")
+                
+                # Delete all test files
+                for test_file in all_test_files:
+                    try:
+                        if os.path.exists(test_file) and os.path.isfile(test_file):
+                            os.remove(test_file)
+                            print(f"[DELETE RECORD] ✓ Deleted test dataset: {test_file}")
+                        else:
+                            print(f"[DELETE RECORD] Test file not found or not a file (already deleted?): {test_file}")
+                    except OSError as e:
+                        print(f"[DELETE RECORD] Warning: Failed to delete test dataset {test_file}: {e}")
+            else:
+                print(f"[DELETE RECORD] Warning: Uploads directory does not exist: {uploads_dir}")
+            
+            # Delete all artifact files for this dataset
+            artifact_pattern = _artifact_pattern(record_id)
+            artifact_files = glob.glob(artifact_pattern)
+            for artifact_file in artifact_files:
+                try:
+                    os.remove(artifact_file)
+                    print(f"[DELETE RECORD] Deleted artifact: {artifact_file}")
+                except OSError as e:
+                    print(f"[DELETE RECORD] Warning: Failed to delete artifact {artifact_file}: {e}")
+            
+            # Delete from database (cascade will handle related records)
             delete_dataset(record_id)
             return jsonify({"success": True})
         return jsonify({"error": "Dataset not found"}), 404
