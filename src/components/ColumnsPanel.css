@@ -3,7 +3,13 @@
   grid-template-columns: 1.25fr 1fr 1fr 1fr;
   gap: 20px;
   width: 100%;
+  max-width: 100%;
   margin-top: 20px;
+  max-height: calc(100vh - 250px); /* Constrain to viewport height */
+  min-height: calc(100vh - 300px); /* Always stretch to viewport height */
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0;
 }
 
 .column-panel {
@@ -13,7 +19,12 @@
   padding: 16px;
   display: flex;
   flex-direction: column;
-  max-height: 500px;
+  max-height: calc(100vh - 300px); /* Constrain to viewport height */
+  min-height: calc(100vh - 350px); /* Always stretch to viewport height */
+  height: 100%;
+  overflow: visible; /* Allow buttons to be visible */
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .column-panel h3 {
@@ -37,6 +48,8 @@
   gap: 8px;
   padding-right: 6px;
   flex-grow: 1;
+  min-height: 0; /* Allow flex to control height */
+  max-height: none; /* Remove max-height constraint, let flex handle it */
 }
 
 .column-list::-webkit-scrollbar {
@@ -60,6 +73,9 @@
   font-size: 13px;
   color: #c9d1d9;
   word-break: break-word;
+  min-width: 0;
+  overflow-wrap: break-word;
+  white-space: normal;
 }
 
 .radio-group {
@@ -120,6 +136,7 @@
   border: none;
   border-radius: 4px;
   cursor: pointer;
+  flex-shrink: 0; /* Prevent button from shrinking */
 }
 
 .assign-button:hover {
@@ -129,9 +146,18 @@
 @media (max-width: 900px) {
   .columns-layout {
     grid-template-columns: 1fr;
+    max-height: calc(100vh - 250px);
+    min-height: calc(100vh - 300px);
+    height: 100%;
   }
-
   .column-panel {
+    max-height: calc(100vh - 300px);
+    min-height: calc(100vh - 350px);
+    height: 100%;
+    overflow: visible;
+  }
+  .column-list {
+    min-height: 0;
     max-height: none;
   }
 }

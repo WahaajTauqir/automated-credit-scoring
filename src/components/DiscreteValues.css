@@ -1,0 +1,154 @@
+/* Discrete Values Dropdown Component */
+
+.discrete-values-dropdown {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+}
+
+.discrete-values-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.25rem 0.5rem;
+  background: var(--bg-quaternary, #1c2528);
+  border: 1px solid var(--border-primary, #30363d);
+  border-radius: 6px;
+  color: var(--fg-secondary, #d1d5db);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: left;
+}
+
+.discrete-values-toggle:hover {
+  background: var(--bg-tertiary, #12171d);
+  border-color: var(--fg-accent-green, #2ea043);
+  color: var(--fg-primary, #f6f8fa);
+}
+
+.discrete-values-toggle.expanded {
+  border-color: var(--fg-accent-green, #2ea043);
+  background: var(--bg-tertiary, #12171d);
+}
+
+.preview-values {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.more-indicator {
+  color: var(--fg-accent-green, #2ea043);
+  font-weight: 600;
+  margin-left: 0.25rem;
+}
+
+.dropdown-icon {
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+  color: var(--fg-tertiary, #8b949e);
+}
+
+.discrete-values-toggle.expanded .dropdown-icon {
+  transform: rotate(180deg);
+  color: var(--fg-accent-green, #2ea043);
+}
+
+.discrete-values-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 0.25rem;
+  background: var(--bg-secondary, #0a0e14);
+  border: 1px solid var(--fg-accent-green, #2ea043);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 100;
+  overflow: hidden;
+  animation: slideDown 0.2s ease;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.values-scroll {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+/* Custom scrollbar for dropdown */
+.values-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.values-scroll::-webkit-scrollbar-track {
+  background: var(--bg-tertiary, #12171d);
+  border-radius: 3px;
+}
+
+.values-scroll::-webkit-scrollbar-thumb {
+  background: var(--fg-accent-green, #2ea043);
+  border-radius: 3px;
+}
+
+.values-scroll::-webkit-scrollbar-thumb:hover {
+  background: #26a641;
+}
+
+.value-item {
+  padding: 0.4rem 0.5rem;
+  border-radius: 4px;
+  color: var(--fg-secondary, #d1d5db);
+  font-size: 13px;
+  transition: background 0.15s ease;
+}
+
+.value-item:hover {
+  background: var(--bg-tertiary, #12171d);
+  color: var(--fg-primary, #f6f8fa);
+}
+
+.value-item:not(:last-child) {
+  border-bottom: 1px solid var(--border-secondary, #21262d);
+}
+
+.values-footer {
+  padding: 0.5rem;
+  background: var(--bg-tertiary, #12171d);
+  border-top: 1px solid var(--border-primary, #30363d);
+  color: var(--fg-tertiary, #8b949e);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .discrete-values-toggle {
+    font-size: 12px;
+    padding: 0.2rem 0.4rem;
+  }
+  
+  .value-item {
+    font-size: 12px;
+    padding: 0.35rem 0.4rem;
+  }
+  
+  .values-scroll {
+    max-height: 200px;
+  }
+}

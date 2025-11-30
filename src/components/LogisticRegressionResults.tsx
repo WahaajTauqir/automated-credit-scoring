@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './LogisticRegressionResults.css';
 
 interface LogisticRegressionResultsProps {
@@ -9,9 +9,13 @@ interface LogisticRegressionResultsProps {
   onColumnSelect: (column: string) => void;
   selectedColumn: string;
   onToggleSelect?: (column: string) => void;
-  onGenerateScoreCard?: () => void;
+  onGenerateScoreCard?: (modelType: string) => void;
   generatingScoreCard?: boolean;
   onGotoScoreCard?: () => void;
+  onResultsUpdate?: (results: any) => void; // ADD THIS LINE
+  recordId?: number;
+  triggerRegression?: number; // Trigger count to run regression from sidebar
+  initialResults?: LogisticResults | null; // Cached results to initialize from
 }
 
 interface ModelStats {
@@ -80,14 +84,43 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   selectedColumn,
   onToggleSelect,
   onGenerateScoreCard,
-  generatingScoreCard
-  , onGotoScoreCard
+  generatingScoreCard,
+  onGotoScoreCard,
+  onResultsUpdate,
+  recordId,
+  triggerRegression,
+  initialResults
 }) => {
-  const [results, setResults] = useState<LogisticResults | null>(null);
+  const [results, setResults] = useState<LogisticResults | null>(initialResults || null);
   const [loading, setLoading] = useState(false);
-  const [showLegend, setShowLegend] = useState(false);
   const [confusionView, setConfusionView] = useState<'counts' | 'percent'>('counts');
-  const [activeTab, setActiveTab] = useState<'coefficients' | 'vif' | 'roc' | 'confusion' | 'ks'>('coefficients');
+  const lastTriggerRef = useRef<number>(triggerRegression || 0); // Initialize with current trigger value
+
+  // Update results when initialResults prop changes (e.g., when cached data is loaded)
+  // Only update if we don't already have results to avoid overwriting with stale cache
+  useEffect(() => {
+    if (initialResults && !results) {
+      setResults(initialResults);
+    }
+  }, [initialResults]);
+
+  // Initialize lastTriggerRef with current trigger value on mount to prevent auto-run
+  useEffect(() => {
+    if (triggerRegression && triggerRegression > 0) {
+      lastTriggerRef.current = triggerRegression;
+    }
+  }, []); // Only run on mount
+
+  // Watch for trigger from sidebar button
+  // Only run when triggerRegression actually increases (user clicked Run button)
+  // This prevents re-running when component remounts with the same trigger value
+  useEffect(() => {
+    if (triggerRegression && triggerRegression > 0 && triggerRegression > lastTriggerRef.current) {
+      lastTriggerRef.current = triggerRegression;
+      runLogisticRegression();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [triggerRegression]);
 
   const runLogisticRegression = async () => {
     if (selectedVariables.length === 0) {
@@ -103,13 +136,19 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
         body: JSON.stringify({
           selected_variables: selectedVariables,
           target: targetVariable,
-          woe_transformed_data: woeTransformedData
+          woe_transformed_data: woeTransformedData,
+          record_id: recordId
         })
       });
 
       const data = await response.json();
       if (data.success) {
         setResults(data);
+        
+        // ADD THIS: Call the callback to update parent state
+        if (onResultsUpdate) {
+          onResultsUpdate(data);
+        }
       } else {
         alert(`Error: ${data.error}`);
       }
@@ -120,6 +159,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
     }
   };
 
+  // ... rest of your existing code remains exactly the same ...
   const getSignificanceColor = (significance: string) => {
     switch (significance) {
       case 'Highly Significant': return '#52c41a';
@@ -140,6 +180,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   };
 
   const renderROCCurve = () => {
+    // ... your existing renderROCCurve function code ...
     if (!results?.roc_data) return null;
 
     const svgWidth = 400;
@@ -159,7 +200,6 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
 
     return (
       <div className="roc-curve-container">
-        <h4>ROC Curve</h4>
         <svg width={svgWidth} height={svgHeight} className="roc-svg">
           {/* Grid lines */}
           {[0, 0.2, 0.4, 0.6, 0.8, 1.0].map(val => (
@@ -182,7 +222,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
               />
             </g>
           ))}
-          
+
           {/* Diagonal reference line */}
           <line
             x1={margin}
@@ -193,7 +233,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
             strokeWidth={1}
             strokeDasharray="5,5"
           />
-          
+
           {/* ROC Curve */}
           <path
             d={pathData}
@@ -201,11 +241,11 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
             stroke="#1890ff"
             strokeWidth={2}
           />
-          
+
           {/* Axes */}
           <line x1={margin} y1={margin} x2={margin} y2={margin + plotHeight} stroke="#f0f6fc" strokeWidth={2} />
           <line x1={margin} y1={margin + plotHeight} x2={margin + plotWidth} y2={margin + plotHeight} stroke="#f0f6fc" strokeWidth={2} />
-          
+
           {/* Labels */}
           <text x={svgWidth / 2} y={svgHeight - 5} textAnchor="middle" fill="#f0f6fc" fontSize="12">
             False Positive Rate
@@ -213,7 +253,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
           <text x={15} y={svgHeight / 2} textAnchor="middle" fill="#f0f6fc" fontSize="12" transform={`rotate(-90, 15, ${svgHeight / 2})`}>
             True Positive Rate
           </text>
-          
+
           {/* Tick labels */}
           {[0, 0.2, 0.4, 0.6, 0.8, 1.0].map(val => (
             <g key={val}>
@@ -235,6 +275,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   };
 
   const renderConfusionMatrix = () => {
+    // ... your existing renderConfusionMatrix function code ...
     const cm = results?.confusion_matrix;
     if (!cm || !Array.isArray(cm) || cm.length < 2) return <div style={{ color: '#f0f6fc' }}>No confusion matrix available</div>;
 
@@ -256,7 +297,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
 
     const labelFill = '#f0f6fc';
     const gridStroke = '#30363d';
-  const bg = 'transparent';
+    const bg = 'transparent';
 
     const getFill = (_count: number, norm: number) => {
       // stronger color for higher percent
@@ -266,27 +307,24 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
 
     return (
       <div className="confusion-svg-panel">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h4 style={{ margin: 0 }}>Confusion Matrix</h4>
-          <div>
-            <button className="tab-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '12px' }}>
+          <button className="view-toggle-btn" onClick={() => setConfusionView('counts')} style={{ marginRight: 8 }}>
               Counts
             </button>
-            <button className="tab-btn" onClick={() => setConfusionView('percent')}>
+          <button className="view-toggle-btn" onClick={() => setConfusionView('percent')}>
               Percent
             </button>
-          </div>
         </div>
 
         <svg width={size + pad * 2} height={size + pad * 2} style={{ background: bg }}>
           {/* Labels */}
           <text x={pad + cell} y={pad - 6} textAnchor="middle" fill={labelFill} fontSize={12}>Predicted</text>
-          <text x={pad + cell / 2} y={pad + size + 14} textAnchor="middle" fill={labelFill} fontSize={12} transform={`rotate(-90, ${pad + cell / 2}, ${pad + size/2})`}>Actual</text>
+          <text x={pad - 8} y={pad + size / 2} textAnchor="start" fill={labelFill} fontSize={12} transform={`rotate(-90, ${pad - 8}, ${pad + size / 2})`}>Actual</text>
 
           {/* Grid cells */}
           {[0, 1].map((r) =>
             [0, 1].map((c) => {
-              const count = [ [a00, a01], [a10, a11] ][r][c];
+              const count = [[a00, a01], [a10, a11]][r][c];
               const norm = normalized[r][c];
               const x = pad + c * cell;
               const y = pad + r * cell;
@@ -297,7 +335,7 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                     {confusionView === 'counts' ? String(count) : `${(norm * 100).toFixed(2)}%`}
                   </text>
                   <text x={x + cell / 2} y={y + cell / 2 + 14} textAnchor="middle" fill={labelFill} fontSize={11}>
-                    {confusionView === 'counts' ? `${((count/total)*100).toFixed(2)}%` : `(${String(count)})`}
+                    {confusionView === 'counts' ? `${((count / total) * 100).toFixed(2)}%` : `(${String(count)})`}
                   </text>
                 </g>
               );
@@ -320,145 +358,48 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   };
 
   return (
-    <div className="logistic-regression-container">
-      <div className="lr-header">
-        <div className="lr-title">
-          <h3>Logistic Regression Analysis</h3>
-          <button 
-            className="legend-toggle"
-            onClick={() => setShowLegend(!showLegend)}
-          >
-            {showLegend ? 'Hide Legend' : 'Show Legend'}
-          </button>
+    <div className="model-results-container">
+      {loading && (
+        <div className="loading-container">
+          <div className="loading-spinner"></div>
+          <p>Running Logistic Regression...</p>
         </div>
-        
-        {showLegend && (
-          <div className="legend-panel">
-            <h4>Legend</h4>
-            <div className="legend-section">
-              <h5>P-Value Significance:</h5>
-              <ul>
-                <li><span style={{ color: '#52c41a' }}>●</span> Highly Significant (p &lt; 0.01)</li>
-                <li><span style={{ color: '#fa8c16' }}>●</span> Significant (p &lt; 0.05)</li>
-                <li><span style={{ color: '#ff4d4f' }}>●</span> Not Significant (p ≥ 0.05)</li>
-              </ul>
+      )}
+
+      {!loading && !results && (
+        <div className="no-results-message">
+          <p>Click "Run Logistic Regression" to train the model</p>
             </div>
-            <div className="legend-section">
-              <h5>VIF (Multicollinearity):</h5>
-              <ul>
-                <li><span style={{ color: '#52c41a' }}>●</span> Low (VIF &lt; 5): No multicollinearity</li>
-                <li><span style={{ color: '#fa8c16' }}>●</span> Moderate (5 ≤ VIF &lt; 10): Some concern</li>
-                <li><span style={{ color: '#ff4d4f' }}>●</span> High (VIF ≥ 10): High multicollinearity</li>
-              </ul>
+      )}
+
+      {results && (
+        <>
+          {/* Top Section: 3 Graphs Side by Side */}
+          <div className="model-graphs-section">
+            <div className="graph-card">
+              <h4>ROC Curve</h4>
+              {renderROCCurve()}
             </div>
-            <div className="legend-section">
-              <h5>Gini Coefficient:</h5>
-              <ul>
-                <li>Ranges from 0 to 1 (higher is better)</li>
-                <li>&gt; 0.6: Excellent model</li>
-                <li>0.4 - 0.6: Good model</li>
-                <li>&lt; 0.4: Poor model</li>
-              </ul>
+            <div className="graph-card">
+              <h4>Confusion Matrix</h4>
+              {renderConfusionMatrix()}
             </div>
-            <div className="legend-section">
-              <h5>Confusion Matrix</h5>
-              <ul>
-                <li>Cells: top-left=TN, top-right=FP, bottom-left=FN, bottom-right=TP</li>
-                <li>Accuracy = (TP+TN)/Total — &gt;0.80 good, 0.65–0.80 moderate, &lt;0.65 poor</li>
-                <li>Precision = TP/(TP+FP) — &gt;0.75 good, 0.50–0.75 moderate, &lt;0.50 poor</li>
-                <li>Recall = TP/(TP+FN) — &gt;0.75 good, 0.50–0.75 moderate, &lt;0.50 poor</li>
-                <li>F1 Score = harmonic mean(Precision,Recall) — &gt;0.75 good, 0.50–0.75 moderate, &lt;0.50 poor</li>
-              </ul>
+            <div className="graph-card">
+              <h4>KS Statistics</h4>
+              {results.ks_curve ? (
+                <KSChart ks_curve={results.ks_curve} ks_stat={results.ks_stat ?? 0} />
+              ) : (
+                <div className="no-data-message">No KS data available</div>
+              )}
             </div>
-          </div>
-        )}
       </div>
 
-      <div className="lr-content">
-        <div className="selected-variables-panel">
-          <h4>Selected Variables ({(allSelectedVariables || selectedVariables).length})</h4>
-            <div className="variables-list">
-            {(allSelectedVariables || selectedVariables).map((variable) => (
-              <div
-                key={variable}
-                className={`variable-item ${selectedColumn === variable ? 'selected' : ''}`}
-              >
-                <span className="variable-name" onClick={(e) => { e.stopPropagation(); onColumnSelect(variable); }}>{variable}</span>
-                <input
-                  type="checkbox"
-                  checked={selectedVariables.includes(variable)}
-                  onClick={(e) => e.stopPropagation()} // prevent row click
-                  onChange={() => onToggleSelect ? onToggleSelect(variable) : undefined}
-                />
-              </div>
-            ))}
-          </div>
-          
-          <button 
-            className="run-regression-btn"
-            onClick={runLogisticRegression}
-            disabled={loading || selectedVariables.length === 0}
-          >
-            {loading ? 'Running...' : 'Run Logistic Regression'}
-          </button>
-          
-          {results && onGenerateScoreCard && (
-            <button 
-              className="run-regression-btn"
-              onClick={() => {
-                try {
-                  if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
-                } catch (e) {}
-                onGenerateScoreCard();
-              }}
-              disabled={generatingScoreCard || selectedVariables.length === 0}
-              style={{ marginTop: '10px' }}
-            >
-              {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
-            </button>
-          )}
-        </div>
-
-  {results && (
-          <div className="results-panel">
-            <div className="results-tabs">
-              <button 
-                className={`tab-btn ${activeTab === 'coefficients' ? 'active' : ''}`}
-                onClick={() => setActiveTab('coefficients')}
-              >
-                Coefficients
-              </button>
-              {/* P-Values merged into Coefficients table */}
-              <button 
-                className={`tab-btn ${activeTab === 'vif' ? 'active' : ''}`}
-                onClick={() => setActiveTab('vif')}
-              >
-                Multicollinearity
-              </button>
-              <button 
-                className={`tab-btn ${activeTab === 'roc' ? 'active' : ''}`}
-                onClick={() => setActiveTab('roc')}
-              >
-                ROC Curve
-              </button>
-              <button 
-                className={`tab-btn ${activeTab === 'confusion' ? 'active' : ''}`}
-                onClick={() => setActiveTab('confusion')}
-              >
-                Confusion Matrix
-              </button>
-              <button 
-                className={`tab-btn ${activeTab === 'ks' ? 'active' : ''}`}
-                onClick={() => setActiveTab('ks')}
-              >
-                KS Statistic
-              </button>
-            </div>
-
-            <div className="tab-content">
-              {activeTab === 'coefficients' && (
-                <div className="coefficients-table">
+          {/* Bottom Section: All Details */}
+          <div className="model-details-section">
+            {/* Model Coefficients */}
+            <div className="detail-card">
                   <h4>Model Coefficients</h4>
+              <div className="table-container">
                   <table>
                     <thead>
                       <tr>
@@ -475,7 +416,6 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                           <tr key={index}>
                             <td>{coef.variable}</td>
                             <td>{formatNumber(coef.coefficient)}</td>
-                            {/* find matching p-value entry */}
                             <td>
                               {(() => {
                                 const pv = results.p_values.find(p => p.variable === coef.variable);
@@ -494,11 +434,12 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                     </tbody>
                   </table>
                 </div>
-              )}
+            </div>
 
-              {activeTab === 'vif' && (
-                <div className="vif-table">
+            {/* Multicollinearity (VIF) */}
+            <div className="detail-card">
                   <h4>Multicollinearity (VIF)</h4>
+              <div className="table-container">
                   <table>
                     <thead>
                       <tr>
@@ -520,81 +461,30 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                     </tbody>
                   </table>
                 </div>
-              )}
-
-              {activeTab === 'roc' && renderROCCurve()}
-              {activeTab === 'confusion' && renderConfusionMatrix()}
-              {activeTab === 'ks' && results.ks_curve && (
-                <div className="ks-panel">
-                  <h4>KS Curve</h4>
-                  <KSChart ks_curve={results.ks_curve} ks_stat={results.ks_stat ?? 0} />
-                </div>
-              )}
             </div>
 
-            <div className="model-summary">
+            {/* Model Summary */}
+            <div className="detail-card">
               <h4>Model Summary</h4>
               <div className="summary-grid">
-                {activeTab === 'confusion' ? (
-                  // Only show classification metrics when Confusion Matrix tab is active
-                  results.accuracy !== undefined ? (
+                {(() => {
+                  const intercept = results.coefficients.find(c => c.variable === 'Intercept');
+                  return (
                     <>
+                      {intercept && (
                       <div className="summary-item">
-                        <label>Accuracy:</label>
-                        <span>{formatNumber(results.accuracy)}</span>
-                      </div>
-                      <div className="summary-item">
-                        <label>Precision:</label>
-                        <span>{formatNumber(results.precision ?? 0)}</span>
-                      </div>
-                      <div className="summary-item">
-                        <label>Recall:</label>
-                        <span>{formatNumber(results.recall ?? 0)}</span>
-                      </div>
-                      <div className="summary-item">
-                        <label>F1 Score:</label>
-                        <span>{formatNumber(results.f1 ?? 0)}</span>
-                      </div>
-                    </>
-                  ) : (
-                    <div style={{ color: '#f0f6fc' }}>No classification metrics available</div>
-                  )
-                ) : activeTab === 'roc' ? (
-                  // When ROC tab is active, show Gini guidance instead of full summary
-                  <div style={{ color: '#f0f6fc', padding: 12 }}>
-                    <h5 style={{ marginTop: 0 }}>Gini Coefficient:</h5>
-                    <div>Ranges from 0 to 1 (higher is better)</div>
-                    <ul style={{ marginTop: 8 }}>
-                      <li>{'> 0.6'}: Excellent model</li>
-                      <li>0.4 - 0.6: Good model</li>
-                      <li>{'< 0.4'}: Poor model</li>
-                    </ul>
-                  </div>
-                ) : activeTab === 'vif' ? (
-                  // When Multicollinearity tab is active, show only AIC and BIC
-                  <>
-                    <div className="summary-item">
-                      <label>AIC:</label>
-                      <span>{formatNumber(results.model_stats.aic)}</span>
-                    </div>
-                    <div className="summary-item">
-                      <label>BIC:</label>
-                      <span>{formatNumber(results.model_stats.bic)}</span>
-                    </div>
-                  </>
-                ) : activeTab === 'coefficients' ? (
-                  // When Coefficients tab is active, show only Intercept, Log Likelihood, Pseudo R², Observations
-                  <>
-                    {(() => {
-                      const intercept = results.coefficients.find(c => c.variable === 'Intercept');
-                      if (!intercept) return null;
-                      return (
-                        <div className="summary-item">
                           <label>Intercept:</label>
                           <span>{formatNumber(intercept.coefficient)}</span>
-                        </div>
-                      );
-                    })()}
+                      </div>
+                      )}
+                      <div className="summary-item">
+                        <label>AIC:</label>
+                        <span>{formatNumber(results.model_stats.aic)}</span>
+                      </div>
+                      <div className="summary-item">
+                        <label>BIC:</label>
+                        <span>{formatNumber(results.model_stats.bic)}</span>
+                      </div>
                     <div className="summary-item">
                       <label>Log Likelihood:</label>
                       <span>{formatNumber(results.model_stats.log_likelihood)}</span>
@@ -607,29 +497,20 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                       <label>Observations:</label>
                       <span>{results.model_stats.n_observations}</span>
                     </div>
-                  </>
-                ) : activeTab === 'ks' ? (
-                  // When KS tab is active, show KS statistic and short guidance
-                  <div style={{ color: '#f0f6fc', padding: 12 }}>
-                    <div><strong>KS statistic:</strong> {results.ks_stat !== undefined ? formatNumber(results.ks_stat) : 'N/A'} at threshold {results.ks_threshold !== undefined && results.ks_threshold !== null ? formatNumber(results.ks_threshold) : 'N/A'}</div>
-                    <div style={{ marginTop: 8, fontSize: 12, color: '#8b949e' }}>Higher KS (closer to 1) indicates better separation; &gt;0.4 excellent, 0.2–0.4 good, &lt;0.2 weak.</div>
-                  </div>
-                ) : (
-                  // Full model summary for other tabs
-                  <>
-                    <div className="summary-item">
-                      <label>AIC:</label>
-                      <span>{formatNumber(results.model_stats.aic)}</span>
-                    </div>
-                    <div className="summary-item">
-                      <label>BIC:</label>
-                      <span>{formatNumber(results.model_stats.bic)}</span>
-                    </div>
                     <div className="summary-item">
                       <label>Gini Coefficient:</label>
                       <span>{formatNumber(results.gini_coefficient)}</span>
                     </div>
-                    {/* Classification metrics */}
+                      <div className="summary-item">
+                        <label>AUC:</label>
+                        <span>{formatNumber(results.auc)}</span>
+                      </div>
+                      {results.ks_stat !== undefined && (
+                        <div className="summary-item">
+                          <label>KS Statistic:</label>
+                          <span>{formatNumber(results.ks_stat)}</span>
+                        </div>
+                      )}
                     {results.accuracy !== undefined && (
                       <>
                         <div className="summary-item">
@@ -651,12 +532,31 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
                       </>
                     )}
                   </>
-                )}
+                  );
+                })()}
               </div>
             </div>
+
+            {/* Generate Score Card Button */}
+            {onGenerateScoreCard && (
+              <div className="detail-card">
+                <button
+                  className="generate-scorecard-btn"
+                  onClick={() => {
+                    try {
+                      if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
+                    } catch (e) { }
+                    onGenerateScoreCard('logistic');
+                  }}
+                  disabled={generatingScoreCard || selectedVariables.length === 0}
+                >
+                  {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
+                </button>
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 };
@@ -700,7 +600,7 @@ const KSChart: React.FC<{ ks_curve: KSCurvePoint[] | undefined; ks_stat: number 
           </g>
         )}
       </svg>
-  <div style={{ marginTop: 8, color: '#f0f6fc' }} />
+      <div style={{ marginTop: 8, color: '#f0f6fc' }} />
     </div>
   );
 };

@@ -1,16 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import './AdminPanel.css';
-
-type AnalysisRecord = {
-  id: number;
-  dataset_path: string;
-  discrete_columns: string;
-  continuous_columns: string;
-  selected_columns: string;
-  target_variable: string;
-  created_at: string;
-};
+import { AnalysisRecord } from '../../types/analysis';
+import { buildBinningState, buildTypeLookup } from '../../utils/binning';
 
 const AdminPanel: React.FC = () => {
   const navigate = useNavigate();
@@ -19,49 +11,79 @@ const AdminPanel: React.FC = () => {
 
   useEffect(() => {
     setLoading(true);
-    fetch('http://localhost:5000/api/records')
+    const token = localStorage.getItem('credit_scoring_auth_token');
+    const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+    fetch('http://localhost:5000/api/records', { headers })
       .then(res => res.json())
       .then(data => {
-        setRecords(data);
+        setRecords(Array.isArray(data) ? data : []);
         setLoading(false);
       })
       .catch(() => setLoading(false));
   }, []);
 
-  // When view is clicked, fetch the full record and navigate to main page with state
-  const handleView = (id: number) => {
-    fetch(`http://localhost:5000/api/record/${id}`)
-      .then(res => res.json())
-      .then(async data => {
-        // Load columns from uploaded.csv (first row)
-        let columns: string[] = [];
-        try {
-          const csvRes = await fetch('http://localhost:5000/api/uploaded-csv-columns');
-          if (csvRes.ok) {
-            const csvData = await csvRes.json();
-            columns = csvData.columns || [];
-          }
-        } catch {}
-        // Parse columns from CSV strings to arrays
-        const state = {
-          columns,
-          discreteColumns: data.discrete_columns ? data.discrete_columns.split(',').filter(Boolean) : [],
-          continuousColumns: data.continuous_columns ? data.continuous_columns.split(',').filter(Boolean) : [],
-          selectedForUnivariate: data.selected_columns ? data.selected_columns.split(',').filter(Boolean) : [],
-          targetVariable: data.target_variable,
-          univariateResults: data.univariate_results ? JSON.parse(data.univariate_results) : {},
-          fineBinResults: data.finebin_results ? JSON.parse(data.finebin_results) : {},
-          crossTabResults: data.crosstab_results ? JSON.parse(data.crosstab_results) : {},
-          recordId: id,
-        };
-        navigate('/', { state });
-      });
+  // When view is clicked, fetch the full record and navigate to selected columns page with state
+  const handleView = async (id: number) => {
+    try {
+      // Fetch the record with auth token
+      const token = localStorage.getItem('credit_scoring_auth_token');
+      const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+      const res = await fetch(`http://localhost:5000/api/record/${id}`, { headers });
+      const data = await res.json();
+      
+      console.log('📊 Loaded record:', data);
+      
+      // Infer columns from record data (much faster than loading entire CSV file)
+      const allCols = new Set<string>();
+      if (Array.isArray(data.discrete_columns)) {
+        data.discrete_columns.forEach((col: string) => allCols.add(col));
+      }
+      if (Array.isArray(data.continuous_columns)) {
+        data.continuous_columns.forEach((col: string) => allCols.add(col));
+      }
+      if (Array.isArray(data.selected_columns)) {
+        data.selected_columns.forEach((col: string) => allCols.add(col));
+      }
+      const columns = Array.from(allCols);
+      console.log('✅ Using columns from record:', columns.length, 'columns');
+      
+      const typeLookup = buildTypeLookup(
+        data.discrete_columns || [],
+        data.continuous_columns || []
+      );
+      const binningState = buildBinningState(data.binning_data, typeLookup);
+      
+      // Build state and navigate to SelectedColumnsPage directly
+      const state = {
+        selectedColumns: data.selected_columns || [],
+        discreteColumns: data.discrete_columns || [],
+        continuousColumns: data.continuous_columns || [],
+        targetVariable: data.target_variable || '',
+        recordId: id,
+        datasetPath: data.dataset_path || '',
+        columns: columns, // Include inferred columns for faster loading
+        univariateResults: binningState.univariate,
+        fineBinResults: binningState.fine,
+        woeIvResults: binningState.woe,
+        binningState,
+        modelReadyColumns: Array.isArray(data.dashboard_selected_columns) ? data.dashboard_selected_columns : [],
+        finalSelectedColumns: Array.isArray(data.final_selected_columns) ? data.final_selected_columns : [],
+      };
+      
+      console.log('🚀 Navigating to /selected-columns with state');
+      navigate('/selected-columns', { state });
+    } catch (error) {
+      console.error('❌ Error loading record:', error);
+      alert('Failed to load record: ' + error);
+    }
   };
 
   // Delete record
   const handleDelete = (id: number) => {
     if (!window.confirm('Are you sure you want to delete this record?')) return;
-    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE' })
+    const token = localStorage.getItem('credit_scoring_auth_token');
+    const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE', headers })
       .then(res => {
         if (res.ok) {
           setRecords(records => records.filter(r => r.id !== id));
@@ -93,7 +115,9 @@ const AdminPanel: React.FC = () => {
               <tr key={rec.id}>
                 <td style={{ textAlign: 'center' }}>{rec.id}</td>
                 <td style={{ textAlign: 'center' }}>{rec.dataset_path}</td>
-                <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>{rec.selected_columns}</td>
+                <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>
+                  {rec.selected_columns.join(', ')}
+                </td>
                 <td style={{ textAlign: 'center' }}>{rec.created_at}</td>
                 <td style={{ textAlign: 'center' }}>
                   <div style={{ display: 'inline-flex', gap: '8px' }}>

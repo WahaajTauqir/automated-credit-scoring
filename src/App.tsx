@@ -4,23 +4,11 @@ import CSVReader from './components/CSVReader';
 import Navbar from './components/Navbar';
 import AdminPanel from './components/Admin/AdminPanel';
 import SelectedColumnsPage from './components/SelectedColumnsPage';
-import ColumnSelectionPage from './components/ColumnSelectionPage';
+import CreditScorePage from './components/CreditScorePage';
 import './App.css';
 import './components/Admin/AdminPanel.css';
-
-// Reuse the analysis record type from Admin panel locally for inline table
-type AnalysisRecord = {
-  id: number;
-  dataset_path: string;
-  discrete_columns: string;
-  continuous_columns: string;
-  selected_columns: string;
-  target_variable: string;
-  created_at: string;
-  univariate_results?: string;
-  finebin_results?: string;
-  crosstab_results?: string;
-};
+import { AnalysisRecord } from './types/analysis';
+import { buildBinningState, buildTypeLookup } from './utils/binning';
 
 function App() {
   const location = useLocation();
@@ -38,22 +26,39 @@ function App() {
   const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
 
   const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, any[]>>({});
-  const [datasetPath, setDatasetPath] = useState<string>('uploaded.csv');
+  const [datasetPath, setDatasetPath] = useState<string>('');
   const [restoring, setRestoring] = useState<boolean>(false);
   const [expectedColumnsForRecord, setExpectedColumnsForRecord] = useState<string[] | undefined>(undefined);
 
   // Records (moved from AdminPanel into main page)
   const [records, setRecords] = useState<AnalysisRecord[]>([]);
   const [recordsLoading, setRecordsLoading] = useState<boolean>(false);
+  const [activeRecordId, setActiveRecordId] = useState<number | undefined>(undefined);
+  const [recordNames, setRecordNames] = useState<Record<number, string>>({});
+  const [editingRecordId, setEditingRecordId] = useState<number | null>(null);
+  const [editingRecordName, setEditingRecordName] = useState<string>('');
 
-  // Fetch existing analysis records on mount
+  // Fetch existing analysis records on mount (with auth headers)
   useEffect(() => {
-    setRecordsLoading(true);
-    fetch('http://localhost:5000/api/records')
-      .then(res => res.json())
-      .then(data => setRecords(Array.isArray(data) ? data : []))
-      .catch(() => {})
-      .finally(() => setRecordsLoading(false));
+    const fetchRecords = async () => {
+      setRecordsLoading(true);
+      try {
+        const token = localStorage.getItem('credit_scoring_auth_token');
+        const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
+        const res = await fetch('http://localhost:5000/api/records', { headers });
+        const data = await res.json();
+        const list: AnalysisRecord[] = Array.isArray(data) ? data : [];
+        setRecords(list);
+        if (list.length > 0) {
+          setActiveRecordId((prev) => prev ?? list[0].id);
+        }
+      } catch (err) {
+        console.error('Failed to fetch records:', err);
+      } finally {
+        setRecordsLoading(false);
+      }
+    };
+    fetchRecords();
   }, []);
 
   // Restore state from navigation (AdminPanel)
@@ -99,14 +104,20 @@ function App() {
     }
 
     try {
+      const token = localStorage.getItem('credit_scoring_auth_token');
+      const headers: HeadersInit = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
       const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           dataset_path: datasetPath,
           discrete_columns: discreteColumns,
           continuous_columns: continuousColumns,
           selected_columns: selectedForUnivariate,
+          record_id: activeRecordId,
           target_variable: targetVariable,
           univariate_results: '',
           finebin_results: '',
@@ -115,6 +126,9 @@ function App() {
       });
       const saved = await resp.json().catch(() => ({} as any));
       const newRecordId = saved?.id;
+      if (newRecordId) {
+        setActiveRecordId(newRecordId);
+      }
 
       navigate('/selected-columns', {
         state: {
@@ -123,6 +137,7 @@ function App() {
           continuousColumns,
           targetVariable,
           recordId: newRecordId || undefined,
+          datasetPath: datasetPath,
           // pass-through analysis results so SelectedColumnsPage can initialize immediately
           univariateResults,
           fineBinResults,
@@ -137,16 +152,20 @@ function App() {
           selectedColumns: selectedForUnivariate,
           discreteColumns,
           continuousColumns,
-          targetVariable
+          targetVariable,
+          datasetPath: datasetPath
         }
       });
     }
   };
 
-  const handleCSVUploaded = (headers: string[], _rows?: any[], uploadedPath?: string) => {
+  const handleCSVUploaded = (headers: string[], _rows?: any[], uploadedPath?: string, datasetId?: number) => {
+    // CRITICAL: Clear ALL state when starting a new analysis
+    // This prevents old data from previous records mixing into new records
+    console.log('[App] 🧹 Clearing all state for new CSV upload');
     setColumns(headers);
     if (uploadedPath) setDatasetPath(uploadedPath);
-  setExpectedColumnsForRecord(undefined);
+    setExpectedColumnsForRecord(undefined);
     setDiscreteColumns([]);
     setContinuousColumns([]);
     setTargetVariable('');
@@ -156,7 +175,23 @@ function App() {
     setSelectedBinGroups({});
     setCurrentPage(1);
     setTargetCounts({});
-    navigate('/column-selection');
+    setSelectedForUnivariate([]);
+    // CRITICAL: Clear activeRecordId when starting fresh (will be set after record is created)
+    // Only set it if datasetId is explicitly provided (from existing record)
+    if (datasetId) {
+      setActiveRecordId(datasetId);
+      console.log('[App] ✅ Using existing recordId:', datasetId);
+    } else {
+      setActiveRecordId(undefined);
+      console.log('[App] ✅ Cleared activeRecordId for new analysis');
+    }
+    navigate('/selected-columns', {
+      state: {
+        columns: headers,
+        datasetPath: uploadedPath,
+        recordId: datasetId, // Will be undefined for new analysis
+      }
+    });
   };
 
   const toggleSelectedForUnivariate = (col: string) => {
@@ -168,7 +203,6 @@ function App() {
   // Select/unselect all discrete columns for univariate selection
   const toggleSelectAllDiscrete = (selectAll?: boolean) => {
     setSelectedForUnivariate(prev => {
-      const discreteSet = new Set(discreteColumns);
       const currentSet = new Set(prev);
       // If selectAll explicitly false, remove all discrete
       if (selectAll === false) {
@@ -196,7 +230,6 @@ function App() {
   // Select/unselect all continuous columns for univariate selection
   const toggleSelectAllContinuous = (selectAll?: boolean) => {
     setSelectedForUnivariate(prev => {
-      const continuousSet = new Set(continuousColumns);
       const currentSet = new Set(prev);
       if (selectAll === false) {
         continuousColumns.forEach(c => currentSet.delete(c));
@@ -223,13 +256,46 @@ function App() {
   };
 
   const handleTypeChange = (column: string, type: string) => {
-    if (type === 'discrete') {
-      setDiscreteColumns(prev => [...new Set([...prev, column])]);
-      setContinuousColumns(prev => prev.filter(c => c !== column));
-    } else if (type === 'continuous') {
-      setContinuousColumns(prev => [...new Set([...prev, column])]);
-      setDiscreteColumns(prev => prev.filter(c => c !== column));
-    }
+    // Use functional updates to avoid race conditions when many changes occur quickly
+    let computedDiscrete: string[] = [];
+    let computedContinuous: string[] = [];
+
+    setDiscreteColumns(prev => {
+      const next = type === 'discrete'
+        ? Array.from(new Set([...prev, column]))
+        : prev.filter(c => c !== column);
+      computedDiscrete = next;
+      return next;
+    });
+
+    setContinuousColumns(prev => {
+      const next = type === 'continuous'
+        ? Array.from(new Set([...prev, column]))
+        : prev.filter(c => c !== column);
+      computedContinuous = next;
+      return next;
+    });
+
+    // Persist change to backend (non-blocking). Backend will recalc dataset counts.
+    (async () => {
+      try {
+        await fetch('http://localhost:5000/api/upsert-single-record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataset_path: datasetPath,
+            discrete_columns: computedDiscrete,
+            continuous_columns: computedContinuous,
+            selected_columns: selectedForUnivariate,
+            target_variable: targetVariable,
+            record_id: activeRecordId
+          })
+        });
+      } catch (err) {
+        // Non-fatal: keep UI responsive even if persistence fails
+        console.error('Failed to persist type change:', err);
+      }
+    })();
   };
 
 
@@ -238,7 +304,11 @@ function App() {
       const res = await fetch('http://localhost:5000/api/target-distribution', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ column: col }),
+        body: JSON.stringify({
+          column: col,
+          record_id: activeRecordId,
+          dataset_path: datasetPath || undefined,
+        }),
       });
       const data = await res.json();
       if (!data.error) setTargetCounts(data);
@@ -250,6 +320,31 @@ function App() {
   useEffect(() => {
     if (targetVariable) fetchTargetCounts(targetVariable);
   }, [targetVariable]);
+
+  // Persist target variable to backend when user selects it (non-blocking)
+  useEffect(() => {
+    if (!targetVariable || !activeRecordId) return;
+    (async () => {
+      try {
+        // Persist target variable
+        await fetch('http://localhost:5000/api/upsert-single-record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataset_path: datasetPath,
+            discrete_columns: discreteColumns,
+            continuous_columns: continuousColumns,
+            selected_columns: selectedForUnivariate,
+            target_variable: targetVariable,
+            record_id: activeRecordId
+          })
+        });
+        console.log('[TARGET] ✅ Target variable persisted to backend');
+      } catch (err) {
+        console.error('Failed to persist target variable:', err);
+      }
+    })();
+  }, [targetVariable, activeRecordId]);
 
   const toggleBinSelection = (col: string, binValue: any) => {
     setSelectedBinGroups(prev => {
@@ -277,72 +372,93 @@ function App() {
   const handleRecordView = async (id: number) => {
     try {
       setRestoring(true);
+      console.log(`[App] 🔄 Loading record ${id}`);
+      
+      // CRITICAL: Clear all state before loading new record to ensure complete isolation
+      console.log('[App] 🧹 Clearing all state before loading record');
+      setColumns([]);
+      setDiscreteColumns([]);
+      setContinuousColumns([]);
+      setTargetVariable('');
+      setUnivariateResults({});
+      setFineBinResults({});
+      setCrossTabResults({});
+      setSelectedForUnivariate([]);
+      setActiveRecordId(id);
+      
       // Fetch complete record
       const recResp = await fetch(`http://localhost:5000/api/record/${id}`);
-      const data: AnalysisRecord & { univariate_results?: string; finebin_results?: string; crosstab_results?: string } = await recResp.json();
+      const data: AnalysisRecord = await recResp.json();
+      console.log(`[App] ✅ Loaded record ${id}: target_variable="${data.target_variable || ''}"`);
 
-      // Ask backend to load dataset & return columns
-      let loadedColumns: string[] = [];
-      try {
-        const loadRes = await fetch(`http://localhost:5000/api/record/${id}/load-dataset`);
-        const loadJson = await loadRes.json();
-        if (loadRes.ok) {
-          if (Array.isArray(loadJson.columns)) loadedColumns = loadJson.columns;
-          if (loadJson.dataset_path) setDatasetPath(loadJson.dataset_path);
-        }
-      } catch { /* ignore */ }
-
-      // Fallback: generic columns endpoint
-      if (loadedColumns.length === 0) {
-        try {
-          const colsRes = await fetch('http://localhost:5000/api/uploaded-csv-columns');
-          if (colsRes.ok) {
-            const colsJson = await colsRes.json();
-            if (Array.isArray(colsJson.columns)) loadedColumns = colsJson.columns;
+      // Infer columns from stored column arrays (much faster than loading entire CSV)
+      const inferred = new Set<string>();
+      const addField = (field: unknown) => {
+        if (!Array.isArray(field)) return;
+        field.forEach((c: any) => {
+          if (c !== undefined && c !== null && String(c).trim()) {
+            inferred.add(String(c).trim());
           }
-        } catch { /* ignore */ }
-      }
+        });
+      };
 
-      // Fallback: infer from stored column strings
-      if (loadedColumns.length === 0) {
-        const inferred = new Set<string>();
-        (data.discrete_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
-        (data.continuous_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
-        (data.selected_columns || '').split(',').filter(Boolean).forEach(c => inferred.add(c));
-        loadedColumns = Array.from(inferred);
-      }
+      addField((data as any).discrete_columns ?? []);
+      addField((data as any).continuous_columns ?? []);
+      addField((data as any).selected_columns ?? []);
+      const loadedColumns = Array.from(inferred);
 
       // Update state
-  setColumns(loadedColumns);
-      const discreteArr = data.discrete_columns ? data.discrete_columns.split(',').filter(Boolean) : [];
-      const continuousArr = data.continuous_columns ? data.continuous_columns.split(',').filter(Boolean) : [];
-      const selectedArr = data.selected_columns ? data.selected_columns.split(',').filter(Boolean) : [];
-  const expected = loadedColumns.length ? loadedColumns : Array.from(new Set([...discreteArr, ...continuousArr, ...selectedArr]));
+      setColumns(loadedColumns);
+      const discreteArr: string[] = Array.isArray((data as any).discrete_columns)
+        ? (data as any).discrete_columns
+        : [];
+
+      const continuousArr: string[] = Array.isArray((data as any).continuous_columns)
+        ? (data as any).continuous_columns
+        : [];
+
+      const selectedArr: string[] = Array.isArray((data as any).selected_columns)
+        ? (data as any).selected_columns
+        : [];
+
+      const expected = loadedColumns.length ? loadedColumns : Array.from(new Set([...discreteArr, ...continuousArr, ...selectedArr]));
   setExpectedColumnsForRecord(expected);
       setDiscreteColumns(discreteArr);
       setContinuousColumns(continuousArr);
       setSelectedForUnivariate(selectedArr);
       setTargetVariable(data.target_variable || '');
-      const uni = data.univariate_results ? JSON.parse(data.univariate_results) : {};
-      const fine = data.finebin_results ? JSON.parse(data.finebin_results) : {};
-      const cross = data.crosstab_results ? JSON.parse(data.crosstab_results) : {};
-      setUnivariateResults(uni);
-      setFineBinResults(fine);
-      setCrossTabResults(cross);
+
+      const typeLookup = buildTypeLookup(discreteArr, continuousArr);
+      const normalizedBinning = buildBinningState(data.binning_data, typeLookup);
+      setUnivariateResults(normalizedBinning.univariate);
+      setFineBinResults(normalizedBinning.fine);
+      setCrossTabResults(normalizedBinning.coarse);
       setCurrentPage(1);
 
       // Navigate passing full state to cover edge cases where local effect didn't fire yet
-  navigate('/column-selection', {
+      const modelReadyColumns = Array.isArray((data as any).dashboard_selected_columns)
+        ? (data as any).dashboard_selected_columns
+        : [];
+      const finalSelectedColumns = Array.isArray((data as any).final_selected_columns)
+        ? (data as any).final_selected_columns
+        : [];
+
+      navigate('/selected-columns', {
         state: {
           columns: loadedColumns,
+          selectedColumns: selectedArr,
           discreteColumns: discreteArr,
-            continuousColumns: continuousArr,
-            selectedForUnivariate: selectedArr,
-            targetVariable: data.target_variable || '',
-            univariateResults: uni,
-            fineBinResults: fine,
-    crossTabResults: cross,
-    expectedColumns: expected
+          continuousColumns: continuousArr,
+          targetVariable: data.target_variable || '',
+          recordId: id,
+          datasetPath: data.dataset_path || '',
+          univariateResults: normalizedBinning.univariate,
+          fineBinResults: normalizedBinning.fine,
+          crossTabResults: normalizedBinning.coarse,
+          woeIvResults: normalizedBinning.woe,
+          binningState: normalizedBinning,
+          modelReadyColumns,
+          finalSelectedColumns
         }
       });
     } catch (e) {
@@ -359,9 +475,40 @@ function App() {
       .then(res => {
         if (res.ok) {
           setRecords(prev => prev.filter(r => r.id !== id));
+          setRecordNames(prev => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
         }
       })
       .catch(() => {});
+  };
+
+  const handleRecordNameEdit = (id: number, currentName: string) => {
+    setEditingRecordId(id);
+    setEditingRecordName(currentName || '');
+  };
+
+  const handleRecordNameSave = (id: number) => {
+    setRecordNames(prev => ({ ...prev, [id]: editingRecordName }));
+    setEditingRecordId(null);
+    setEditingRecordName('');
+  };
+
+  const handleRecordNameCancel = () => {
+    setEditingRecordId(null);
+    setEditingRecordName('');
+  };
+
+  const getRecordName = (id: number): string => {
+    return recordNames[id] || `Record ${id}`;
+  };
+
+
+  // Check if score card is generated (dummy for now - always return true for records with id > 0)
+  const hasScoreCard = (recordId: number): boolean => {
+    return recordId > 0; // Dummy logic
   };
 
   return (
@@ -369,93 +516,322 @@ function App() {
       <Route
         path="/"
         element={
-          <div>
+          <div className="main-page-wrapper">
+            {/* Optimized Animated Graph Background */}
+            <div className="animated-graph-background">
+              <svg className="graph-svg" viewBox="0 0 1200 600" preserveAspectRatio="xMidYMid slice">
+                <defs>
+                  <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="rgba(46, 160, 67, 0.5)" />
+                    <stop offset="50%" stopColor="rgba(46, 160, 67, 0.7)" />
+                    <stop offset="100%" stopColor="rgba(46, 160, 67, 0.5)" />
+                  </linearGradient>
+                </defs>
+                
+                {/* Simplified grid lines - reduced from 32 to 12 */}
+                <g className="grid-lines">
+                  {[0, 2, 4, 6, 8, 10].map((i) => (
+                    <line
+                      key={`h-${i}`}
+                      x1="0"
+                      y1={i * 60}
+                      x2="1200"
+                      y2={i * 60}
+                      stroke="rgba(46, 160, 67, 0.2)"
+                      strokeWidth="1"
+                    />
+                  ))}
+                  {[0, 4, 8, 12, 16, 20].map((i) => (
+                    <line
+                      key={`v-${i}`}
+                      x1={i * 60}
+                      y1="0"
+                      x2={i * 60}
+                      y2="600"
+                      stroke="rgba(46, 160, 67, 0.2)"
+                      strokeWidth="1"
+                    />
+                  ))}
+                </g>
+                
+                {/* Reduced to 2 graph lines instead of 4 */}
+                <path
+                  className="graph-line graph-line-1"
+                  d="M 0,400 Q 300,350 600,300 T 1200,200"
+                  fill="none"
+                  stroke="url(#lineGradient)"
+                  strokeWidth="3"
+                />
+                
+                <path
+                  className="graph-line graph-line-2"
+                  d="M 0,500 Q 400,450 800,400 T 1200,350"
+                  fill="none"
+                  stroke="url(#lineGradient)"
+                  strokeWidth="3"
+                />
+                
+                {/* Reduced data points from 6 to 3 */}
+                <g className="data-points">
+                  {[300, 600, 900].map((x, i) => (
+                    <circle
+                      key={`point-${i}`}
+                      className="data-point"
+                      cx={x}
+                      cy={300 + Math.sin(i) * 50}
+                      r="3"
+                      fill="rgba(46, 160, 67, 0.6)"
+                    />
+                  ))}
+                </g>
+              </svg>
+            </div>
+            
             <Navbar />
-            <div className="app-container">
-              <div className="upload-wrapper">
-                <CSVReader onCSVUploaded={handleCSVUploaded} />
+            {/* Full-width Info Section with Process Diagram */}
+            <div className="info-hero-section">
+              <h1 className="info-hero-title">Automated Credit Scoring System</h1>
+              <p className="info-hero-subtitle">
+                Build and deploy credit scoring models using advanced machine learning techniques powered by Generative AI
+              </p>
+              <p className="info-hero-description">
+                Upload your dataset, select features, perform statistical analysis, and generate scorecards for credit risk assessment.
+              </p>
+              
+              {/* Animated Process Diagram */}
+              <div className="process-diagram">
+                <div className="process-step" style={{ animationDelay: '0s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Upload Dataset</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.1s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Classification</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.2s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                      <line x1="16" y1="13" x2="8" y2="13"></line>
+                      <line x1="16" y1="17" x2="8" y2="17"></line>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Data Preprocessing</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.3s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="18" y1="20" x2="18" y2="10"></line>
+                      <line x1="12" y1="20" x2="12" y2="4"></line>
+                      <line x1="6" y1="20" x2="6" y2="14"></line>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Coarse Binning</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.4s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="18" y1="20" x2="18" y2="10"></line>
+                      <line x1="12" y1="20" x2="12" y2="4"></line>
+                      <line x1="6" y1="20" x2="6" y2="14"></line>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Fine Binning</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.5s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Monotonicity & Multicolinearity</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.6s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                      <path d="M2 17l10 5 10-5"></path>
+                      <path d="M2 12l10 5 10-5"></path>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">ML Training</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.7s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Training Analysis</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.8s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                      <line x1="16" y1="13" x2="8" y2="13"></line>
+                      <line x1="16" y1="17" x2="8" y2="17"></line>
+                      <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Scorecard Generation</div>
+                </div>
+                <div className="process-arrow">→</div>
+                <div className="process-step" style={{ animationDelay: '0.9s' }}>
+                  <div className="process-step-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M9 11l3 3L22 4"></path>
+                      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                    </svg>
+                  </div>
+                  <div className="process-step-label">Credit Risk Check</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="main-page-container">
+              {/* Left Column: Upload and Credit History */}
+              <div className="main-page-left">
+                {/* Upload Section */}
+                <div className="upload-section">
+                  <CSVReader onCSVUploaded={handleCSVUploaded} />
+                </div>
               </div>
 
-              {/* Records Table Section */}
-              <div style={{ width: '100%', marginTop: '40px' }}>
-                <h2 style={{ textAlign: 'center', marginBottom: '12px' }}>Records</h2>
-                {recordsLoading ? (
-                  <div className="admin-loading">Loading records...</div>
-                ) : records.length === 0 ? (
-                  <div className="admin-empty">No analyses found.</div>
-                ) : (
-                  <div className="admin-panel-container" style={{ margin: '0 auto', maxWidth: '100%' }}>
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th style={{ textAlign: 'center' }}>ID</th>
-                          <th style={{ textAlign: 'center' }}>Dataset</th>
-                          <th style={{ textAlign: 'center' }}>Selected Columns</th>
-                          <th style={{ textAlign: 'center' }}>Date</th>
-                          <th style={{ textAlign: 'center' }}>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {records.map(rec => (
-                          <tr key={rec.id}>
-                            <td style={{ textAlign: 'center' }}>{rec.id}</td>
-                            <td style={{ textAlign: 'center' }}>{rec.dataset_path}</td>
-                            <td style={{ textAlign: 'center', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxWidth: 200 }}>{rec.selected_columns}</td>
-                            <td style={{ textAlign: 'center' }}>{rec.created_at}</td>
-                            <td style={{ textAlign: 'center' }}>
-                              <div style={{ display: 'inline-flex', gap: '8px' }}>
-                                <button className="admin-action-btn" title="View" onClick={() => handleRecordView(rec.id)}>View</button>
-                                <button className="admin-action-btn" title="Delete" onClick={() => handleRecordDelete(rec.id)}>Delete</button>
+              {/* Right Column: Records */}
+              <div className="main-page-right">
+                {/* Developed Score Card Records */}
+                <div className="records-section">
+                  <h2 className="records-section-title">
+                    Developed Score Card
+                  </h2>
+                  {recordsLoading ? (
+                    <div className="records-loading">Loading records...</div>
+                  ) : records.length === 0 ? (
+                    <div className="records-empty">No score cards developed yet.</div>
+                  ) : (
+                    <div className="records-list">
+                      {records.map(rec => (
+                        <div key={rec.id} className="record-card">
+                          <div className="record-card-header">
+                            {editingRecordId === rec.id ? (
+                              <div className="record-name-edit">
+                                <input
+                                  type="text"
+                                  value={editingRecordName}
+                                  onChange={(e) => setEditingRecordName(e.target.value)}
+                                  className="record-name-input"
+                                  placeholder="Enter record name"
+                                  autoFocus
+                                />
+                                <button
+                                  className="record-name-save-btn"
+                                  onClick={() => handleRecordNameSave(rec.id)}
+                                  title="Save"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  className="record-name-cancel-btn"
+                                  onClick={handleRecordNameCancel}
+                                  title="Cancel"
+                                >
+                                  Cancel
+                                </button>
                               </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                            ) : (
+                              <div className="record-name-display">
+                                <span className="record-name">{getRecordName(rec.id)}</span>
+                                <button
+                                  className="record-name-edit-btn"
+                                  onClick={() => handleRecordNameEdit(rec.id, recordNames[rec.id] || '')}
+                                  title="Edit name"
+                                >
+                                  Edit
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          <div className="record-card-body">
+                            <div className="record-info-item">
+                              <span className="record-info-label">ID:</span>
+                              <span className="record-info-value">{rec.id}</span>
+                            </div>
+                            <div className="record-info-item">
+                              <span className="record-info-label">Dataset:</span>
+                              <span className="record-info-value" title={rec.dataset_path}>
+                                {rec.dataset_path.split('/').pop() || rec.dataset_path}
+                              </span>
+                            </div>
+                            <div className="record-info-item">
+                              <span className="record-info-label">Columns:</span>
+                              <span className="record-info-value">{rec.selected_columns.length}</span>
+                            </div>
+                            <div className="record-info-item">
+                              <span className="record-info-label">Created:</span>
+                              <span className="record-info-value">{new Date(rec.created_at).toLocaleDateString()}</span>
+                            </div>
+                          </div>
+                          <div className="record-card-actions">
+                            <button
+                              className="record-action-btn record-action-view"
+                              onClick={() => handleRecordView(rec.id)}
+                            >
+                              View
+                            </button>
+                            <button
+                              className="record-action-btn record-action-check"
+                              onClick={() => {
+                                navigate('/credit-score', {
+                                  state: {
+                                    recordId: rec.id
+                                  }
+                                });
+                              }}
+                              disabled={!hasScoreCard(rec.id)}
+                              title={hasScoreCard(rec.id) ? 'Check credit score' : 'Score card not generated yet'}
+                            >
+                              Check credit score
+                            </button>
+                            <button
+                              className="record-action-btn record-action-delete"
+                              onClick={() => handleRecordDelete(rec.id)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
         }
       />
-      <Route
-        path="/column-selection"
-        element={
-          <ColumnSelectionPage
-            columns={columns}
-            paginatedColumns={paginatedColumns}
-            discreteColumns={discreteColumns}
-            continuousColumns={continuousColumns}
-            targetVariable={targetVariable}
-            targetCounts={targetCounts}
-            handleTypeChange={handleTypeChange}
-            setTargetVariable={setTargetVariable}
-            currentPage={currentPage}
-            totalPages={totalPages}
-            onNextPage={handleNextPage}
-            onPrevPage={handlePrevPage}
-            assignRemainingToContinuous={assignRemainingToContinuous}
-            selectedForUnivariate={selectedForUnivariate}
-            toggleSelectedForUnivariate={toggleSelectedForUnivariate}
-            handleFineBin={handleFineBin}
-            toggleSelectAllDiscrete={toggleSelectAllDiscrete}
-            toggleSelectAllContinuous={toggleSelectAllContinuous}
-            handleProceedToSelectedColumns={handleProceedToSelectedColumns}
-            univariateResults={univariateResults}
-            fineBinResults={fineBinResults}
-            crossTabResults={crossTabResults}
-            selectedBinGroups={selectedBinGroups}
-            toggleBinSelection={toggleBinSelection}
-            formatToFourDecimals={formatToFourDecimals}
-            restoring={restoring}
-            expectedColumns={expectedColumnsForRecord}
-            onUploadReplacement={(headers, rows, path) => handleCSVUploaded(headers, rows, path)}
-          />
-        }
-      />
       <Route path="/admin" element={<AdminPanel />} />
       <Route path="/selected-columns" element={<SelectedColumnsPage />} />
+      <Route path="/credit-score" element={<CreditScorePage />} />
     </Routes>
   );
 }
