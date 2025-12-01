@@ -8,6 +8,7 @@ import StackingResults from './StackingResults';
 import { DiscreteValuesDropdown } from './DiscreteValues';
 import ColumnPanels from './ColumnsPanel';
 import PreprocessingDetails from './PreprocessingDetails';
+import { authPost, authGet } from '../utils/api';
 // import WoeIvResults from './WoeIvResults';
 import './SelectedColumnsPage.css';
 import { buildBinningState, buildTypeLookup, normalizeBinArray, prepareBinMetricsPayload } from '../utils/binning';
@@ -671,17 +672,13 @@ const SelectedColumnsPage = () => {
     // Persist change to backend (non-blocking)
     (async () => {
       try {
-        await fetch('http://localhost:5000/api/upsert-single-record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        await authPost('/api/upsert-single-record', {
             dataset_path: datasetPath,
             discrete_columns: computedDiscrete,
             continuous_columns: computedContinuous,
             selected_columns: selectedForUnivariate,
             target_variable: targetVariable,
             record_id: recordId
-          })
         });
       } catch (err) {
         console.error('Failed to persist type change:', err);
@@ -697,17 +694,13 @@ const SelectedColumnsPage = () => {
     // Persist to backend
     (async () => {
       try {
-        await fetch('http://localhost:5000/api/upsert-single-record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        await authPost('/api/upsert-single-record', {
             dataset_path: datasetPath,
             discrete_columns: discreteColumns,
             continuous_columns: remaining,
             selected_columns: selectedForUnivariate,
             target_variable: targetVariable,
             record_id: recordId
-          })
         });
       } catch (err) {
         console.error('Failed to persist remaining columns:', err);
@@ -790,17 +783,7 @@ const SelectedColumnsPage = () => {
       }
 
       // Fetch selected features from database
-      const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' }
-      });
-
-      if (!featuresResp.ok) {
-        alert('Failed to fetch selected columns from database.');
-        return;
-      }
-
-      const featuresData = await featuresResp.json();
+      const featuresData = await authGet(`/api/dataset/${recordId}/features`);
       const selectedFeatureNames = featuresData
         .filter((f: any) => f.selected === true)
         .map((f: any) => f.name);
@@ -811,19 +794,14 @@ const SelectedColumnsPage = () => {
       }
 
       // Update the record with selected columns
-      const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/upsert-single-record', {
           dataset_path: datasetPath,
           discrete_columns: discreteColumns,
           continuous_columns: continuousColumns,
           selected_columns: selectedFeatureNames,
           target_variable: targetVariable,
           record_id: recordId
-        }),
       });
-      const data = await resp.json();
       if (!data.error) {
         if (data.id) setRecordId(data.id);
         setSelectedColumns(selectedFeatureNames);
@@ -831,19 +809,14 @@ const SelectedColumnsPage = () => {
         // Create train/test split (preprocess first, then split) - exactly as before
         console.log('[TTS] Creating train/test split when moving from Data Preprocessing to Binning...');
         try {
-          const ttsResponse = await fetch('http://localhost:5000/api/train-test-split', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+          const ttsData = await authPost('/api/train-test-split', {
               dataset_id: data.id || recordId,
               test_size: DEFAULT_TEST_SIZE,
               preprocess_first: true, // Preprocess before split (exactly as before)
               force_recalculate: false // Use existing split if available, but ensure it's preprocessed
-            })
           });
 
-          if (ttsResponse.ok) {
-            const ttsData = await ttsResponse.json();
+          if (ttsData) {
             if (ttsData.success) {
               console.log('[TTS] ✅ Train/test split created successfully:', ttsData.split_info);
               if (!ttsData.is_existing) {
@@ -858,9 +831,8 @@ const SelectedColumnsPage = () => {
               showNotification('Warning: Train/test split creation had issues. Check console for details.');
             }
           } else {
-            const errorData = await ttsResponse.json();
-            console.error('[TTS] ❌ Failed to create train/test split:', errorData.error || 'Unknown error');
-            showNotification(`Error creating train/test split: ${errorData.error || 'Unknown error'}`);
+            console.error('[TTS] ❌ Failed to create train/test split: No response data');
+            showNotification('Error creating train/test split: No response data');
           }
         } catch (ttsError) {
           console.error('[TTS] ❌ Exception creating train/test split:', ttsError);
@@ -879,16 +851,11 @@ const SelectedColumnsPage = () => {
   // Fetch target counts
   const fetchTargetCounts = async (col: string) => {
     try {
-      const res = await fetch('http://localhost:5000/api/target-distribution', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/target-distribution', {
           column: col,
           record_id: recordId,
           dataset_path: datasetPath || navDatasetPath || undefined,
-        }),
       });
-      const data = await res.json();
       if (!data.error) setTargetCounts(data);
     } catch (err) {
       console.error('Failed to fetch target counts:', err);
@@ -905,17 +872,13 @@ const SelectedColumnsPage = () => {
     (async () => {
       try {
         // Persist target variable
-        await fetch('http://localhost:5000/api/upsert-single-record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        await authPost('/api/upsert-single-record', {
             dataset_path: datasetPath,
             discrete_columns: discreteColumns,
             continuous_columns: continuousColumns,
             selected_columns: selectedForUnivariate,
             target_variable: targetVariable,
             record_id: recordId
-          })
         });
         console.log('[TARGET] ✅ Target variable persisted to backend');
       } catch (err) {
@@ -961,10 +924,7 @@ const SelectedColumnsPage = () => {
       // Map frontend model type to backend model type
       const backendModelType = modelType === 'stacking' ? 'stacking_ensemble' : modelType;
 
-      const response = await fetch('http://localhost:5000/api/apply-scorecard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/apply-scorecard', {
           selected_variables: selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling,
           target: targetVariable,
           woe_transformed_data: Object.fromEntries(
@@ -973,10 +933,7 @@ const SelectedColumnsPage = () => {
           model_results: modelResults,
           model_type: backendModelType,
           record_id: recordId
-        })
       });
-
-      const data = await response.json();
       if (data.success && data.results) {
         setTestScoreResults(data.results);
         // Store KS data if available
@@ -1039,10 +996,7 @@ const SelectedColumnsPage = () => {
       // Map frontend model type to backend model type
       const backendModelType = modelType === 'stacking' ? 'stacking_ensemble' : modelType;
 
-      const response = await fetch('http://localhost:5000/api/apply-scorecard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/apply-scorecard', {
           selected_variables: selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling,
           target: targetVariable,
           woe_transformed_data: Object.fromEntries(
@@ -1052,10 +1006,7 @@ const SelectedColumnsPage = () => {
           model_type: backendModelType,
           record_id: recordId,
           data_source: 'training'  // Use training data instead of test
-        })
       });
-
-      const data = await response.json();
       if (data.success && data.results) {
         setTrainingScoreResults(data.results);
         // Store KS data if available
@@ -1086,17 +1037,13 @@ const SelectedColumnsPage = () => {
       return null;
     }
     try {
-      const response = await fetch('http://localhost:5000/api/calculate-bin-metrics', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bins: prepareBinMetricsPayload(bins) })
+      const data = await authPost('/api/calculate-bin-metrics', {
+        bins: prepareBinMetricsPayload(bins)
       });
 
-      if (!response.ok) {
+      if (!data) {
         return null;
       }
-
-      const data = await response.json();
 
       if (data?.success) {
         setBinScoringMetrics(prev => ({
@@ -1207,10 +1154,7 @@ const SelectedColumnsPage = () => {
       // Map frontend model type to backend model type
       const backendModelType = selectedModelForScorecard === 'stacking' ? 'stacking_ensemble' : selectedModelForScorecard;
 
-      const response = await fetch('http://localhost:5000/api/generate-scorecard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/generate-scorecard', {
           selected_variables: validVariables,
           target: targetVariable,
           woe_transformed_data: Object.fromEntries(
@@ -1219,17 +1163,13 @@ const SelectedColumnsPage = () => {
           model_type: backendModelType,
           model_results: modelResults,
           record_id: recordId
-        })
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to generate scorecard' }));
-        alert(`Error generating score card: ${errorData.error || 'Unknown error'}`);
+      if (!data) {
+        alert(`Error generating score card: Failed to generate scorecard`);
         setGeneratingScoreCard(false);
         return;
       }
-
-      const data = await response.json();
       if (data.success) {
         setScoreCardData(data);
         if (data.scorecard_bins) {
@@ -1337,23 +1277,20 @@ const SelectedColumnsPage = () => {
       return null;
     }
     try {
-      const res = await fetch('http://localhost:5000/api/fine-bin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/fine-bin', {
           variable: col,
           target: targetVariable,
           type: varType,
           bin_merges: mergesOverride || {},
           record_id: recordId,
           dashboard_selected_columns: Array.from(selectedForModeling),
-        }),
+      }).catch(err => {
+        console.warn(`Fine-bin fallback failed for ${col}:`, err);
+        return null;
       });
-      if (!res.ok) {
-        console.warn(`Fine-bin fallback failed for ${col}:`, await res.text());
+      if (!data) {
         return null;
       }
-      const data = await res.json();
       if (!data.success || data.error) {
         console.warn(`Fine-bin fallback response for ${col} indicated failure`, data);
         return null;
@@ -1399,10 +1336,8 @@ const SelectedColumnsPage = () => {
 
     // First attempt: hydrate directly from persisted fine-bin cache (no recomputation)
     try {
-      const cacheResp = await fetch(`http://localhost:5000/api/finebin-cache/${recordId}/${encodeURIComponent(col)}`);
-      if (cacheResp.ok) {
-        const cacheData = await cacheResp.json();
-        if (cacheData?.success && Array.isArray(cacheData.stats) && cacheData.stats.length > 0) {
+      const cacheData = await authGet(`/api/finebin-cache/${recordId}/${encodeURIComponent(col)}`);
+      if (cacheData?.success && Array.isArray(cacheData.stats) && cacheData.stats.length > 0) {
           const normalizedStats = normalizeBinArray(cacheData.stats);
           setFineBinResults((prev) => ({ ...prev, [col]: normalizedStats }));
           const mergesFromCache: Record<string, any[]> = cacheData.bin_merges || {};
@@ -1429,19 +1364,13 @@ const SelectedColumnsPage = () => {
             hydrated: true,
           };
         }
-      }
     } catch (cacheError) {
       console.warn(`Fine-bin cache hydrate failed for ${col}:`, cacheError);
     }
 
     // Fallback: pull merge blueprint then recompute via fine-bin endpoint
     try {
-      const resp = await fetch(`http://localhost:5000/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
-      if (!resp.ok) {
-        console.error(`Failed to load finebin details for ${col}:`, resp.status);
-        return { merges: undefined, hydrated: false };
-      }
-      const details = await resp.json();
+      const details = await authGet(`/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
       if (!Array.isArray(details) || details.length === 0) {
         return { merges: undefined, hydrated: false };
       }
@@ -1467,8 +1396,7 @@ const SelectedColumnsPage = () => {
     if (!recordId) return;
     try {
       console.log(`[SelectedColumnsPage] 🔄 Loading saved data for record ${recordId}`);
-      const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
-      const recordData = await recordResp.json();
+      const recordData = await authGet(`/api/record/${recordId}`);
 
       // CRITICAL: Load ALL record-specific data to ensure complete isolation
       // Load dataset path from record
@@ -1537,10 +1465,8 @@ const SelectedColumnsPage = () => {
       }
 
       try {
-        const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-        if (featuresResp.ok) {
-          const featureList = await featuresResp.json();
-          if (Array.isArray(featureList)) {
+        const featureList = await authGet(`/api/dataset/${recordId}/features`);
+        if (Array.isArray(featureList)) {
             const modelReadyFromDb = featureList
               .filter((feature: any) => feature?.model_ready)
               .map((feature: any) => String(feature.name).trim())
@@ -1557,7 +1483,6 @@ const SelectedColumnsPage = () => {
               finalSelections = finalSelectedFromDb;
             }
           }
-        }
       } catch (err) {
         console.error('Failed to load feature selections from database:', err);
       }
@@ -1601,18 +1526,12 @@ const SelectedColumnsPage = () => {
         await new Promise(resolve => setTimeout(resolve, 300));
       } else {
         // No saved data - calculate from scratch and store
-        const res = await fetch('http://localhost:5000/api/univariate-analysis', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const data = await authPost('/api/univariate-analysis', {
             discrete: varType === 'discrete' ? [col] : [],
             continuous: varType === 'continuous' ? [col] : [],
             target: targetVariable,
             record_id: recordId, // Pass record_id to persist results
-          }),
         });
-        
-        const data = await res.json();
         const coarseStats = normalizeBinArray(data[col]?.stats || data[col] || []);
         setUnivariateResults((prev) => ({ ...prev, [col]: { ...(data[col] || {}), stats: coarseStats } }));
         setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
@@ -1696,17 +1615,12 @@ const SelectedColumnsPage = () => {
 
     try {
       // Re-run coarse binning to get latest stats
-      const coarseRes = await fetch('http://localhost:5000/api/univariate-analysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const coarseData = await authPost('/api/univariate-analysis', {
           discrete: varType === 'discrete' ? [col] : [],
           continuous: varType === 'continuous' ? [col] : [],
           target: targetVariable,
           record_id: recordId,
-        }),
       });
-      const coarseData = await coarseRes.json();
       const coarseStats = normalizeBinArray(coarseData[col]?.stats || coarseData[col] || []);
       const updatedUnivariate = {
         ...univariateResults,
@@ -1717,19 +1631,14 @@ const SelectedColumnsPage = () => {
       setCoarseBinResults(updatedCoarse);
 
       // Run fine binning
-      const fineRes = await fetch('http://localhost:5000/api/fine-bin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const fineData = await authPost('/api/fine-bin', {
           variable: col,
           target: targetVariable,
           type: varType,
           bin_merges: payloadMerges,
           record_id: recordId,
           dashboard_selected_columns: selectedForModeling,
-        }),
       });
-      const fineData = await fineRes.json();
 
       if (!fineData.success) throw new Error(fineData.error);
 
@@ -1813,30 +1722,20 @@ const SelectedColumnsPage = () => {
     delete newHistory[keyToRemove];
 
     // Re-run fine binning
-    const res = await fetch('http://localhost:5000/api/fine-bin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        variable: col,
-        target: targetVariable,
-        type: varType,
-        bin_merges: newHistory,
-        record_id: recordId,
-        dashboard_selected_columns: selectedForModeling,
-      }),
-    });
-
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({ error: 'Failed to unmerge fine bin' }));
-      showNotification(`Error: ${errorData.error || 'Failed to unmerge fine bin'}`);
-      return;
-    }
-
-    const data = await res.json();
-    if (!data.success) {
-      showNotification(`Error: ${data.error || 'Fine binning returned no results'}`);
-      return;
-    }
+    try {
+      const data = await authPost('/api/fine-bin', {
+          variable: col,
+          target: targetVariable,
+          type: varType,
+          bin_merges: newHistory,
+          record_id: recordId,
+          dashboard_selected_columns: selectedForModeling,
+      });
+      
+      if (!data.success) {
+        showNotification(`Error: ${data.error || 'Fine binning returned no results'}`);
+        return;
+      }
 
     const normalizedStats = normalizeBinArray(data.stats || []);
     const updatedFine = { ...fineBinResults, [col]: normalizedStats };
@@ -1864,29 +1763,22 @@ const SelectedColumnsPage = () => {
     });
 
     showNotification(`Unmerged '${mergedLabel}'`);
+    } catch (err) {
+      console.error('Error unmerging fine bin:', err);
+      showNotification(`Error: ${err instanceof Error ? err.message : 'Failed to unmerge fine bin'}`);
+    }
   };
   const resetFineBinning = async (col: string) => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
 
     try {
       // Call backend API to reset binning and delete all binning data including merged_bins
-      const resetRes = await fetch('http://localhost:5000/api/reset-bins', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const resetData = await authPost('/api/reset-bins', {
           variable: col,
           target: targetVariable,
           type: varType,
           record_id: recordId,
-        }),
       });
-
-      if (!resetRes.ok) {
-        const errorData = await resetRes.json().catch(() => ({ error: 'Failed to reset binning' }));
-        throw new Error(errorData.error || 'Failed to reset binning');
-      }
-
-      const resetData = await resetRes.json();
       
       // Reset UI state
       const clearedFine = { ...fineBinResults, [col]: [] };
@@ -1951,10 +1843,7 @@ const SelectedColumnsPage = () => {
       }
 
       // Call the auto-monotonic-binning API
-      const response = await fetch('http://localhost:5000/api/auto-monotonic-binning', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/auto-monotonic-binning', {
           variable: col,
           target: targetVariable,
           type: varType,
@@ -1962,10 +1851,7 @@ const SelectedColumnsPage = () => {
           method: 'exhaustive',  // Use exhaustive algorithm
           record_id: recordId,
           dashboard_selected_columns: selectedForModeling,
-        }),
       });
-
-      const data = await response.json();
 
       if (!data.success) {
         throw new Error(data.error || 'Auto-binning failed');
@@ -2022,10 +1908,8 @@ const SelectedColumnsPage = () => {
         
         try {
           // Fetch sorted features for reordering
-          const sortResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features-sorted`);
-          if (sortResponse.ok) {
-            const sortData = await sortResponse.json();
-            const sortedFeatureNames = sortData.sorted_feature_names || [];
+          const sortData = await authGet(`/api/dataset/${recordId}/features-sorted`);
+          const sortedFeatureNames = sortData.sorted_feature_names || [];
             
             if (sortedFeatureNames.length > 0) {
               // Reorder selectedColumns to match the sorted order
@@ -2035,17 +1919,14 @@ const SelectedColumnsPage = () => {
               const reorderedColumns = [...sortedSelected, ...unsortedSelected];
               setSelectedColumns(reorderedColumns);
             }
-          }
           
           // Fetch features to sync model_ready checkboxes (with retry if needed)
           // FIX: Retry once if model_ready status doesn't match response
           let retryCount = 0;
           const maxRetries = 2;
           while (retryCount < maxRetries) {
-            const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-            if (featuresResponse.ok) {
-              const featureList = await featuresResponse.json();
-              if (Array.isArray(featureList)) {
+            const featureList = await authGet(`/api/dataset/${recordId}/features`);
+            if (Array.isArray(featureList)) {
                 const currentFeature = featureList.find((f: any) => f.name === col);
                 // FIX: Only select features that are BOTH model_ready AND monotonic
                 // Check is_monotonic from fine binning metadata
@@ -2087,7 +1968,6 @@ const SelectedColumnsPage = () => {
                 }
                 break; // Exit retry loop
               }
-            }
             retryCount++;
             if (retryCount < maxRetries) {
               await new Promise(resolve => setTimeout(resolve, 500));
@@ -2126,13 +2006,7 @@ const SelectedColumnsPage = () => {
     if (!recordId) return;
     
     try {
-      const response = await fetch(`http://localhost:5000/api/dataset/${recordId}/features-sorted`);
-      if (!response.ok) {
-        console.error('Failed to fetch sorted features');
-        return;
-      }
-      
-      const data = await response.json();
+      const data = await authGet(`/api/dataset/${recordId}/features-sorted`);
       const sortedFeatureNames = data.sorted_feature_names || [];
       
       if (sortedFeatureNames.length > 0) {
@@ -2156,10 +2030,8 @@ const SelectedColumnsPage = () => {
     if (!recordId) return;
     
     try {
-      const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-      if (featuresResponse.ok) {
-        const featureList = await featuresResponse.json();
-        if (Array.isArray(featureList)) {
+      const featureList = await authGet(`/api/dataset/${recordId}/features`);
+      if (Array.isArray(featureList)) {
           const modelReadyFeatures = featureList
             .filter((feature: any) => feature?.model_ready)
             .map((feature: any) => String(feature.name).trim())
@@ -2175,7 +2047,6 @@ const SelectedColumnsPage = () => {
           setSelectedForModeling([]);
           console.log('[syncModelReadyCheckboxes] Feature response not array; cleared selections');
         }
-      }
     } catch (err) {
       console.error('Error syncing model_ready checkboxes:', err);
     }
@@ -2186,24 +2057,15 @@ const SelectedColumnsPage = () => {
     if (!recordId) return;
     
     try {
-      const response = await fetch(`http://localhost:5000/api/dataset/${recordId}/mark-monotonic-as-model-ready`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const data = await authPost(`/api/dataset/${recordId}/mark-monotonic-as-model-ready`, {});
       
-      if (response.ok) {
-        const data = await response.json();
-        if (data.success) {
-          console.log(`[markMonotonicAsModelReady] Successfully marked ${data.count} monotonic features as model_ready:`, data.features);
-          if (data.count === 0) {
-            console.warn(`[markMonotonicAsModelReady] No monotonic features found to mark as model_ready`);
-          }
-        } else {
-          console.error(`[markMonotonicAsModelReady] Failed:`, data.error || data.message);
+      if (data.success) {
+        console.log(`[markMonotonicAsModelReady] Successfully marked ${data.count} monotonic features as model_ready:`, data.features);
+        if (data.count === 0) {
+          console.warn(`[markMonotonicAsModelReady] No monotonic features found to mark as model_ready`);
         }
       } else {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        console.error(`[markMonotonicAsModelReady] HTTP error ${response.status}:`, errorData);
+        console.error(`[markMonotonicAsModelReady] Failed:`, data.error || data.message);
       }
     } catch (err) {
       console.error('[markMonotonicAsModelReady] Error marking monotonic features as model_ready:', err);
@@ -2351,18 +2213,12 @@ const SelectedColumnsPage = () => {
         );
 
         if (discreteCols.length > 0 || continuousCols.length > 0) {
-          const res = await fetch('http://localhost:5000/api/univariate-analysis', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+          const data = await authPost('/api/univariate-analysis', {
               discrete: discreteCols,
               continuous: continuousCols,
               target: targetVariable,
               record_id: recordId,
-            }),
           });
-
-          const data = await res.json();
           
           // Update coarse bin results for all columns
           const updatedCoarse: Record<string, NormalizedBin[]> = { ...coarseBinResults };
@@ -2409,10 +2265,7 @@ const SelectedColumnsPage = () => {
       const payloadSelectedColumns = overrides.selectedColumns ?? selectedColumns ?? [];
       const payloadDashboard = overrides.dashboardSelectedColumns ?? selectedForModeling ?? [];
 
-      const upsertResp = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const up = await authPost('/api/upsert-single-record', {
           dataset_path: datasetPath || undefined,
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
@@ -2420,19 +2273,13 @@ const SelectedColumnsPage = () => {
           dashboard_selected_columns: payloadDashboard,
           target_variable: targetVariable || '',
           record_id: recordId,
-        }),
       });
-      const up = await upsertResp.json();
       if (!up.error && typeof up.id !== 'undefined') {
         current = up.id;
         setRecordId(up.id);
       }
       if (current) {
-        await fetch('http://localhost:5000/api/finebin-details', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ record_id: current, column_name: col, bin_merges: merges }),
-        });
+        await authPost('/api/finebin-details', { record_id: current, column_name: col, bin_merges: merges });
       }
     } catch (e) {
 
@@ -2444,10 +2291,7 @@ const SelectedColumnsPage = () => {
     forceSync = false
   ): Promise<number | undefined> => {
     const performPersist = async () => {
-      const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/upsert-single-record', {
           dataset_path: datasetPath || undefined,
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
@@ -2455,9 +2299,7 @@ const SelectedColumnsPage = () => {
           dashboard_selected_columns: newSelection,
           target_variable: targetVariable || '',
           record_id: recordId || undefined,
-        }),
       });
-      const data = await resp.json();
       if (!data.error && data.id) {
         setRecordId(data.id);
         return data.id as number;
@@ -2496,14 +2338,10 @@ const SelectedColumnsPage = () => {
     }
     if (!datasetId) return undefined;
     try {
-      await fetch('http://localhost:5000/api/update-feature-modeling', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await authPost('/api/update-feature-modeling', {
           feature_name: col,
           record_id: datasetId,
           is_selected: shouldSelect,
-        }),
       });
     } catch (err) {
       console.error('Failed to update feature modeling:', err);
@@ -2523,14 +2361,10 @@ const SelectedColumnsPage = () => {
     }
     if (!datasetId) return;
     try {
-      await fetch('http://localhost:5000/api/update-feature-final-selected', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await authPost('/api/update-feature-final-selected', {
           feature_name: col,
           record_id: datasetId,
           is_selected: shouldSelect,
-        }),
       });
     } catch (err) {
       console.error('Failed to update feature final_selected:', err);
@@ -2650,18 +2484,7 @@ const SelectedColumnsPage = () => {
       }
 
 
-      const res = await fetch('http://localhost:5000/api/woe-iv', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ error: 'Failed to calculate WOE/IV' }));
-        throw new Error(errorData.error || `WOE/IV calculation failed: ${res.status}`);
-      }
-
-      const data = await res.json();
+      const data = await authPost('/api/woe-iv', body);
 
 
       if (!data.error && data[col]) {
@@ -2768,29 +2591,20 @@ const SelectedColumnsPage = () => {
       if (currentStep === 1 && recordId) {
         try {
           // First check preprocess_selection status
-          const recordResponse = await fetch(`http://localhost:5000/api/record/${recordId}`, {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-          });
+          const recordData = await authGet(`/api/record/${recordId}`);
           
           let shouldLoadFromDb = false;
-          if (recordResponse.ok) {
-            const recordData = await recordResponse.json();
-            shouldLoadFromDb = recordData.preprocess_selection === true;
-            setPreprocessSelectionSaved(shouldLoadFromDb);
+          if (recordData.preprocess_selection === true) {
+            shouldLoadFromDb = true;
+            setPreprocessSelectionSaved(true);
           }
           
           // Only load features if preprocess_selection is true
           // If false, calculations will determine selections, no need to poll
           if (shouldLoadFromDb) {
-            const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`, {
-              method: 'GET',
-              headers: { 'Content-Type': 'application/json' }
-            });
-
-            if (featuresResp.ok) {
-              const featuresData = await featuresResp.json();
-              // Load selected features from database (not stored in state as not used elsewhere)
+            const featuresData = await authGet(`/api/dataset/${recordId}/features`);
+            // Load selected features from database (not stored in state as not used elsewhere)
+            if (Array.isArray(featuresData)) {
               featuresData
                 .filter((f: any) => f.selected === true)
                 .map((f: any) => f.name);
@@ -2809,8 +2623,7 @@ const SelectedColumnsPage = () => {
   // Load model_ready checkboxes when moving to Classification section (step 0)
   useEffect(() => {
     if (currentStep === 0 && recordId) {
-      fetch(`http://localhost:5000/api/dataset/${recordId}/features`)
-        .then(r => r.json())
+      authGet(`/api/dataset/${recordId}/features`)
         .then((features: any[]) => {
           const modelReadyNames = features
             .filter((f: any) => f.model_ready)
@@ -2828,17 +2641,12 @@ const SelectedColumnsPage = () => {
   useEffect(() => {
     if (currentStep === 2 && recordId) {
       // First sync model_ready to final_selected
-      fetch('http://localhost:5000/api/sync-model-ready-to-final-selected', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      authPost('/api/sync-model-ready-to-final-selected', {
           record_id: recordId
-        })
-      }).then(async (res) => {
-        if (res.ok) {
+      }).then(async () => {
           // After syncing, load final_selected values to initialize selectedForFinalModeling
           try {
-            const features = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`).then(r => r.json());
+          const features = await authGet(`/api/dataset/${recordId}/features`);
             const finalSelectedNames = features
               .filter((f: any) => f.final_selected)
               .map((f: any) => String(f.name).trim())
@@ -2849,7 +2657,6 @@ const SelectedColumnsPage = () => {
             }
           } catch (err) {
             console.error('Failed to load final_selected features:', err);
-          }
         }
       }).catch(err => console.error('Failed to sync model_ready to final_selected:', err));
     }
@@ -2948,10 +2755,8 @@ const SelectedColumnsPage = () => {
 
         // Try database first
         try {
-          const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-          if (featuresResponse.ok) {
-            const featureList = await featuresResponse.json();
-            if (Array.isArray(featureList)) {
+          const featureList = await authGet(`/api/dataset/${recordId}/features`);
+          if (Array.isArray(featureList)) {
               const finalSelectedFeatures = featureList
                 .filter((feature: any) => feature?.final_selected)
                 .map((feature: any) => String(feature.name).trim())
@@ -2967,7 +2772,6 @@ const SelectedColumnsPage = () => {
                 return;
               }
             }
-          }
         } catch (err) {
           console.error('[Models] Error loading final_selected from database:', err);
         }
@@ -3070,20 +2874,14 @@ const SelectedColumnsPage = () => {
     setIsCalculatingVIF(true);
     setHasLRCompleted(false);
     try {
-      const response = await fetch('http://localhost:5000/api/logistic-regression', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/logistic-regression', {
           selected_variables: selectedForModeling, // Use all model_ready features
           target: targetVariable,
           woe_transformed_data: Object.fromEntries(
             Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
           ),
           record_id: recordId
-        })
       });
-
-      const data = await response.json();
       console.log('[VIF] Response received:', data);
       
       // Initialize maps with all requested features (set to null initially)
@@ -3564,30 +3362,21 @@ const SelectedColumnsPage = () => {
 
                         let sampleData: Record<string, any[]> = {};
                         try {
-                          const sampleResp = await fetch('http://localhost:5000/api/csv-samples', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ columns: colsToClassify, sample_size: 20, record_id: recordId })
-                          });
-                          if (sampleResp.ok) {
-                            sampleData = await sampleResp.json();
-                          } else {
-                            colsToClassify.forEach(col => {
-                              sampleData[col] = [];
-                            });
+                          const sampleResp = await authPost('/api/csv-samples', { columns: colsToClassify, sample_size: 20, record_id: recordId });
+                          if (sampleResp && typeof sampleResp === 'object') {
+                            sampleData = sampleResp as Record<string, any[]>;
                           }
                         } catch (e) {
-                          colsToClassify.forEach(col => {
-                            sampleData[col] = [];
-                          });
+                          console.warn('Could not fetch CSV samples:', e);
                         }
-
-                        const resp = await fetch('http://localhost:5000/api/ai-classify-columns', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ columns: colsToClassify, sampleData, record_id: recordId })
+                        // Ensure all columns have sample data (even if empty)
+                        colsToClassify.forEach(col => {
+                          if (!sampleData[col]) {
+                            sampleData[col] = [];
+                          }
                         });
-                        const data = await resp.json();
+
+                        const data = await authPost('/api/ai-classify-columns', { columns: colsToClassify, sampleData, record_id: recordId });
                         if (data && !data.error) {
                           let discreteCount = 0;
                           let continuousCount = 0;
@@ -3600,10 +3389,13 @@ const SelectedColumnsPage = () => {
                           });
                           alert(`AI classification complete!\nClassified ${discreteCount} discrete and ${continuousCount} continuous variables.`);
                         } else {
-                          alert('AI classification failed. See console for details.');
+                          const errorMsg = data?.error || 'Unknown error';
+                          console.error('AI classification failed:', errorMsg, data);
+                          alert(`AI classification failed: ${errorMsg}`);
                         }
                       } catch (e) {
-                        alert('AI classification failed. See console for details.');
+                        console.error('AI classification error:', e);
+                        alert(`AI classification failed: ${e instanceof Error ? e.message : String(e)}`);
                       } finally {
                         setIsLoadingAIClassification(false);
                       }

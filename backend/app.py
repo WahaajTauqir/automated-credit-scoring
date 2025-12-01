@@ -82,19 +82,29 @@ except Exception:
     pass
 
 # configure basic logging for debug
-logging.basicConfig(level=logging.DEBUG)
+# Set logging level based on environment
+log_level = logging.DEBUG if os.getenv('ENVIRONMENT') != 'production' else logging.INFO
+logging.basicConfig(level=log_level)
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://localhost:5174"])
+
+# CORS configuration - supports both local and production
+ALLOWED_ORIGINS = os.getenv('ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:5174').split(',')
+CORS(app, origins=ALLOWED_ORIGINS)
+
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), 'artifacts')
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
+# Import storage manager for Cloud Storage support
+try:
+    from storage import get_storage_manager
+    storage_manager = get_storage_manager()
+except ImportError:
+    storage_manager = None
+    print("[APP] Storage manager not available")
+
 # Cache for preprocessed data to avoid re-preprocessing
 _preprocessed_data_cache = {}  # {f"{dataset_id}_{stage}": preprocessed_df}
-
-# Cache for features-sorted endpoint to reduce database queries
-_features_sorted_cache = {}  # {dataset_id: {"data": ..., "timestamp": ...}}
-FEATURES_SORTED_CACHE_TTL = 2.0  # Cache for 2 seconds (short TTL to balance freshness and performance)
 
 # Cache for features-sorted endpoint to reduce database queries
 _features_sorted_cache = {}  # {dataset_id: {"data": ..., "timestamp": ...}}
@@ -155,23 +165,52 @@ def save_model_artifact(dataset_id: int, model_label: str, payload: Dict[str, An
         payload_copy.setdefault('dataset_id', dataset_id)
         payload_copy.setdefault('model_label', model_label)
         payload_copy.setdefault('saved_at', datetime.datetime.utcnow().isoformat())
-        artifact_path = target_path
-        with open(artifact_path, 'wb') as handle:
+        
+        # Save locally first (required for Cloud Storage upload)
+        with open(target_path, 'wb') as handle:
             pickle.dump(payload_copy, handle)
+        
+        # Upload to Cloud Storage if configured
+        artifact_path = target_path
+        if storage_manager and storage_manager.artifacts_bucket:
+            try:
+                blob_name = f"artifacts/{dataset_id}_{model_label}.pkl"
+                artifact_path = storage_manager.upload_file(
+                    target_path,
+                    storage_manager.artifacts_bucket,
+                    blob_name
+                )
+                print(f"[MODEL ARTIFACT] Uploaded to Cloud Storage: {artifact_path}")
+            except Exception as e:
+                print(f"[MODEL ARTIFACT] Warning: Failed to upload to Cloud Storage: {e}")
+                # Continue with local path
+        
         return _build_artifact_metadata(payload_copy, artifact_path)
     except Exception as err:
         print(f"[MODEL ARTIFACT] Failed to save artifact for dataset {dataset_id}: {err}")
         return None
 
 def load_model_artifact(dataset_id: int, model_label: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    # Try local files first
     paths = []
     if model_label:
         target = _artifact_path(dataset_id, model_label)
         if os.path.exists(target):
             paths.append(target)
+        # Also check Cloud Storage if configured
+        if storage_manager and storage_manager.artifacts_bucket:
+            blob_name = f"artifacts/{dataset_id}_{model_label}.pkl"
+            if storage_manager.file_exists(f"gs://{storage_manager.artifacts_bucket}/{blob_name}"):
+                temp_path = storage_manager.save_to_temp(
+                    storage_manager.artifacts_bucket,
+                    blob_name
+                )
+                if temp_path:
+                    paths.append(temp_path)
     else:
         pattern = _artifact_pattern(dataset_id)
         paths = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+        # TODO: Could also list from Cloud Storage, but for now use local pattern
 
     for path in paths:
         try:
@@ -665,9 +704,28 @@ def _normalize_dataset_id(value):
 
 
 def _resolve_dataset_file_path(file_path: Optional[str]) -> Optional[str]:
-    """Resolve relative/absolute dataset paths and ensure the file exists."""
+    """Resolve relative/absolute dataset paths and ensure the file exists.
+    Supports both local filesystem and Cloud Storage (gs://) paths."""
     if not file_path:
         return None
+    
+    # Check if it's a Cloud Storage path
+    if file_path.startswith('gs://'):
+        # Verify file exists in Cloud Storage
+        try:
+            from storage import get_storage_manager
+            storage_mgr = get_storage_manager()
+            if storage_mgr and storage_mgr.file_exists(file_path):
+                # Download to temp file for reading
+                temp_path = storage_mgr.save_to_temp('', file_path)
+                if temp_path:
+                    return temp_path
+        except Exception as e:
+            print(f"[RESOLVE_PATH] Warning: Could not access Cloud Storage path {file_path}: {e}")
+        # If Cloud Storage access fails, return None (don't fall through to local)
+        return None
+    
+    # Local filesystem paths
     if os.path.isabs(file_path) and os.path.exists(file_path):
         return file_path
     base_dir = os.path.dirname(__file__)
@@ -2955,21 +3013,52 @@ def preprocess_dataset_api():
         )
         
         # Generate new dataset ID and save processed data
-        new_dataset_id = generate_dataset_id()
-        processed_filename = f"processed_dataset_{new_dataset_id}.csv"
-        processed_path = os.path.join('uploads', processed_filename)
+        user_id = get_current_user_id()
+        ts_fname = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        processed_filename = f"processed_dataset_{ts_fname}.csv"
         
-        # Save processed dataset
-        df_processed.to_csv(processed_path, index=False)
+        # Ensure uploads directory exists
+        uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        processed_path = os.path.join(uploads_dir, processed_filename)
+        
+        # Save processed dataset locally first
+        try:
+            df_processed.to_csv(processed_path, index=False)
+            if not os.path.exists(processed_path):
+                raise Exception("Failed to save processed dataset file")
+        except Exception as e:
+            print(f"[PREPROCESS] Error saving processed dataset: {e}")
+            return jsonify({"error": f"Failed to save processed dataset: {str(e)}"}), 500
+        
+        # Upload to Cloud Storage if configured
+        final_file_path = processed_path
+        if storage_manager and storage_manager.uploads_bucket:
+            try:
+                blob_name = f"uploads/{processed_filename}"
+                gcs_path = storage_manager.upload_file(
+                    processed_path,
+                    storage_manager.uploads_bucket,
+                    blob_name
+                )
+                if gcs_path.startswith('gs://'):
+                    final_file_path = gcs_path
+                    print(f"[PREPROCESS] Processed dataset uploaded to Cloud Storage: {gcs_path}")
+                else:
+                    print(f"[PREPROCESS] Warning: Cloud Storage upload returned local path, using local file")
+            except Exception as e:
+                print(f"[PREPROCESS] Warning: Failed to upload processed dataset to Cloud Storage: {e}")
+                import traceback
+                traceback.print_exc()
+                # Continue with local path
         
         # Store dataset info in database
         dataset_info = {
-            'id': new_dataset_id,
             'filename': processed_filename,
-            'file_path': processed_path,
+            'file_path': final_file_path if final_file_path.startswith('gs://') else os.path.join('uploads', processed_filename),
             'original_filename': f"processed_from_{dataset_id}",
             'upload_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'file_size': os.path.getsize(processed_path),
+            'file_size': os.path.getsize(processed_path) if os.path.exists(processed_path) else 0,
             'num_rows': len(df_processed),
             'num_columns': len(df_processed.columns),
             'preprocessing_applied': True,
@@ -2977,8 +3066,12 @@ def preprocess_dataset_api():
             'preprocessing_report': preprocessing_report
         }
         
-        # Save to database (you'll need to implement this based on your storage)
-        save_dataset_info(dataset_info)
+        # Save to database
+        new_dataset_id = save_dataset_info(dataset_info)
+        if not new_dataset_id:
+            # Fallback: generate timestamp-based ID if database save fails
+            new_dataset_id = int(datetime.now().timestamp())
+            print(f"[PREPROCESS] Warning: Database save failed, using fallback ID: {new_dataset_id}")
         
         return jsonify({
             "success": True,
@@ -3003,33 +3096,73 @@ def generate_dataset_id():
 
 def save_dataset_info(dataset_info):
     """
-    Save dataset information to your database.
-    You'll need to implement this based on your storage (SQLite, JSON file, etc.)
+    Save dataset information to the database.
+    Uses the database instead of JSON file for Cloud Run compatibility.
     """
-    # Example implementation using a JSON file
     try:
-        if os.path.exists('datasets.json'):
-            with open('datasets.json', 'r') as f:
-                datasets = json.load(f)
-        else:
-            datasets = []
-        
-        datasets.append(dataset_info)
-        
-        with open('datasets.json', 'w') as f:
-            json.dump(datasets, f, indent=2)
+        user_id = get_current_user_id()
+        dataset_id = create_dataset(
+            name=dataset_info.get('original_filename', f"processed_from_{dataset_info.get('original_dataset_id', 'unknown')}"),
+            file_path=dataset_info.get('file_path', ''),
+            total_features=dataset_info.get('num_columns', 0),
+            target_variable='',  # Will be set later if needed
+            user_id=user_id
+        )
+        print(f"[SAVE_DATASET_INFO] Created dataset record with ID: {dataset_id}")
+        return dataset_id
     except Exception as e:
-        print(f"Warning: Could not save dataset info: {e}")
+        print(f"[SAVE_DATASET_INFO] Error: Could not save dataset info to database: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # Helper function to safely save CSV with retry logic
 def safe_save_csv(df, dataset_id: Optional[int] = None, max_retries=3):
     """
     Safely saves DataFrame to dataset CSV file with retry logic for Windows permission issues.
+    Handles both local filesystem and Cloud Storage paths.
     """
     csv_path = get_csv_path(dataset_id)
+    
+    # If path is Cloud Storage, we need to save to temp first, then upload
+    if csv_path.startswith('gs://'):
+        try:
+            from storage import get_storage_manager
+            import tempfile
+            storage_mgr = get_storage_manager()
+            
+            # Save to temporary file first
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as tmp:
+                temp_path = tmp.name
+                df.to_csv(temp_path, index=False)
+            
+            # Upload to Cloud Storage
+            if storage_mgr and storage_mgr.uploads_bucket:
+                # Extract blob name from gs:// path
+                parts = csv_path[5:].split('/', 1)
+                if len(parts) > 1:
+                    blob_name = parts[1]
+                else:
+                    blob_name = f"uploads/{os.path.basename(temp_path)}"
+                
+                storage_mgr.upload_file(temp_path, storage_mgr.uploads_bucket, blob_name)
+                os.remove(temp_path)  # Clean up temp file
+                return True
+            else:
+                # No Cloud Storage configured, save locally instead
+                local_path = os.path.join('uploads', os.path.basename(temp_path))
+                os.rename(temp_path, local_path)
+                return True
+        except Exception as e:
+            print(f"[SAFE_SAVE_CSV] Error saving to Cloud Storage: {e}")
+            return False
+    
+    # Local filesystem path
     import time
     for attempt in range(max_retries):
         try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             df.to_csv(csv_path, index=False)
             return True
         except PermissionError as e:
@@ -3037,6 +3170,13 @@ def safe_save_csv(df, dataset_id: Optional[int] = None, max_retries=3):
                 time.sleep(0.1)  # Wait 100ms before retry
             else:
                 raise e  # Re-raise on final attempt
+        except FileNotFoundError:
+            # Directory doesn't exist, try creating it
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+            if attempt < max_retries - 1:
+                continue
+            else:
+                raise
     return False
 
 
@@ -3060,12 +3200,28 @@ def get_uploaded_csv_columns():
         return jsonify({"error": str(e)}), 500
 
 # ----------- Health Check -----------
+@app.route('/health', methods=['GET'])
 @app.route('/api/health', methods=['GET'])
 def health():
     """
-    A simple health check endpoint.
+    Health check endpoint for Cloud Run and general monitoring.
     """
-    return jsonify({"status": "OK", "time": str(datetime.datetime.now())})
+    try:
+        # Test database connection
+        conn = get_db_connection()
+        conn.close()
+        return jsonify({
+            "status": "healthy",
+            "database": "connected",
+            "time": str(datetime.datetime.utcnow()),
+            "storage": "gcs" if (storage_manager and storage_manager.use_gcs) else "local"
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "time": str(datetime.datetime.utcnow())
+        }), 503
 
 # ----------- Database Health Check -----------
 @app.route('/api/db-health', methods=['GET'])
@@ -4244,6 +4400,23 @@ def upload_csv():
                 os.remove(save_path)
                 return jsonify({"error": "Uploaded CSV file is empty"}), 400
             
+            # Upload to Cloud Storage if configured
+            final_file_path = save_path
+            if storage_manager and storage_manager.uploads_bucket:
+                try:
+                    blob_name = f"uploads/{timestamped_name}"
+                    gcs_path = storage_manager.upload_file(
+                        save_path,
+                        storage_manager.uploads_bucket,
+                        blob_name
+                    )
+                    if gcs_path.startswith('gs://'):
+                        final_file_path = gcs_path
+                        print(f"[UPLOAD] File uploaded to Cloud Storage: {gcs_path}")
+                except Exception as e:
+                    print(f"[UPLOAD] Warning: Failed to upload to Cloud Storage: {e}")
+                    # Continue with local path
+            
             # Read header to get column names - try multiple methods for reliability
             columns = None
             try:
@@ -4306,11 +4479,16 @@ def upload_csv():
             # Create dataset record
             dataset_name = file.filename.replace('.csv', '')
 
-            # Store a relative path in the dataset record (so DB does not hold machine-specific absolute paths)
-            rel_path = os.path.join('uploads', timestamped_name)
+            # Store path in the dataset record
+            # If using Cloud Storage, store gs:// path, otherwise relative path
+            if final_file_path.startswith('gs://'):
+                stored_path = final_file_path
+            else:
+                stored_path = os.path.join('uploads', timestamped_name)
+            
             dataset_id = create_dataset(
                 name=f"{dataset_name}_{timestamp}",
-                file_path=rel_path,
+                file_path=stored_path,
                 total_features=len(columns),
                 discrete_features=0,  # Will be updated after classification
                 continuous_features=0,  # Will be updated after classification
@@ -4336,7 +4514,7 @@ def upload_csv():
                 "rowCount": row_count,
                 "timestamp": timestamp,
                 # dataset_path shows the stored (relative) path; resolved_path has the absolute path on server
-                "dataset_path": rel_path,
+                "dataset_path": stored_path,
                 "resolved_path": save_path
             })
         except Exception as e:
@@ -6893,7 +7071,16 @@ def get_csv_samples():
 
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
-client = InferenceClient(api_key=HF_TOKEN)
+# Initialize client only if token is available
+if HF_TOKEN:
+    try:
+        client = InferenceClient(api_key=HF_TOKEN)
+    except Exception as e:
+        print(f"[APP] Warning: Failed to initialize InferenceClient: {e}")
+        client = None
+else:
+    client = None
+    print("[APP] Warning: HF_TOKEN not set, chat endpoint will not work")
 
 MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct:novita"
 
@@ -7001,6 +7188,9 @@ RULES:
 """
 
         # ---------- CALL LLAMA ----------
+        if not client:
+            return jsonify({"error": "Chat service is not available. HF_TOKEN is not configured."}), 503
+        
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -7011,7 +7201,11 @@ RULES:
             max_tokens=350
         )
 
-        ai_reply = response.choices[0].message["content"]
+        # Handle both dictionary and attribute access patterns
+        if hasattr(response.choices[0].message, 'content'):
+            ai_reply = response.choices[0].message.content
+        else:
+            ai_reply = response.choices[0].message.get("content", "")
 
         return jsonify({"reply": ai_reply})
 
@@ -18402,6 +18596,11 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"⚠️  Warning: Could not register new v2 endpoints: {e}")
     
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    # Only run Flask dev server locally
+    # In production, gunicorn will handle it
+    if os.getenv('ENVIRONMENT') != 'production':
+        port = int(os.environ.get('PORT', 5000))
+        app.run(debug=True, host='0.0.0.0', port=port)
+    else:
+        print("[APP] Running in production mode - use gunicorn to start the server")
 

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { authPost } from '../utils/api';
 import './LogisticRegressionResults.css';
 
 interface LogisticRegressionResultsProps {
@@ -77,12 +78,12 @@ interface LogisticResults {
 
 const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
   selectedVariables,
-  allSelectedVariables,
+  allSelectedVariables: _allSelectedVariables,
   targetVariable,
   woeTransformedData,
-  onColumnSelect,
-  selectedColumn,
-  onToggleSelect,
+  onColumnSelect: _onColumnSelect,
+  selectedColumn: _selectedColumn,
+  onToggleSelect: _onToggleSelect,
   onGenerateScoreCard,
   generatingScoreCard,
   onGotoScoreCard,
@@ -130,18 +131,12 @@ const LogisticRegressionResults: React.FC<LogisticRegressionResultsProps> = ({
 
     setLoading(true);
     try {
-      const response = await fetch('http://localhost:5000/api/logistic-regression', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/logistic-regression', {
           selected_variables: selectedVariables,
           target: targetVariable,
           woe_transformed_data: woeTransformedData,
           record_id: recordId
-        })
       });
-
-      const data = await response.json();
       if (data.success) {
         setResults(data);
         

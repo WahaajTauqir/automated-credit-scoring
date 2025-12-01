@@ -64,6 +64,10 @@ def get_train_test_data(dataset_id: int) -> Tuple[Optional[pd.DataFrame], Option
     if not split_info:
         return None, None, False
     
+    # Get dataset to access target variable
+    dataset = get_dataset(dataset_id)
+    target = dataset.get('target_variable') if dataset else None
+    
     # Try to load from saved preprocessed files first (if split was created after preprocessing)
     print(f"\n[TTS DEBUG] {'='*80}")
     print(f"[TTS DEBUG] get_train_test_data() - Loading split data")
@@ -77,61 +81,106 @@ def get_train_test_data(dataset_id: int) -> Tuple[Optional[pd.DataFrame], Option
     print(f"[TTS DEBUG]   Train path: {train_path}")
     print(f"[TTS DEBUG]   Test path: {test_path}")
     
-    if train_path and test_path and os.path.exists(train_path) and os.path.exists(test_path):
+    # Helper function to check if file exists (local or Cloud Storage)
+    def file_exists(path):
+        if not path:
+            return False
+        if path.startswith('gs://'):
+            try:
+                from storage import get_storage_manager
+                storage_mgr = get_storage_manager()
+                if storage_mgr:
+                    return storage_mgr.file_exists(path)
+            except Exception:
+                return False
+        return os.path.exists(path)
+    
+    # Helper function to get local path (download from GCS if needed)
+    def get_local_path(path):
+        if not path:
+            return None
+        if path.startswith('gs://'):
+            try:
+                from storage import get_storage_manager
+                storage_mgr = get_storage_manager()
+                if storage_mgr:
+                    temp_path = storage_mgr.save_to_temp('', path)
+                    if temp_path:
+                        print(f"[TTS DEBUG]   Downloaded from Cloud Storage to: {temp_path}")
+                        return temp_path
+            except Exception as e:
+                print(f"[TTS DEBUG]   Warning: Could not download from Cloud Storage: {e}")
+            return None
+        return path if os.path.exists(path) else None
+    
+    if train_path and test_path and file_exists(train_path) and file_exists(test_path):
         # Load from saved preprocessed files
         print(f"[TTS DEBUG] ✓ Saved files found, loading from preprocessed files...")
-        print(f"[TTS DEBUG]   Train file exists: {os.path.exists(train_path)}")
-        print(f"[TTS DEBUG]   Test file exists: {os.path.exists(test_path)}")
+        print(f"[TTS DEBUG]   Train file exists: {file_exists(train_path)}")
+        print(f"[TTS DEBUG]   Test file exists: {file_exists(test_path)}")
         
-        try:
-            print(f"[TTS DEBUG] Loading train file: {train_path}")
-            train_df = pd.read_csv(train_path)
-            print(f"[TTS DEBUG]   ✓ Train loaded: {len(train_df)} rows, {len(train_df.columns)} columns")
-            
-            print(f"[TTS DEBUG] Loading test file: {test_path}")
-            test_df = pd.read_csv(test_path)
-            print(f"[TTS DEBUG]   ✓ Test loaded: {len(test_df)} rows, {len(test_df.columns)} columns")
-            
-            # Verify data appears to be preprocessed
-            print(f"[TTS DEBUG] Verifying loaded data is preprocessed...")
-            train_duplicates = train_df.duplicated().sum()
-            test_duplicates = test_df.duplicated().sum()
-            train_missing_pct = train_df.isnull().sum().sum() / (len(train_df) * len(train_df.columns)) * 100 if len(train_df) > 0 else 0
-            test_missing_pct = test_df.isnull().sum().sum() / (len(test_df) * len(test_df.columns)) * 100 if len(test_df) > 0 else 0
-            
-            print(f"[TTS DEBUG]   Train duplicates: {train_duplicates} (0 = preprocessed)")
-            print(f"[TTS DEBUG]   Test duplicates: {test_duplicates} (0 = preprocessed)")
-            print(f"[TTS DEBUG]   Train missing %: {train_missing_pct:.2f}%")
-            print(f"[TTS DEBUG]   Test missing %: {test_missing_pct:.2f}%")
-            
-            if train_duplicates > 0 or test_duplicates > 0:
-                print(f"[TTS DEBUG] ⚠️  WARNING: Loaded files contain duplicates - data may not be preprocessed!")
-                print(f"[TTS DEBUG]   Consider recreating split with preprocess_first=true")
-            
-            # Debug: Show target distribution
-            if target in train_df.columns and target in test_df.columns:
-                train_dist = train_df[target].value_counts()
-                test_dist = test_df[target].value_counts()
-                print(f"[TTS DEBUG] Train target distribution: {dict(train_dist)}")
-                print(f"[TTS DEBUG] Test target distribution: {dict(test_dist)}")
-            
-            print(f"[TTS DEBUG] ✓ Successfully loaded from saved files")
-        except Exception as e:
-            print(f"[TTS DEBUG] ✗ ERROR: Failed to load saved files: {e}")
-            print(f"[TTS DEBUG] Falling back to regenerating from raw CSV...")
-            import traceback
-            traceback.print_exc()
+        # Get local paths (download from Cloud Storage if needed)
+        local_train_path = get_local_path(train_path)
+        local_test_path = get_local_path(test_path)
+        
+        if not local_train_path or not local_test_path:
+            print(f"[TTS DEBUG] ✗ ERROR: Could not access train/test files")
             train_path = None  # Force fallback
             test_path = None
+        else:
+            try:
+                print(f"[TTS DEBUG] Loading train file: {local_train_path}")
+                train_df = pd.read_csv(local_train_path)
+                print(f"[TTS DEBUG]   ✓ Train loaded: {len(train_df)} rows, {len(train_df.columns)} columns")
+                
+                print(f"[TTS DEBUG] Loading test file: {local_test_path}")
+                test_df = pd.read_csv(local_test_path)
+                print(f"[TTS DEBUG]   ✓ Test loaded: {len(test_df)} rows, {len(test_df.columns)} columns")
+                
+                # Verify data appears to be preprocessed
+                print(f"[TTS DEBUG] Verifying loaded data is preprocessed...")
+                train_duplicates = train_df.duplicated().sum()
+                test_duplicates = test_df.duplicated().sum()
+                train_missing_pct = train_df.isnull().sum().sum() / (len(train_df) * len(train_df.columns)) * 100 if len(train_df) > 0 else 0
+                test_missing_pct = test_df.isnull().sum().sum() / (len(test_df) * len(test_df.columns)) * 100 if len(test_df) > 0 else 0
+                
+                print(f"[TTS DEBUG]   Train duplicates: {train_duplicates} (0 = preprocessed)")
+                print(f"[TTS DEBUG]   Test duplicates: {test_duplicates} (0 = preprocessed)")
+                print(f"[TTS DEBUG]   Train missing %: {train_missing_pct:.2f}%")
+                print(f"[TTS DEBUG]   Test missing %: {test_missing_pct:.2f}%")
+                
+                if train_duplicates > 0 or test_duplicates > 0:
+                    print(f"[TTS DEBUG] ⚠️  WARNING: Loaded files contain duplicates - data may not be preprocessed!")
+                    print(f"[TTS DEBUG]   Consider recreating split with preprocess_first=true")
+                
+                # Debug: Show target distribution
+                if target in train_df.columns and target in test_df.columns:
+                    train_dist = train_df[target].value_counts()
+                    test_dist = test_df[target].value_counts()
+                    print(f"[TTS DEBUG] Train target distribution: {dict(train_dist)}")
+                    print(f"[TTS DEBUG] Test target distribution: {dict(test_dist)}")
+                
+                print(f"[TTS DEBUG] ✓ Successfully loaded from saved files")
+                
+                # Cache the loaded data
+                _tts_cache[dataset_id] = (train_df.copy(), test_df.copy(), split_info)
+                print(f"[TTS CACHE] ✓ Cached train/test data for dataset {dataset_id}")
+            except Exception as e:
+                print(f"[TTS DEBUG] ✗ ERROR: Failed to load saved files: {e}")
+                print(f"[TTS DEBUG] Falling back to regenerating from raw CSV...")
+                import traceback
+                traceback.print_exc()
+                train_path = None  # Force fallback
+                test_path = None
     else:
         print(f"[TTS DEBUG] ✗ Saved files not found or paths missing")
         if not train_path:
             print(f"[TTS DEBUG]   Train path is None")
-        elif not os.path.exists(train_path):
+        elif not file_exists(train_path):
             print(f"[TTS DEBUG]   Train file does not exist: {train_path}")
         if not test_path:
             print(f"[TTS DEBUG]   Test path is None")
-        elif not os.path.exists(test_path):
+        elif not file_exists(test_path):
             print(f"[TTS DEBUG]   Test file does not exist: {test_path}")
         print(f"[TTS DEBUG] Falling back to regenerating from raw CSV...")
     
@@ -272,6 +321,7 @@ def get_train_test_data(dataset_id: int) -> Tuple[Optional[pd.DataFrame], Option
 def get_csv_path(dataset_id: int) -> str:
     """
     Get CSV path for a dataset.
+    Supports both local filesystem and Cloud Storage (gs://) paths.
     
     Parameters:
     -----------
@@ -280,7 +330,7 @@ def get_csv_path(dataset_id: int) -> str:
         
     Returns:
     --------
-    str : Path to CSV file
+    str : Path to CSV file (local path or gs:// path)
     """
     dataset = get_dataset(dataset_id)
     if not dataset:
@@ -290,7 +340,24 @@ def get_csv_path(dataset_id: int) -> str:
     if not file_path:
         raise FileNotFoundError(f"No file path for dataset {dataset_id}")
     
-    # Try different path strategies
+    # Check if it's a Cloud Storage path
+    if file_path.startswith('gs://'):
+        # For Cloud Storage, we need to download to a temp file when needed
+        # For now, return the gs:// path and let the caller handle it
+        try:
+            from storage import get_storage_manager
+            storage_mgr = get_storage_manager()
+            if storage_mgr and storage_mgr.file_exists(file_path):
+                # Download to temp file for reading
+                import tempfile
+                temp_path = storage_mgr.save_to_temp('', file_path)
+                if temp_path:
+                    return temp_path
+        except Exception as e:
+            print(f"[DATA_LOADER] Warning: Could not access Cloud Storage path {file_path}: {e}")
+        # Fall through to try local alternatives
+    
+    # Try different path strategies for local files
     # 1. Relative to backend folder
     backend_dir = os.path.dirname(os.path.abspath(__file__))
     candidate = os.path.join(backend_dir, file_path)

@@ -1,0 +1,108 @@
+steps:
+  # Build backend Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/credit-scoring-backend:${_SHORT_SHA}'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/credit-scoring-backend:latest'
+      - '-f'
+      - 'backend/Dockerfile'
+      - '.'
+
+  # Build frontend Docker image
+  # Note: Backend URL will be set after backend deployment
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'VITE_API_BASE_URL=${_FRONTEND_API_URL}'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/credit-scoring-frontend:${_SHORT_SHA}'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/credit-scoring-frontend:latest'
+      - '-f'
+      - 'frontend/Dockerfile'
+      - '.'
+
+  # Push backend image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/credit-scoring-backend:${_SHORT_SHA}']
+  
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/credit-scoring-backend:latest']
+
+  # Push frontend image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/credit-scoring-frontend:${_SHORT_SHA}']
+  
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/credit-scoring-frontend:latest']
+
+  # Deploy backend to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'credit-scoring-backend'
+      - '--image=gcr.io/$PROJECT_ID/credit-scoring-backend:${_SHORT_SHA}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--add-cloudsql-instances=${_CLOUD_SQL_INSTANCE}'
+      - '--set-env-vars=ENVIRONMENT=production'
+      - '--set-env-vars=GCS_UPLOADS_BUCKET=${_GCS_UPLOADS_BUCKET}'
+      - '--set-env-vars=GCS_ARTIFACTS_BUCKET=${_GCS_ARTIFACTS_BUCKET}'
+      - '--set-env-vars=DATABASE_URL=${_DATABASE_URL}'
+      - '--set-env-vars=JWT_SECRET=${_JWT_SECRET}'
+      - '--set-env-vars=ALLOWED_ORIGINS=${_ALLOWED_ORIGINS}'
+      - '--set-env-vars=HF_TOKEN=${_HF_TOKEN}'
+      - '--set-env-vars=HF_TOKEN1=${_HF_TOKEN1}'
+      - '--memory=8Gi'
+      - '--cpu=2'
+      - '--timeout=3600'
+      - '--max-instances=10'
+      - '--min-instances=0'
+
+  # Deploy frontend to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'credit-scoring-frontend'
+      - '--image=gcr.io/$PROJECT_ID/credit-scoring-frontend:${_SHORT_SHA}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--memory=512Mi'
+      - '--cpu=1'
+      - '--timeout=300'
+      - '--max-instances=10'
+      - '--min-instances=0'
+
+substitutions:
+  _REGION: us-central1
+  _SHORT_SHA: 'latest'  # Default to 'latest' for manual builds, can be overridden
+  _CLOUD_SQL_INSTANCE: 'gen-lang-client-0128501968:us-central1:credit-scoring-db'
+  _GCS_UPLOADS_BUCKET: 'gen-lang-client-0128501968-uploads'
+  _GCS_ARTIFACTS_BUCKET: 'gen-lang-client-0128501968-artifacts'
+  _DATABASE_URL: 'postgresql://app_user:FireBall24@/credit_scoring?host=/cloudsql/gen-lang-client-0128501968:us-central1:credit-scoring-db'
+  _JWT_SECRET: 'Zf9dMXqo_BELTblLCnupbVN7CCL-ZiAwdpq1B4s-pqY'
+  _ALLOWED_ORIGINS: 'https://credit-scoring-frontend-475747544204.us-central1.run.app'
+  _FRONTEND_API_URL: 'https://credit-scoring-backend-475747544204.us-central1.run.app'
+  _HF_TOKEN: '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'
+  _HF_TOKEN1: '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'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+
+images:
+  - 'gcr.io/$PROJECT_ID/credit-scoring-backend:${_SHORT_SHA}'
+  - 'gcr.io/$PROJECT_ID/credit-scoring-backend:latest'
+  - 'gcr.io/$PROJECT_ID/credit-scoring-frontend:${_SHORT_SHA}'
+  - 'gcr.io/$PROJECT_ID/credit-scoring-frontend:latest'
+

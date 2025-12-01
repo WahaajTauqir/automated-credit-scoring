@@ -5,6 +5,7 @@ import Navbar from './components/Navbar';
 import AdminPanel from './components/Admin/AdminPanel';
 import SelectedColumnsPage from './components/SelectedColumnsPage';
 import CreditScorePage from './components/CreditScorePage';
+import { authPost, authGet, authFetch } from './utils/api';
 import './App.css';
 import './components/Admin/AdminPanel.css';
 import { AnalysisRecord } from './types/analysis';
@@ -15,20 +16,20 @@ function App() {
   const navigate = useNavigate();
 
   // State definitions
-  const [columns, setColumns] = useState<string[]>([]);
+  const [_columns, setColumns] = useState<string[]>([]);
   const [discreteColumns, setDiscreteColumns] = useState<string[]>([]);
   const [continuousColumns, setContinuousColumns] = useState<string[]>([]);
   const [targetVariable, setTargetVariable] = useState<string>('');
-  const [univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
-  const [fineBinResults, setFineBinResults] = useState<Record<string, any>>({});
-  const [crossTabResults, setCrossTabResults] = useState<Record<string, any>>({});
-  const [targetCounts, setTargetCounts] = useState<Record<string, number>>({});
+  const [_univariateResults, setUnivariateResults] = useState<Record<string, any>>({});
+  const [_fineBinResults, setFineBinResults] = useState<Record<string, any>>({});
+  const [_crossTabResults, setCrossTabResults] = useState<Record<string, any>>({});
+  const [_targetCounts, setTargetCounts] = useState<Record<string, number>>({});
   const [selectedForUnivariate, setSelectedForUnivariate] = useState<string[]>([]);
 
-  const [selectedBinGroups, setSelectedBinGroups] = useState<Record<string, any[]>>({});
+  const [_selectedBinGroups, setSelectedBinGroups] = useState<Record<string, any[]>>({});
   const [datasetPath, setDatasetPath] = useState<string>('');
-  const [restoring, setRestoring] = useState<boolean>(false);
-  const [expectedColumnsForRecord, setExpectedColumnsForRecord] = useState<string[] | undefined>(undefined);
+  const [_restoring, setRestoring] = useState<boolean>(false);
+  const [_expectedColumnsForRecord, setExpectedColumnsForRecord] = useState<string[] | undefined>(undefined);
 
   // Records (moved from AdminPanel into main page)
   const [records, setRecords] = useState<AnalysisRecord[]>([]);
@@ -42,10 +43,7 @@ function App() {
   const fetchRecords = useCallback(async () => {
     setRecordsLoading(true);
     try {
-      const token = localStorage.getItem('credit_scoring_auth_token');
-      const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
-      const res = await fetch('http://localhost:5000/api/records', { headers });
-      const data = await res.json();
+      const data = await authGet('/api/records');
       const list: AnalysisRecord[] = Array.isArray(data) ? data : [];
       setRecords(list);
       if (list.length > 0) {
@@ -86,87 +84,78 @@ function App() {
   }, [location.state]);
 
   // Pagination setup
-  const columnsPerPage = 7;
-  const [currentPage, setCurrentPage] = useState<number>(1);
-  const totalPages = Math.ceil(columns.length / columnsPerPage);
-  const paginatedColumns = columns.slice(
-    (currentPage - 1) * columnsPerPage,
-    currentPage * columnsPerPage
-  );
+  // const columnsPerPage = 7;
+  const [_currentPage, setCurrentPage] = useState<number>(1);
+  // const _totalPages = Math.ceil(columns.length / columnsPerPage);
+  // const _paginatedColumns = columns.slice(
+  //   (currentPage - 1) * columnsPerPage,
+  //   currentPage * columnsPerPage
+  // );
 
   // Async handleFineBin
-  const handleFineBin = async (column: string): Promise<void> => {
-    try {
-      console.log("Fine bin clicked for column:", column);
-      // Example API call (replace with your endpoint)
-      // const res = await fetch('http://localhost:5000/api/fine-bin', { ... });
-      // const data = await res.json();
-    } catch (err) {
-      console.error("Error in fine binning:", err);
-    }
-  };
+  // const _handleFineBin = async (column: string): Promise<void> => {
+  //   try {
+  //     console.log("Fine bin clicked for column:", column);
+      //     // Example API call (replace with your endpoint)
+      //     // const res = await fetch('http://localhost:5000/api/fine-bin', { ... });
+      //     // const data = await res.json();
+      //   } catch (err) {
+      //     console.error("Error in fine binning:", err);
+      //   }
+  // };
 
-  const handleProceedToSelectedColumns = async () => {
-    if (selectedForUnivariate.length === 0) {
-      alert('Please select at least one column.');
-      return;
-    }
+  // const _handleProceedToSelectedColumns = async () => {
+  //   if (selectedForUnivariate.length === 0) {
+  //     alert('Please select at least one column.');
+  //     return;
+  //   }
 
-    try {
-      const token = localStorage.getItem('credit_scoring_auth_token');
-      const headers: HeadersInit = { 'Content-Type': 'application/json' };
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-      const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          dataset_path: datasetPath,
-          discrete_columns: discreteColumns,
-          continuous_columns: continuousColumns,
-          selected_columns: selectedForUnivariate,
-          record_id: activeRecordId,
-          target_variable: targetVariable,
-          univariate_results: '',
-          finebin_results: '',
-          crosstab_results: ''
-        })
-      });
-      const saved = await resp.json().catch(() => ({} as any));
-      const newRecordId = saved?.id;
-      if (newRecordId) {
-        setActiveRecordId(newRecordId);
-      }
+  //   try {
+  //     const _token = localStorage.getItem('credit_scoring_auth_token');
+  //     const saved = await authPost('/api/upsert-single-record', {
+  //         dataset_path: datasetPath,
+  //         discrete_columns: discreteColumns,
+  //         continuous_columns: continuousColumns,
+  //         selected_columns: selectedForUnivariate,
+  //         record_id: activeRecordId,
+  //         target_variable: targetVariable,
+  //         univariate_results: '',
+  //         finebin_results: '',
+  //         crosstab_results: ''
+  //     }).catch(() => ({} as any));
+  //     const newRecordId = saved?.id;
+  //     if (newRecordId) {
+  //       setActiveRecordId(newRecordId);
+  //     }
 
-      navigate('/selected-columns', {
-        state: {
-          selectedColumns: selectedForUnivariate,
-          discreteColumns,
-          continuousColumns,
-          targetVariable,
-          recordId: newRecordId || undefined,
-          datasetPath: datasetPath,
-          // pass-through analysis results so SelectedColumnsPage can initialize immediately
-          univariateResults,
-          fineBinResults,
-          crossTabResults: crossTabResults,
-          expectedColumns: expectedColumnsForRecord,
-        }
-      });
-    } catch (e) {
-      console.error('Failed to upsert record:', e);
-      navigate('/selected-columns', {
-        state: {
-          selectedColumns: selectedForUnivariate,
-          discreteColumns,
-          continuousColumns,
-          targetVariable,
-          datasetPath: datasetPath
-        }
-      });
-    }
-  };
+  //     navigate('/selected-columns', {
+  //       state: {
+  //         selectedColumns: selectedForUnivariate,
+  //         discreteColumns,
+  //         continuousColumns,
+  //         targetVariable,
+  //         recordId: newRecordId || undefined,
+  //         datasetPath: datasetPath,
+  //         // pass-through analysis results so SelectedColumnsPage can initialize immediately
+  //         univariateResults,
+  //         fineBinResults,
+  //         crossTabResults: crossTabResults,
+  //         expectedColumns: expectedColumnsForRecord,
+  //       }
+  //     });
+  //   } catch (e) {
+  //     console.error('Failed to upsert record:', e);
+  //     navigate('/selected-columns', {
+  //       state: {
+  //         selectedColumns: selectedForUnivariate,
+  //         discreteColumns,
+  //         continuousColumns,
+  //         targetVariable,
+  //         datasetPath: datasetPath
+  //       }
+  //     });
+  //   }
+  // };
 
   const handleCSVUploaded = (headers: string[], _rows?: any[], uploadedPath?: string, datasetId?: number) => {
     // CRITICAL: Clear ALL state when starting a new analysis
@@ -203,123 +192,114 @@ function App() {
     });
   };
 
-  const toggleSelectedForUnivariate = (col: string) => {
-    setSelectedForUnivariate(prev =>
-      prev.includes(col) ? prev.filter(c => c !== col) : [...prev, col]
-    );
-  };
+  // const _toggleSelectedForUnivariate = (col: string) => {
+  //   setSelectedForUnivariate(prev =>
+  //     prev.includes(col) ? prev.filter(c => c !== col) : [...prev, col]
+  //   );
+  // };
 
   // Select/unselect all discrete columns for univariate selection
-  const toggleSelectAllDiscrete = (selectAll?: boolean) => {
-    setSelectedForUnivariate(prev => {
-      const currentSet = new Set(prev);
-      // If selectAll explicitly false, remove all discrete
-      if (selectAll === false) {
-        discreteColumns.forEach(c => currentSet.delete(c));
-        return Array.from(currentSet);
-      }
+  // const _toggleSelectAllDiscrete = (selectAll?: boolean) => {
+  //   setSelectedForUnivariate(prev => {
+  //     const currentSet = new Set(prev);
+  //     // If selectAll explicitly false, remove all discrete
+  //     if (selectAll === false) {
+  //       discreteColumns.forEach(c => currentSet.delete(c));
+  //       return Array.from(currentSet);
+  //     }
 
-      // If selectAll explicitly true, add all discrete
-      if (selectAll === true) {
-        discreteColumns.forEach(c => currentSet.add(c));
-        return Array.from(currentSet);
-      }
+  //     // If selectAll explicitly true, add all discrete
+  //     if (selectAll === true) {
+  //       discreteColumns.forEach(c => currentSet.add(c));
+  //       return Array.from(currentSet);
+  //     }
 
-      // Otherwise toggle: if all discrete are already selected -> remove them, else add them
-      const allSelected = discreteColumns.every(c => currentSet.has(c));
-      if (allSelected) {
-        discreteColumns.forEach(c => currentSet.delete(c));
-      } else {
-        discreteColumns.forEach(c => currentSet.add(c));
-      }
-      return Array.from(currentSet);
-    });
-  };
+  //     // Otherwise toggle: if all discrete are already selected -> remove them, else add them
+  //     const allSelected = discreteColumns.every(c => currentSet.has(c));
+  //     if (allSelected) {
+  //       discreteColumns.forEach(c => currentSet.delete(c));
+  //     } else {
+  //       discreteColumns.forEach(c => currentSet.add(c));
+  //     }
+  //     return Array.from(currentSet);
+  //   });
+  // };
 
   // Select/unselect all continuous columns for univariate selection
-  const toggleSelectAllContinuous = (selectAll?: boolean) => {
-    setSelectedForUnivariate(prev => {
-      const currentSet = new Set(prev);
-      if (selectAll === false) {
-        continuousColumns.forEach(c => currentSet.delete(c));
-        return Array.from(currentSet);
-      }
-      if (selectAll === true) {
-        continuousColumns.forEach(c => currentSet.add(c));
-        return Array.from(currentSet);
-      }
-      const allSelected = continuousColumns.every(c => currentSet.has(c));
-      if (allSelected) {
-        continuousColumns.forEach(c => currentSet.delete(c));
-      } else {
-        continuousColumns.forEach(c => currentSet.add(c));
-      }
-      return Array.from(currentSet);
-    });
-  };
+  // const _toggleSelectAllContinuous = (selectAll?: boolean) => {
+  //   setSelectedForUnivariate(prev => {
+  //     const currentSet = new Set(prev);
+  //     if (selectAll === false) {
+  //       continuousColumns.forEach(c => currentSet.delete(c));
+  //       return Array.from(currentSet);
+  //     }
+  //     if (selectAll === true) {
+  //       continuousColumns.forEach(c => currentSet.add(c));
+  //       return Array.from(currentSet);
+  //     }
+  //     const allSelected = continuousColumns.every(c => currentSet.has(c));
+  //     if (allSelected) {
+  //       continuousColumns.forEach(c => currentSet.delete(c));
+  //     } else {
+  //       continuousColumns.forEach(c => currentSet.add(c));
+  //     }
+  //     return Array.from(currentSet);
+  //   });
+  // };
 
-  const assignRemainingToContinuous = () => {
-    const selectedDiscrete = new Set(discreteColumns);
-    const remaining = columns.filter(col => !selectedDiscrete.has(col) && col !== targetVariable);
-    setContinuousColumns(remaining);
-  };
+  // const _assignRemainingToContinuous = () => {
+  //   const selectedDiscrete = new Set(discreteColumns);
+  //   const remaining = columns.filter(col => !selectedDiscrete.has(col) && col !== targetVariable);
+  //   setContinuousColumns(remaining);
+  // };
 
-  const handleTypeChange = (column: string, type: string) => {
-    // Use functional updates to avoid race conditions when many changes occur quickly
-    let computedDiscrete: string[] = [];
-    let computedContinuous: string[] = [];
+  // const _handleTypeChange = (column: string, type: string) => {
+  //   // Use functional updates to avoid race conditions when many changes occur quickly
+  //   let computedDiscrete: string[] = [];
+  //   let computedContinuous: string[] = [];
 
-    setDiscreteColumns(prev => {
-      const next = type === 'discrete'
-        ? Array.from(new Set([...prev, column]))
-        : prev.filter(c => c !== column);
-      computedDiscrete = next;
-      return next;
-    });
+  //   setDiscreteColumns(prev => {
+  //     const next = type === 'discrete'
+  //       ? Array.from(new Set([...prev, column]))
+  //       : prev.filter(c => c !== column);
+  //     computedDiscrete = next;
+  //     return next;
+  //   });
 
-    setContinuousColumns(prev => {
-      const next = type === 'continuous'
-        ? Array.from(new Set([...prev, column]))
-        : prev.filter(c => c !== column);
-      computedContinuous = next;
-      return next;
-    });
+  //   setContinuousColumns(prev => {
+  //     const next = type === 'continuous'
+  //       ? Array.from(new Set([...prev, column]))
+  //       : prev.filter(c => c !== column);
+  //     computedContinuous = next;
+  //     return next;
+  //   });
 
-    // Persist change to backend (non-blocking). Backend will recalc dataset counts.
-    (async () => {
-      try {
-        await fetch('http://localhost:5000/api/upsert-single-record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dataset_path: datasetPath,
-            discrete_columns: computedDiscrete,
-            continuous_columns: computedContinuous,
-            selected_columns: selectedForUnivariate,
-            target_variable: targetVariable,
-            record_id: activeRecordId
-          })
-        });
-      } catch (err) {
-        // Non-fatal: keep UI responsive even if persistence fails
-        console.error('Failed to persist type change:', err);
-      }
-    })();
-  };
+  //   // Persist change to backend (non-blocking). Backend will recalc dataset counts.
+  //   (async () => {
+  //     try {
+  //       await authPost('/api/upsert-single-record', {
+  //           dataset_path: datasetPath,
+  //           discrete_columns: computedDiscrete,
+  //           continuous_columns: computedContinuous,
+  //           selected_columns: selectedForUnivariate,
+  //           target_variable: targetVariable,
+  //           record_id: activeRecordId
+  //       });
+  //     } catch (err) {
+  //       // Non-fatal: keep UI responsive even if persistence fails
+  //       console.error('Failed to persist type change:', err);
+  //     }
+  //   })();
+  // };
 
 
   const fetchTargetCounts = async (col: string) => {
     try {
-      const res = await fetch('http://localhost:5000/api/target-distribution', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/target-distribution', {
           column: col,
           record_id: activeRecordId,
           dataset_path: datasetPath || undefined,
-        }),
       });
-      const data = await res.json();
       if (!data.error) setTargetCounts(data);
     } catch (err) {
       console.error('Failed to fetch target counts:', err);
@@ -336,17 +316,13 @@ function App() {
     (async () => {
       try {
         // Persist target variable
-        await fetch('http://localhost:5000/api/upsert-single-record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        await authPost('/api/upsert-single-record', {
             dataset_path: datasetPath,
             discrete_columns: discreteColumns,
             continuous_columns: continuousColumns,
             selected_columns: selectedForUnivariate,
             target_variable: targetVariable,
             record_id: activeRecordId
-          })
         });
         console.log('[TARGET] ✅ Target variable persisted to backend');
       } catch (err) {
@@ -355,27 +331,27 @@ function App() {
     })();
   }, [targetVariable, activeRecordId]);
 
-  const toggleBinSelection = (col: string, binValue: any) => {
-    setSelectedBinGroups(prev => {
-      const currentBins = prev[col] || [];
-      if (currentBins.includes(binValue)) {
-        return { ...prev, [col]: currentBins.filter(v => v !== binValue) };
-      }
-      return { ...prev, [col]: [...currentBins, binValue] };
-    });
-  };
+  // const _toggleBinSelection = (col: string, binValue: any) => {
+  //   setSelectedBinGroups(prev => {
+  //     const currentBins = prev[col] || [];
+  //     if (currentBins.includes(binValue)) {
+  //       return { ...prev, [col]: currentBins.filter(v => v !== binValue) };
+  //     }
+  //     return { ...prev, [col]: [...currentBins, binValue] };
+  //   });
+  // };
 
-  const handleNextPage = () => {
-    if (currentPage < totalPages) setCurrentPage(prev => prev + 1);
-  };
+  // const _handleNextPage = () => {
+  //   if (currentPage < totalPages) setCurrentPage(prev => prev + 1);
+  // };
 
-  const handlePrevPage = () => {
-    if (currentPage > 1) setCurrentPage(prev => prev - 1);
-  };
+  // const _handlePrevPage = () => {
+  //   if (currentPage > 1) setCurrentPage(prev => prev - 1);
+  // };
 
-  const formatToFourDecimals = (value: any): string => {
-    return typeof value === 'number' ? value.toFixed(4) : String(value);
-  };
+  // const _formatToFourDecimals = (value: any): string => {
+  //   return typeof value === 'number' ? value.toFixed(4) : String(value);
+  // };
 
   // View existing record: load its saved state then go to column selection
   const handleRecordView = async (id: number) => {
@@ -396,8 +372,7 @@ function App() {
       setActiveRecordId(id);
       
       // Fetch complete record
-      const recResp = await fetch(`http://localhost:5000/api/record/${id}`);
-      const data: AnalysisRecord = await recResp.json();
+      const data: AnalysisRecord = await authGet(`/api/record/${id}`);
       console.log(`[App] ✅ Loaded record ${id}: target_variable="${data.target_variable || ''}"`);
 
       // Infer columns from stored column arrays (much faster than loading entire CSV)
@@ -480,7 +455,7 @@ function App() {
 
   const handleRecordDelete = (id: number) => {
     if (!window.confirm('Are you sure you want to delete this record?')) return;
-    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE' })
+    authFetch(`/api/record/${id}`, { method: 'DELETE' })
       .then(res => {
         if (res.ok) {
           setRecords(prev => prev.filter(r => r.id !== id));

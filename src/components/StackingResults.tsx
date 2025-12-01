@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { authPost } from '../utils/api';
 import './ModelResults.css';
 
 interface StackingResultsProps {
@@ -68,12 +69,12 @@ interface StackingResults {
 
 const StackingResults: React.FC<StackingResultsProps> = ({
   selectedVariables,
-  allSelectedVariables,
+  allSelectedVariables: _allSelectedVariables,
   targetVariable,
   woeTransformedData,
-  onColumnSelect,
-  selectedColumn,
-  onToggleSelect,
+  onColumnSelect: _onColumnSelect,
+  selectedColumn: _selectedColumn,
+  onToggleSelect: _onToggleSelect,
   onGenerateScoreCard,
   generatingScoreCard,
   onGotoScoreCard,
@@ -121,18 +122,12 @@ const StackingResults: React.FC<StackingResultsProps> = ({
 
     setLoading(true);
     try {
-      const response = await fetch('http://localhost:5000/api/stacking', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/stacking', {
           selected_variables: selectedVariables,
           target: targetVariable,
           woe_transformed_data: woeTransformedData,
           record_id: recordId
-        })
       });
-
-      const data = await response.json();
       if (data.success) {
         setResults(data);
         if (onResultsUpdate) {

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import LoginPanel from './LoginPanel';
+import { authUpload } from '../utils/api';
 import './CSVReader.css';
 
 interface CSVReaderProps {
@@ -25,26 +26,9 @@ const CSVReader = ({ onCSVUploaded }: CSVReaderProps) => {
     setIsLoading(true);
     setError(null);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
+      const data = await authUpload('/api/upload-csv', file);
 
-      const response = await fetch('http://localhost:5000/api/upload-csv', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-        body: formData,
-      });
-
-      const data = await response.json();
-
-      if (response.status === 401) {
-        setError('Please log in to upload files');
-        setShowLoginPanel(true);
-        return;
-      }
-
-      if (!response.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.error || 'Failed to upload');
       }
 

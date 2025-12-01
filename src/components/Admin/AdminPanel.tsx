@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { authGet, authDelete } from '../../utils/api';
 import './AdminPanel.css';
 import { AnalysisRecord } from '../../types/analysis';
 import { buildBinningState, buildTypeLookup } from '../../utils/binning';
@@ -11,10 +12,7 @@ const AdminPanel: React.FC = () => {
 
   useEffect(() => {
     setLoading(true);
-    const token = localStorage.getItem('credit_scoring_auth_token');
-    const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
-    fetch('http://localhost:5000/api/records', { headers })
-      .then(res => res.json())
+    authGet('/api/records')
       .then(data => {
         setRecords(Array.isArray(data) ? data : []);
         setLoading(false);
@@ -26,10 +24,7 @@ const AdminPanel: React.FC = () => {
   const handleView = async (id: number) => {
     try {
       // Fetch the record with auth token
-      const token = localStorage.getItem('credit_scoring_auth_token');
-      const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
-      const res = await fetch(`http://localhost:5000/api/record/${id}`, { headers });
-      const data = await res.json();
+      const data = await authGet(`/api/record/${id}`);
       
       console.log('📊 Loaded record:', data);
       
@@ -81,14 +76,11 @@ const AdminPanel: React.FC = () => {
   // Delete record
   const handleDelete = (id: number) => {
     if (!window.confirm('Are you sure you want to delete this record?')) return;
-    const token = localStorage.getItem('credit_scoring_auth_token');
-    const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
-    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE', headers })
-      .then(res => {
-        if (res.ok) {
+    authDelete(`/api/record/${id}`)
+      .then(() => {
           setRecords(records => records.filter(r => r.id !== id));
-        }
-      });
+      })
+      .catch(err => console.error('Failed to delete record:', err));
   };
 
   return (
