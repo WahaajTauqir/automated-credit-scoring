@@ -28,19 +28,29 @@ const AdminPanel: React.FC = () => {
       
       console.log('📊 Loaded record:', data);
       
-      // Infer columns from record data (much faster than loading entire CSV file)
-      const allCols = new Set<string>();
-      if (Array.isArray(data.discrete_columns)) {
-        data.discrete_columns.forEach((col: string) => allCols.add(col));
+      // Get columns from record data
+      // If all_columns is provided (for unclassified datasets), use that
+      // Otherwise, infer from discrete/continuous/selected columns
+      let columns: string[] = [];
+      if (Array.isArray(data.all_columns) && data.all_columns.length > 0) {
+        // Use columns from CSV (for unclassified datasets)
+        columns = data.all_columns;
+        console.log('✅ Using all_columns from CSV:', columns.length, 'columns');
+      } else {
+        // Infer columns from classified features
+        const allCols = new Set<string>();
+        if (Array.isArray(data.discrete_columns)) {
+          data.discrete_columns.forEach((col: string) => allCols.add(col));
+        }
+        if (Array.isArray(data.continuous_columns)) {
+          data.continuous_columns.forEach((col: string) => allCols.add(col));
+        }
+        if (Array.isArray(data.selected_columns)) {
+          data.selected_columns.forEach((col: string) => allCols.add(col));
+        }
+        columns = Array.from(allCols);
+        console.log('✅ Using columns from classified features:', columns.length, 'columns');
       }
-      if (Array.isArray(data.continuous_columns)) {
-        data.continuous_columns.forEach((col: string) => allCols.add(col));
-      }
-      if (Array.isArray(data.selected_columns)) {
-        data.selected_columns.forEach((col: string) => allCols.add(col));
-      }
-      const columns = Array.from(allCols);
-      console.log('✅ Using columns from record:', columns.length, 'columns');
       
       const typeLookup = buildTypeLookup(
         data.discrete_columns || [],

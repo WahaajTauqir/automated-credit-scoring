@@ -4496,16 +4496,9 @@ def upload_csv():
                 user_id=user_id  # Associate with authenticated user
             )
             
-            # Create feature records for all columns (initially unclassified)
-            features_data = [
-                {
-                    'name': col,
-                    'type': 'continuous',  # Default, will be updated by classification
-                    'selected': False
-                }
-                for col in columns
-            ]
-            create_features_batch(dataset_id, features_data)
+            # Don't create feature records until user explicitly classifies them
+            # Features will be created when user classifies columns via /api/upsert-single-record
+            # This ensures no default classification happens
             
             return jsonify({
                 "success": True,
@@ -9167,6 +9160,22 @@ def get_record(record_id):
         continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
         selected_cols = [f['name'] for f in features if f.get('selected')]
         
+        # If no features exist (unclassified dataset), get columns from CSV file
+        all_csv_columns = []
+        if len(features) == 0:
+            try:
+                csv_path = get_csv_path(record_id)
+                # get_csv_path() uses _resolve_dataset_file_path() which handles Cloud Storage
+                # and returns a local temp file path for gs:// files, so we can read it directly
+                if csv_path:
+                    df_sample = pd.read_csv(csv_path, nrows=1)
+                    all_csv_columns = df_sample.columns.tolist()
+                    print(f"[get_record] No features found, loaded {len(all_csv_columns)} columns from CSV")
+            except Exception as e:
+                print(f"[get_record] Warning: Could not load columns from CSV: {e}")
+                import traceback
+                traceback.print_exc()
+        
         print(f"[get_record] Discrete: {len(discrete_cols)}, Continuous: {len(continuous_cols)}, Selected: {len(selected_cols)}")
         
         model_ready_cols = [f['name'] for f in features if f.get('model_ready')]
@@ -9235,7 +9244,8 @@ def get_record(record_id):
             'binning_data': binning_data,  # New structured binning data
             'dashboard_selected_columns': model_ready_cols,
             'final_selected_columns': final_selected_cols,
-            'preprocess_selection': dataset.get('preprocess_selection', False)
+            'preprocess_selection': dataset.get('preprocess_selection', False),
+            'all_columns': all_csv_columns if all_csv_columns else None  # Include CSV columns if no features exist
         }
         
         return jsonify(result)
@@ -15584,13 +15594,27 @@ def delete_record(record_id):
             # Delete uploaded CSV file if it exists
             dataset_path = dataset.get('dataset_path') or dataset.get('file_path')
             if dataset_path:
-                resolved_path = _resolve_dataset_file_path(dataset_path)
-                if resolved_path and os.path.exists(resolved_path):
-                    try:
-                        os.remove(resolved_path)
-                        print(f"[DELETE RECORD] Deleted uploaded file: {resolved_path}")
-                    except OSError as e:
-                        print(f"[DELETE RECORD] Warning: Failed to delete uploaded file {resolved_path}: {e}")
+                # Use storage manager for Cloud Storage paths, os.remove for local paths
+                if dataset_path.startswith('gs://'):
+                    if storage_manager:
+                        storage_manager.delete_file(dataset_path)
+                    else:
+                        print(f"[DELETE RECORD] Warning: Cloud Storage not configured, cannot delete: {dataset_path}")
+                else:
+                    resolved_path = _resolve_dataset_file_path(dataset_path)
+                    if resolved_path:
+                        if resolved_path.startswith('gs://'):
+                            # Resolved path is still gs://, use storage manager
+                            if storage_manager:
+                                storage_manager.delete_file(resolved_path)
+                        else:
+                            # Local file
+                            if os.path.exists(resolved_path):
+                                try:
+                                    os.remove(resolved_path)
+                                    print(f"[DELETE RECORD] Deleted uploaded file: {resolved_path}")
+                                except OSError as e:
+                                    print(f"[DELETE RECORD] Warning: Failed to delete uploaded file {resolved_path}: {e}")
             
             # Delete train and test dataset files
             # Uploads directory is at project root, not in backend folder
@@ -15602,22 +15626,46 @@ def delete_record(record_id):
             test_path = dataset.get('test_path')
             
             if train_path:
-                resolved_train_path = _resolve_dataset_file_path(train_path)
-                if resolved_train_path and os.path.exists(resolved_train_path):
-                    try:
-                        os.remove(resolved_train_path)
-                        print(f"[DELETE RECORD] Deleted train dataset (from DB path): {resolved_train_path}")
-                    except OSError as e:
-                        print(f"[DELETE RECORD] Warning: Failed to delete train dataset {resolved_train_path}: {e}")
+                if train_path.startswith('gs://'):
+                    # Cloud Storage path
+                    if storage_manager:
+                        storage_manager.delete_file(train_path)
+                    else:
+                        print(f"[DELETE RECORD] Warning: Cloud Storage not configured, cannot delete: {train_path}")
+                else:
+                    resolved_train_path = _resolve_dataset_file_path(train_path)
+                    if resolved_train_path:
+                        if resolved_train_path.startswith('gs://'):
+                            if storage_manager:
+                                storage_manager.delete_file(resolved_train_path)
+                        else:
+                            if os.path.exists(resolved_train_path):
+                                try:
+                                    os.remove(resolved_train_path)
+                                    print(f"[DELETE RECORD] Deleted train dataset (from DB path): {resolved_train_path}")
+                                except OSError as e:
+                                    print(f"[DELETE RECORD] Warning: Failed to delete train dataset {resolved_train_path}: {e}")
             
             if test_path:
-                resolved_test_path = _resolve_dataset_file_path(test_path)
-                if resolved_test_path and os.path.exists(resolved_test_path):
-                    try:
-                        os.remove(resolved_test_path)
-                        print(f"[DELETE RECORD] Deleted test dataset (from DB path): {resolved_test_path}")
-                    except OSError as e:
-                        print(f"[DELETE RECORD] Warning: Failed to delete test dataset {resolved_test_path}: {e}")
+                if test_path.startswith('gs://'):
+                    # Cloud Storage path
+                    if storage_manager:
+                        storage_manager.delete_file(test_path)
+                    else:
+                        print(f"[DELETE RECORD] Warning: Cloud Storage not configured, cannot delete: {test_path}")
+                else:
+                    resolved_test_path = _resolve_dataset_file_path(test_path)
+                    if resolved_test_path:
+                        if resolved_test_path.startswith('gs://'):
+                            if storage_manager:
+                                storage_manager.delete_file(resolved_test_path)
+                        else:
+                            if os.path.exists(resolved_test_path):
+                                try:
+                                    os.remove(resolved_test_path)
+                                    print(f"[DELETE RECORD] Deleted test dataset (from DB path): {resolved_test_path}")
+                                except OSError as e:
+                                    print(f"[DELETE RECORD] Warning: Failed to delete test dataset {resolved_test_path}: {e}")
             
             # Always search for train/test files matching the pattern (more reliable)
             if os.path.exists(uploads_dir):
@@ -15687,7 +15735,7 @@ def delete_record(record_id):
             else:
                 print(f"[DELETE RECORD] Warning: Uploads directory does not exist: {uploads_dir}")
             
-            # Delete all artifact files for this dataset
+            # Delete all artifact files for this dataset (local filesystem)
             artifact_pattern = _artifact_pattern(record_id)
             artifact_files = glob.glob(artifact_pattern)
             for artifact_file in artifact_files:
@@ -15696,6 +15744,30 @@ def delete_record(record_id):
                     print(f"[DELETE RECORD] Deleted artifact: {artifact_file}")
                 except OSError as e:
                     print(f"[DELETE RECORD] Warning: Failed to delete artifact {artifact_file}: {e}")
+            
+            # Also delete artifacts from Cloud Storage if configured
+            if storage_manager and storage_manager.artifacts_bucket:
+                try:
+                    # List and delete artifacts matching the pattern
+                    bucket = storage_manager.client.bucket(storage_manager.artifacts_bucket)
+                    prefix = f"artifacts/{record_id}_"
+                    blobs = bucket.list_blobs(prefix=prefix)
+                    
+                    deleted_count = 0
+                    for blob in blobs:
+                        try:
+                            blob.delete()
+                            deleted_count += 1
+                            print(f"[DELETE RECORD] Deleted artifact from Cloud Storage: gs://{storage_manager.artifacts_bucket}/{blob.name}")
+                        except Exception as e:
+                            print(f"[DELETE RECORD] Warning: Failed to delete artifact blob {blob.name}: {e}")
+                    
+                    if deleted_count > 0:
+                        print(f"[DELETE RECORD] Deleted {deleted_count} artifact(s) from Cloud Storage")
+                except Exception as e:
+                    print(f"[DELETE RECORD] Warning: Failed to list/delete artifacts from Cloud Storage: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # Delete from database (cascade will handle related records)
             delete_dataset(record_id)

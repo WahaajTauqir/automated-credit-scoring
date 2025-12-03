@@ -263,6 +263,59 @@ class CloudStorageManager:
             if os.path.exists(path):
                 return path
             return None
+    
+    def delete_file(self, path: str) -> bool:
+        """
+        Delete a file from Cloud Storage or local filesystem.
+        
+        Parameters:
+        -----------
+        path : str
+            File path (can be gs:// path or local path)
+        
+        Returns:
+        --------
+        bool : True if successful, False otherwise
+        """
+        # Handle gs:// paths
+        if path.startswith('gs://'):
+            try:
+                parts = path[5:].split('/', 1)
+                bucket_name = parts[0]
+                blob_name = parts[1] if len(parts) > 1 else ''
+                
+                if not self.use_gcs:
+                    print(f"[STORAGE] Cloud Storage not configured, cannot delete: {path}")
+                    return False
+                
+                bucket = self.client.bucket(bucket_name)
+                blob = bucket.blob(blob_name)
+                
+                if blob.exists():
+                    blob.delete()
+                    print(f"[STORAGE] Successfully deleted from Cloud Storage: {path}")
+                    return True
+                else:
+                    print(f"[STORAGE] File does not exist in Cloud Storage: {path}")
+                    return False
+            except Exception as e:
+                print(f"[STORAGE] Error deleting from Cloud Storage {path}: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        # Local filesystem
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                print(f"[STORAGE] Successfully deleted local file: {path}")
+                return True
+            else:
+                print(f"[STORAGE] Local file does not exist: {path}")
+                return False
+        except Exception as e:
+            print(f"[STORAGE] Error deleting local file {path}: {e}")
+            return False
 
 
 # Global storage manager instance
