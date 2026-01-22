@@ -7257,7 +7257,7 @@ def ai_classify_columns():
         )
 
         completion = client.chat.completions.create(
-            model="meta-llama/Llama-3.1-8B-Instruct:novita",
+            model="Qwen/Qwen2.5-72B-Instruct:novita",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that replies with strict JSON to classify discrete and continuous."},
                 {"role": "user", "content": prompt}

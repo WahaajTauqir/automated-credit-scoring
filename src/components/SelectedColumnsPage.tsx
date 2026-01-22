@@ -1,5 +1,7 @@
 import { useLocation } from 'react-router-dom';
 import { useEffect, useState, useRef, useCallback, useMemo, memo } from 'react';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
 import LogisticRegressionResults from './LogisticRegressionResults';
 import Navbar from './Navbar';
 import RandomForestResults from './RandomForestResults';
@@ -55,19 +57,25 @@ interface AutoBinningCardProps {
   woeData: any;
   isLoading: boolean;
   isSelected: boolean;
+  isSelectedForExport: boolean;
   onToggle: (col: string) => void;
+  onToggleExport: (col: string) => void;
   onConfigureManually: (col: string) => void;
   continuousColumns: string[];
+  cardRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 const AutoBinningCard = memo(({ 
   col, 
   woeData, 
   isLoading, 
-  isSelected, 
+  isSelected,
+  isSelectedForExport,
   onToggle,
+  onToggleExport,
   onConfigureManually,
-  continuousColumns 
+  continuousColumns,
+  cardRef
 }: AutoBinningCardProps) => {
   const woeStats: NormalizedBin[] = woeData?.stats ?? [];
   const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
@@ -92,7 +100,15 @@ const AutoBinningCard = memo(({
   const varTypeTag = isContinuous ? 'continuous' : 'discrete';
 
   return (
-    <div className="auto-binning-card">
+    <div 
+      className={`auto-binning-card ${isSelectedForExport ? 'selected-for-export' : ''}`} 
+      ref={(el) => {
+        if (cardRef && 'current' in cardRef) {
+          (cardRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+        }
+      }}
+      data-column={col}
+    >
       <div className="auto-binning-card-header">
         <input
           type="checkbox"
@@ -105,6 +121,17 @@ const AutoBinningCard = memo(({
           aria-label={`Select ${col} for modeling`}
         />
         <h4>{col}</h4>
+        <input
+          type="checkbox"
+          className="export-checkbox"
+          checked={isSelectedForExport}
+          onChange={(e) => {
+            e.stopPropagation();
+            onToggleExport(col);
+          }}
+          title="Select for export"
+          aria-label={`Select ${col} for export`}
+        />
         <span className={`var-type-tag ${varTypeTag}`}>
           {varTypeTag}
         </span>
@@ -179,6 +206,7 @@ const AutoBinningCard = memo(({
   return (
     prevProps.col === nextProps.col &&
     prevProps.isSelected === nextProps.isSelected &&
+    prevProps.isSelectedForExport === nextProps.isSelectedForExport &&
     prevProps.isLoading === nextProps.isLoading &&
     woeDataEqual &&
     prevProps.continuousColumns === nextProps.continuousColumns
@@ -327,6 +355,7 @@ const SelectedColumnsPage = () => {
   const [trainingScoreKSData, setTrainingScoreKSData] = useState<{ ks_stat: number | null; ks_threshold: number | null; ks_curve: any[] | null } | null>(null);
   const [trainingScoreRiskBands, setTrainingScoreRiskBands] = useState<any[] | null>(null);
   const [currentDataSource, setCurrentDataSource] = useState<'training' | 'test'>('test'); // Track which data source is currently displayed
+  const [isRiskLabelsInverted, setIsRiskLabelsInverted] = useState(false); // Track if risk labels are inverted (higher score = higher risk)
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedModel, setSelectedModel] = useState<string>('stacking'); // Default to stacking ensemble
@@ -342,6 +371,9 @@ const SelectedColumnsPage = () => {
   const [isLoadingCoarseBins, setIsLoadingCoarseBins] = useState(false);
   const [isLoadingAllAutoMonotonic, setIsLoadingAllAutoMonotonic] = useState(false);
   const [isLoadingAIClassification, setIsLoadingAIClassification] = useState(false);
+  const [selectedForExport, setSelectedForExport] = useState<string[]>([]); // Charts selected for export
+  const [isExportingCharts, setIsExportingCharts] = useState(false); // Export loading state
+  const chartCardRefs = useRef<Record<string, HTMLDivElement | null>>({}); // Refs for chart cards
   const updateLocalWoeState = useCallback(
     (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
       if (!payload) {
@@ -2437,6 +2469,473 @@ const SelectedColumnsPage = () => {
     });
   };
 
+  // Toggle selection for chart export
+  const toggleSelectedForExport = (col: string) => {
+    setSelectedForExport((prev) => {
+      if (prev.includes(col)) {
+        return prev.filter((c) => c !== col);
+      } else {
+        return [...prev, col];
+      }
+    });
+  };
+
+  // Select all charts for export
+  const selectAllForExport = () => {
+    const columnsToSelect = selectedColumns.filter(col => col !== targetVariable);
+    setSelectedForExport(columnsToSelect);
+  };
+
+  // Deselect all charts for export
+  const deselectAllForExport = () => {
+    setSelectedForExport([]);
+  };
+
+  // Export selected charts as PDF
+  const exportSelectedCharts = async (format: 'pdf' | 'png' = 'pdf') => {
+    if (selectedForExport.length === 0) {
+      showNotification('Please select at least one chart to export.');
+      return;
+    }
+
+    setIsExportingCharts(true);
+    showNotification(`Exporting ${selectedForExport.length} chart(s) as ${format.toUpperCase()}...`);
+
+    try {
+      const chartElements: HTMLDivElement[] = [];
+      
+      // Collect all selected chart elements
+      for (const col of selectedForExport) {
+        const element = chartCardRefs.current[col];
+        if (element) {
+          chartElements.push(element);
+        }
+      }
+
+      if (chartElements.length === 0) {
+        showNotification('No chart elements found to export.');
+        setIsExportingCharts(false);
+        return;
+      }
+
+      // Helper function to get IV strength classification
+      const getIVStrength = (iv: number): { label: string; color: number[] } => {
+        if (iv < 0.02) return { label: 'Not Predictive', color: [200, 80, 80] };
+        if (iv < 0.1) return { label: 'Weak Predictor', color: [230, 150, 50] };
+        if (iv < 0.3) return { label: 'Medium Predictor', color: [100, 180, 100] };
+        if (iv < 0.5) return { label: 'Strong Predictor', color: [50, 150, 200] };
+        return { label: 'Very Strong Predictor', color: [130, 80, 200] };
+      };
+
+      // Helper function to check monotonicity
+      const checkMonotonicity = (woeValues: number[]): { isMonotonic: boolean; direction: string } => {
+        if (woeValues.length < 2) return { isMonotonic: true, direction: 'N/A' };
+        let increasing = true;
+        let decreasing = true;
+        for (let i = 1; i < woeValues.length; i++) {
+          if (woeValues[i] < woeValues[i - 1]) increasing = false;
+          if (woeValues[i] > woeValues[i - 1]) decreasing = false;
+        }
+        if (increasing) return { isMonotonic: true, direction: 'Increasing' };
+        if (decreasing) return { isMonotonic: true, direction: 'Decreasing' };
+        return { isMonotonic: false, direction: 'Non-Monotonic' };
+      };
+
+      if (format === 'pdf') {
+        // Create PDF document in landscape for better chart display
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        const pageWidth = pdf.internal.pageSize.getWidth();
+        const pageHeight = pdf.internal.pageSize.getHeight();
+        const margin = 15;
+        const usableWidth = pageWidth - margin * 2;
+        
+        // Title Page
+        pdf.setFillColor(26, 26, 46);
+        pdf.rect(0, 0, pageWidth, 60, 'F');
+        
+        pdf.setFontSize(24);
+        pdf.setTextColor(255, 255, 255);
+        pdf.text('WOE Analysis Report', margin, 30);
+        
+        pdf.setFontSize(12);
+        pdf.setTextColor(200, 200, 200);
+        pdf.text('Auto Monotonic Fine Binning Results', margin, 40);
+        
+        pdf.setFontSize(10);
+        pdf.setTextColor(100, 100, 100);
+        pdf.text(`Generated: ${new Date().toLocaleDateString()} at ${new Date().toLocaleTimeString()}`, margin, 75);
+        pdf.text(`Total Features Exported: ${selectedForExport.length}`, margin, 82);
+        pdf.text(`Target Variable: ${targetVariable || 'N/A'}`, margin, 89);
+        
+        // Summary Section
+        pdf.setFontSize(14);
+        pdf.setTextColor(40, 40, 40);
+        pdf.text('Summary Statistics', margin, 105);
+        
+        pdf.setDrawColor(200, 200, 200);
+        pdf.line(margin, 108, pageWidth - margin, 108);
+        
+        let summaryY = 118;
+        const continuousCount = selectedForExport.filter(col => (continuousColumns || []).includes(col)).length;
+        const discreteCount = selectedForExport.length - continuousCount;
+        
+        pdf.setFontSize(10);
+        pdf.setTextColor(80, 80, 80);
+        pdf.text(`• Continuous Variables: ${continuousCount}`, margin + 5, summaryY);
+        summaryY += 7;
+        pdf.text(`• Discrete Variables: ${discreteCount}`, margin + 5, summaryY);
+        summaryY += 12;
+        
+        // Feature Overview Table Header
+        pdf.setFontSize(11);
+        pdf.setTextColor(40, 40, 40);
+        pdf.text('Feature Overview:', margin, summaryY);
+        summaryY += 8;
+        
+        // Table headers
+        pdf.setFillColor(240, 240, 240);
+        pdf.rect(margin, summaryY - 4, usableWidth, 8, 'F');
+        pdf.setFontSize(9);
+        pdf.setTextColor(60, 60, 60);
+        pdf.text('Feature', margin + 2, summaryY);
+        pdf.text('Type', margin + 55, summaryY);
+        pdf.text('Bins', margin + 85, summaryY);
+        pdf.text('Total IV', margin + 105, summaryY);
+        pdf.text('IV Strength', margin + 130, summaryY);
+        pdf.text('Monotonic', margin + 165, summaryY);
+        summaryY += 8;
+        
+        // Table rows
+        for (const col of selectedForExport) {
+          const woeData = woeIvResults[col];
+          const woeStats: NormalizedBin[] = woeData?.stats ?? [];
+          const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
+          const isContinuous = (continuousColumns || []).includes(col);
+          const woeValues = woeStats.map(s => Number(s.WOE ?? 0));
+          const monotonicity = checkMonotonicity(woeValues);
+          const ivStrength = getIVStrength(totalIV);
+          
+          if (summaryY > pageHeight - 30) {
+            pdf.addPage();
+            summaryY = 20;
+          }
+          
+          pdf.setFontSize(8);
+          pdf.setTextColor(80, 80, 80);
+          pdf.text(col.length > 20 ? col.substring(0, 18) + '...' : col, margin + 2, summaryY);
+          pdf.text(isContinuous ? 'Continuous' : 'Discrete', margin + 55, summaryY);
+          pdf.text(String(woeStats.length), margin + 85, summaryY);
+          pdf.text(totalIV.toFixed(4), margin + 105, summaryY);
+          
+          pdf.setTextColor(ivStrength.color[0], ivStrength.color[1], ivStrength.color[2]);
+          pdf.text(ivStrength.label, margin + 130, summaryY);
+          
+          pdf.setTextColor(monotonicity.isMonotonic ? 50 : 180, monotonicity.isMonotonic ? 150 : 80, monotonicity.isMonotonic ? 50 : 80);
+          pdf.text(monotonicity.direction, margin + 165, summaryY);
+          
+          summaryY += 6;
+        }
+        
+        // Individual Feature Pages
+        for (let i = 0; i < chartElements.length; i++) {
+          pdf.addPage();
+          const element = chartElements[i];
+          const colName = selectedForExport[i];
+          const woeData = woeIvResults[colName];
+          const woeStats: NormalizedBin[] = woeData?.stats ?? [];
+          const isContinuous = (continuousColumns || []).includes(colName);
+          
+          // Calculate statistics
+          const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
+          const totalGood = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.Good) || 0), 0);
+          const totalBad = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.Bad) || 0), 0);
+          const totalCount = totalGood + totalBad;
+          const overallBadRate = totalCount > 0 ? (totalBad / totalCount * 100) : 0;
+          const woeValues = woeStats.map(s => Number(s.WOE ?? 0));
+          const monotonicity = checkMonotonicity(woeValues);
+          const ivStrength = getIVStrength(totalIV);
+          
+          // Feature Header
+          pdf.setFillColor(26, 26, 46);
+          pdf.rect(0, 0, pageWidth, 25, 'F');
+          
+          pdf.setFontSize(16);
+          pdf.setTextColor(255, 255, 255);
+          pdf.text(`${i + 1}. ${colName}`, margin, 16);
+          
+          pdf.setFontSize(10);
+          pdf.setTextColor(150, 150, 150);
+          pdf.text(isContinuous ? 'Continuous Variable' : 'Discrete Variable', pageWidth - margin - 35, 16);
+          
+          let yPos = 35;
+          
+          // Key Metrics Cards
+          pdf.setFillColor(245, 245, 250);
+          pdf.roundedRect(margin, yPos, 40, 22, 3, 3, 'F');
+          pdf.roundedRect(margin + 45, yPos, 40, 22, 3, 3, 'F');
+          pdf.roundedRect(margin + 90, yPos, 40, 22, 3, 3, 'F');
+          pdf.roundedRect(margin + 135, yPos, 50, 22, 3, 3, 'F');
+          
+          pdf.setFontSize(8);
+          pdf.setTextColor(100, 100, 100);
+          pdf.text('Total IV', margin + 5, yPos + 8);
+          pdf.text('Number of Bins', margin + 50, yPos + 8);
+          pdf.text('Bad Rate', margin + 95, yPos + 8);
+          pdf.text('Monotonicity', margin + 140, yPos + 8);
+          
+          pdf.setFontSize(12);
+          pdf.setTextColor(ivStrength.color[0], ivStrength.color[1], ivStrength.color[2]);
+          pdf.text(totalIV.toFixed(4), margin + 5, yPos + 18);
+          
+          pdf.setTextColor(60, 60, 60);
+          pdf.text(String(woeStats.length), margin + 50, yPos + 18);
+          pdf.text(`${overallBadRate.toFixed(2)}%`, margin + 95, yPos + 18);
+          
+          pdf.setTextColor(monotonicity.isMonotonic ? 50 : 180, monotonicity.isMonotonic ? 150 : 80, monotonicity.isMonotonic ? 50 : 80);
+          pdf.text(monotonicity.direction, margin + 140, yPos + 18);
+          
+          yPos += 30;
+          
+          // IV Strength indicator
+          pdf.setFontSize(9);
+          pdf.setTextColor(ivStrength.color[0], ivStrength.color[1], ivStrength.color[2]);
+          pdf.text(`IV Classification: ${ivStrength.label}`, margin, yPos);
+          yPos += 10;
+          
+          // Chart Section
+          pdf.setFontSize(11);
+          pdf.setTextColor(40, 40, 40);
+          pdf.text('WOE Trend Chart', margin, yPos);
+          yPos += 3;
+          
+          try {
+            const originalBackground = element.style.background;
+            element.style.background = '#1a1a2e';
+            
+            const canvas = await html2canvas(element, {
+              backgroundColor: '#1a1a2e',
+              scale: 2.5, // Higher quality
+              logging: false,
+              useCORS: true,
+              allowTaint: true,
+            });
+            
+            element.style.background = originalBackground;
+            
+            const imgData = canvas.toDataURL('image/png');
+            
+            // Calculate balanced dimensions - maintain aspect ratio
+            const aspectRatio = canvas.width / canvas.height;
+            const maxChartWidth = usableWidth * 0.9;
+            const maxChartHeight = 55;
+            
+            let chartWidth = maxChartWidth;
+            let chartHeight = chartWidth / aspectRatio;
+            
+            if (chartHeight > maxChartHeight) {
+              chartHeight = maxChartHeight;
+              chartWidth = chartHeight * aspectRatio;
+            }
+            
+            // Center the chart
+            const chartX = margin + (usableWidth - chartWidth) / 2;
+            
+            pdf.addImage(imgData, 'PNG', chartX, yPos, chartWidth, chartHeight);
+            yPos += chartHeight + 8;
+          } catch (err) {
+            console.error(`Error capturing chart for ${colName}:`, err);
+            yPos += 60;
+          }
+          
+          // Detailed Binning Table
+          pdf.setFontSize(11);
+          pdf.setTextColor(40, 40, 40);
+          pdf.text('Binning Details', margin, yPos);
+          yPos += 6;
+          
+          // Table header
+          pdf.setFillColor(50, 50, 70);
+          pdf.rect(margin, yPos - 3, usableWidth, 7, 'F');
+          pdf.setFontSize(7);
+          pdf.setTextColor(255, 255, 255);
+          
+          const colWidths = [30, 20, 20, 22, 22, 20, 22, 24];
+          let xPos = margin + 2;
+          const headers = ['Bin', 'Good', 'Bad', 'Total', 'Bad Rate%', 'Freq%', 'WOE', 'IV'];
+          headers.forEach((header, idx) => {
+            pdf.text(header, xPos, yPos + 2);
+            xPos += colWidths[idx];
+          });
+          yPos += 7;
+          
+          // Table rows
+          pdf.setFontSize(7);
+          woeStats.forEach((bin, idx) => {
+            const binLabel = getBinLabelValue(bin, idx);
+            const good = Number(bin.Good ?? 0);
+            const bad = Number(bin.Bad ?? 0);
+            const total = Number(bin.Total ?? good + bad);
+            const badRate = total > 0 ? (bad / total * 100) : 0;
+            const freqPct = totalCount > 0 ? (total / totalCount * 100) : 0;
+            const woe = Number(bin.WOE ?? 0);
+            const iv = Number(bin.IV ?? 0);
+            
+            // Alternating row colors
+            if (idx % 2 === 0) {
+              pdf.setFillColor(248, 248, 252);
+              pdf.rect(margin, yPos - 3, usableWidth, 6, 'F');
+            }
+            
+            pdf.setTextColor(60, 60, 60);
+            xPos = margin + 2;
+            
+            const displayLabel = binLabel.length > 12 ? binLabel.substring(0, 10) + '..' : binLabel;
+            pdf.text(displayLabel, xPos, yPos);
+            xPos += colWidths[0];
+            pdf.text(String(good), xPos, yPos);
+            xPos += colWidths[1];
+            pdf.text(String(bad), xPos, yPos);
+            xPos += colWidths[2];
+            pdf.text(String(total), xPos, yPos);
+            xPos += colWidths[3];
+            
+            // Color code bad rate
+            pdf.setTextColor(badRate > overallBadRate ? 200 : 80, badRate > overallBadRate ? 80 : 150, 80);
+            pdf.text(badRate.toFixed(2), xPos, yPos);
+            xPos += colWidths[4];
+            
+            pdf.setTextColor(60, 60, 60);
+            pdf.text(freqPct.toFixed(2), xPos, yPos);
+            xPos += colWidths[5];
+            
+            // Color code WOE
+            pdf.setTextColor(woe >= 0 ? 50 : 180, woe >= 0 ? 150 : 80, 50);
+            pdf.text(woe.toFixed(4), xPos, yPos);
+            xPos += colWidths[6];
+            
+            pdf.setTextColor(60, 60, 60);
+            pdf.text(iv.toFixed(4), xPos, yPos);
+            
+            yPos += 6;
+          });
+          
+          // Totals row
+          pdf.setFillColor(230, 230, 240);
+          pdf.rect(margin, yPos - 3, usableWidth, 7, 'F');
+          pdf.setFontSize(7);
+          pdf.setTextColor(40, 40, 40);
+          xPos = margin + 2;
+          pdf.text('TOTAL', xPos, yPos);
+          xPos += colWidths[0];
+          pdf.text(String(totalGood), xPos, yPos);
+          xPos += colWidths[1];
+          pdf.text(String(totalBad), xPos, yPos);
+          xPos += colWidths[2];
+          pdf.text(String(totalCount), xPos, yPos);
+          xPos += colWidths[3];
+          pdf.text(overallBadRate.toFixed(2), xPos, yPos);
+          xPos += colWidths[4];
+          pdf.text('100.00', xPos, yPos);
+          xPos += colWidths[5];
+          pdf.text('-', xPos, yPos);
+          xPos += colWidths[6];
+          pdf.setTextColor(ivStrength.color[0], ivStrength.color[1], ivStrength.color[2]);
+          pdf.text(totalIV.toFixed(4), xPos, yPos);
+          
+          yPos += 12;
+          
+          // Insights Section
+          pdf.setFontSize(10);
+          pdf.setTextColor(40, 40, 40);
+          pdf.text('Key Insights', margin, yPos);
+          yPos += 5;
+          
+          pdf.setFontSize(8);
+          pdf.setTextColor(80, 80, 80);
+          
+          // Generate insights
+          const insights: string[] = [];
+          
+          // IV insight
+          insights.push(`• Information Value (${totalIV.toFixed(4)}) indicates this is a ${ivStrength.label.toLowerCase()}.`);
+          
+          // Monotonicity insight
+          if (monotonicity.isMonotonic) {
+            insights.push(`• WOE trend is ${monotonicity.direction.toLowerCase()}, showing good risk differentiation.`);
+          } else {
+            insights.push(`• WOE trend is non-monotonic - consider reviewing bin boundaries for better risk ordering.`);
+          }
+          
+          // Find highest and lowest WOE bins
+          if (woeStats.length > 0) {
+            const sortedByWOE = [...woeStats].sort((a, b) => (Number(b.WOE) || 0) - (Number(a.WOE) || 0));
+            const highestWOE = sortedByWOE[0];
+            const lowestWOE = sortedByWOE[sortedByWOE.length - 1];
+            insights.push(`• Lowest risk bin: "${getBinLabelValue(highestWOE)}" (WOE: ${Number(highestWOE.WOE || 0).toFixed(4)})`);
+            insights.push(`• Highest risk bin: "${getBinLabelValue(lowestWOE)}" (WOE: ${Number(lowestWOE.WOE || 0).toFixed(4)})`);
+          }
+          
+          // Bin distribution insight
+          const maxFreqBin = woeStats.reduce((max, bin) => {
+            const freq = Number(bin.Total ?? 0);
+            const maxFreq = Number(max.Total ?? 0);
+            return freq > maxFreq ? bin : max;
+          }, woeStats[0]);
+          if (maxFreqBin) {
+            const maxFreqPct = totalCount > 0 ? (Number(maxFreqBin.Total ?? 0) / totalCount * 100) : 0;
+            insights.push(`• Most populated bin: "${getBinLabelValue(maxFreqBin)}" (${maxFreqPct.toFixed(1)}% of records)`);
+          }
+          
+          insights.forEach(insight => {
+            pdf.text(insight, margin + 3, yPos);
+            yPos += 5;
+          });
+        }
+
+        pdf.save(`woe-analysis-report-${new Date().toISOString().split('T')[0]}.pdf`);
+        showNotification(`Successfully exported ${selectedForExport.length} chart(s) as PDF!`);
+      } else {
+        // Export as individual PNG files
+        for (let i = 0; i < chartElements.length; i++) {
+          const element = chartElements[i];
+          const colName = selectedForExport[i];
+          
+          try {
+            const originalBackground = element.style.background;
+            element.style.background = '#1a1a2e';
+            
+            const canvas = await html2canvas(element, {
+              backgroundColor: '#1a1a2e',
+              scale: 2,
+              logging: false,
+              useCORS: true,
+              allowTaint: true,
+            });
+            
+            element.style.background = originalBackground;
+            
+            // Create download link
+            const link = document.createElement('a');
+            link.download = `woe-chart-${colName}-${new Date().toISOString().split('T')[0]}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+            
+            // Small delay between downloads to prevent browser blocking
+            await new Promise(resolve => setTimeout(resolve, 200));
+          } catch (err) {
+            console.error(`Error capturing chart for ${colName}:`, err);
+          }
+        }
+        showNotification(`Successfully exported ${selectedForExport.length} chart(s) as PNG!`);
+      }
+    } catch (error) {
+      console.error('Export error:', error);
+      showNotification('Error exporting charts. Please try again.');
+    } finally {
+      setIsExportingCharts(false);
+    }
+  };
+
   const prevSelectedColumnsRef = useRef<string[]>(selectedColumns);
 
   useEffect(() => {
@@ -3489,6 +3988,37 @@ const SelectedColumnsPage = () => {
                       <span className="btn-icon">⚡</span>
                       All Auto Monotonic Fine binning
                     </button>
+                    <div className="export-controls-divider" />
+                    <div className="export-controls-group">
+                      <button
+                        className="export-select-btn"
+                        onClick={selectedForExport.length === selectedColumns.filter(c => c !== targetVariable).length ? deselectAllForExport : selectAllForExport}
+                        title={selectedForExport.length === selectedColumns.filter(c => c !== targetVariable).length ? 'Deselect all charts' : 'Select all charts for export'}
+                      >
+                        {selectedForExport.length === selectedColumns.filter(c => c !== targetVariable).length ? '☐ Deselect All' : '☑ Select All'}
+                      </button>
+                      <span className="export-count-badge">
+                        {selectedForExport.length} selected
+                      </span>
+                      <button
+                        className="export-btn export-pdf-btn"
+                        onClick={() => exportSelectedCharts('pdf')}
+                        disabled={selectedForExport.length === 0 || isExportingCharts}
+                        title="Export selected charts as PDF"
+                      >
+                        <span className="btn-icon">📄</span>
+                        {isExportingCharts ? 'Exporting...' : 'Export PDF'}
+                      </button>
+                      <button
+                        className="export-btn export-png-btn"
+                        onClick={() => exportSelectedCharts('png')}
+                        disabled={selectedForExport.length === 0 || isExportingCharts}
+                        title="Export selected charts as PNG images"
+                      >
+                        <span className="btn-icon">🖼️</span>
+                        {isExportingCharts ? 'Exporting...' : 'Export PNGs'}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -3514,6 +4044,12 @@ const SelectedColumnsPage = () => {
                       const woeData = woeIvResults[col];
                       const isLoading = loadingColumns.has(col);
                       const isSelected = selectedForModeling.includes(col);
+                      const isExportSelected = selectedForExport.includes(col);
+
+                      // Create a stable ref object for this column
+                      if (!chartCardRefs.current[col]) {
+                        chartCardRefs.current[col] = null;
+                      }
 
                       return (
                         <AutoBinningCard
@@ -3522,9 +4058,15 @@ const SelectedColumnsPage = () => {
                           woeData={woeData}
                           isLoading={isLoading}
                           isSelected={isSelected}
+                          isSelectedForExport={isExportSelected}
                           onToggle={toggleSelectedForModeling}
+                          onToggleExport={toggleSelectedForExport}
                           onConfigureManually={handleConfigureManually}
                           continuousColumns={continuousColumns || []}
+                          cardRef={{
+                            get current() { return chartCardRefs.current[col]; },
+                            set current(el) { chartCardRefs.current[col] = el; }
+                          } as React.RefObject<HTMLDivElement | null>}
                         />
                       );
                     })}

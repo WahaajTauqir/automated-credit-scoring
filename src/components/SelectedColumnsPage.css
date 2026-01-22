@@ -1502,6 +1502,58 @@ aside .auto-monotonic-btn {
   margin-top: 0.25rem;
 }
 
+/* Risk Scale Header and Flip Button */
+.risk-scale-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.flip-risk-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.flip-risk-btn:hover {
+  border-color: var(--fg-accent-green);
+  color: var(--fg-accent-green);
+  background: rgba(46, 160, 67, 0.1);
+}
+
+.flip-risk-btn:active {
+  transform: scale(0.95);
+}
+
+.flip-risk-btn svg {
+  flex-shrink: 0;
+}
+
+.flip-btn-text {
+  white-space: nowrap;
+}
+
+.risk-direction-indicator {
+  font-size: 10px;
+  color: var(--fg-tertiary);
+  text-align: center;
+  padding: 4px 8px;
+  margin-bottom: 8px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  border: 1px dashed var(--border-secondary);
+}
+
 .scorecard-ks-chart {
   margin-top: 0;
   padding: var(--spacing-xs);
@@ -1954,8 +2006,11 @@ select:focus {
 }
 
 .all-auto-monotonic-container {
-  display: inline-flex;
-  padding: 4px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
   background: var(--bg-secondary);
   border-radius: 8px;
   border: 1px solid var(--border-primary);
@@ -2837,4 +2892,147 @@ select:focus {
   color: var(--fg-tertiary);
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* Export Controls Styles */
+.export-controls-divider {
+  width: 1px;
+  height: 32px;
+  background: var(--border-primary);
+  margin: 0 8px;
+}
+
+.export-controls-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.export-select-btn {
+  padding: 8px 14px;
+  border: 1.5px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.export-select-btn:hover {
+  border-color: var(--fg-accent-green);
+  color: var(--fg-accent-green);
+  background: rgba(46, 160, 67, 0.1);
+}
+
+.export-count-badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: var(--bg-quaternary);
+  color: var(--fg-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border-secondary);
+}
+
+.export-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+  border: none;
+}
+
+.export-pdf-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.export-pdf-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.export-png-btn {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+  color: white;
+}
+
+.export-png-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(56, 239, 125, 0.4);
+}
+
+.export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.export-btn .btn-icon {
+  font-size: 14px;
+}
+
+/* Export Checkbox in Card Header */
+.export-checkbox {
+  width: 18px;
+  height: 18px;
+  accent-color: #667eea;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.2s ease;
+  margin-left: auto;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.export-checkbox:hover {
+  transform: scale(1.1);
+  box-shadow: 0 0 6px rgba(102, 126, 234, 0.4);
+}
+
+/* Selected for Export Card Styling */
+.auto-binning-card.selected-for-export {
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2), 0 4px 16px rgba(102, 126, 234, 0.15);
+}
+
+.auto-binning-card.selected-for-export::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+  border-radius: 12px 12px 0 0;
+}
+
+/* Make card position relative for pseudo-element */
+.auto-binning-card {
+  position: relative;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .export-controls-group {
+    width: 100%;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  
+  .export-controls-divider {
+    width: 100%;
+    height: 1px;
+    margin: 8px 0;
+  }
 }
