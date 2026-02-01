@@ -2928,6 +2928,32 @@ select:focus {
   background: rgba(46, 160, 67, 0.1);
 }
 
+.export-select-btn.model-ready-select-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-color: var(--fg-accent-green);
+  background: rgba(46, 160, 67, 0.08);
+  color: var(--fg-accent-green);
+}
+
+.export-select-btn.model-ready-select-btn:hover:not(:disabled) {
+  background: rgba(46, 160, 67, 0.2);
+  border-color: var(--fg-accent-green);
+}
+
+.export-select-btn.model-ready-select-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-color: var(--border-secondary);
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+}
+
+.export-select-btn.model-ready-select-btn .btn-icon {
+  font-size: 10px;
+}
+
 .export-count-badge {
   padding: 4px 10px;
   border-radius: 12px;
@@ -3013,8 +3039,6 @@ select:focus {
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-  border-radius: 12px 12px 0 0;
 }
 
 /* Make card position relative for pseudo-element */

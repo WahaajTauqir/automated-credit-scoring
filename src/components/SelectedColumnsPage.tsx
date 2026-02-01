@@ -2491,6 +2491,12 @@ const SelectedColumnsPage = () => {
     setSelectedForExport([]);
   };
 
+  // Select only model-ready columns (auto-selected after auto monotonic fine binning) for export
+  const selectModelReadyForExport = () => {
+    const modelReadyColumns = selectedForModeling.filter(col => col !== targetVariable && selectedColumns.includes(col));
+    setSelectedForExport(modelReadyColumns);
+  };
+
   // Export selected charts as PDF
   const exportSelectedCharts = async (format: 'pdf' | 'png' = 'pdf') => {
     if (selectedForExport.length === 0) {
@@ -3996,6 +4002,15 @@ const SelectedColumnsPage = () => {
                         title={selectedForExport.length === selectedColumns.filter(c => c !== targetVariable).length ? 'Deselect all charts' : 'Select all charts for export'}
                       >
                         {selectedForExport.length === selectedColumns.filter(c => c !== targetVariable).length ? '☐ Deselect All' : '☑ Select All'}
+                      </button>
+                      <button
+                        className="export-select-btn model-ready-select-btn"
+                        onClick={selectModelReadyForExport}
+                        title={`Select only model-ready columns for export (${selectedForModeling.filter(c => c !== targetVariable && selectedColumns.includes(c)).length} columns)`}
+                        disabled={selectedForModeling.filter(c => c !== targetVariable && selectedColumns.includes(c)).length === 0}
+                      >
+                        <span className="btn-icon">✓</span>
+                        Select Model Ready ({selectedForModeling.filter(c => c !== targetVariable && selectedColumns.includes(c)).length})
                       </button>
                       <span className="export-count-badge">
                         {selectedForExport.length} selected
