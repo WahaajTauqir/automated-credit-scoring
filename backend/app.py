@@ -813,12 +813,48 @@ def _clean_nan_values(obj: Any) -> Any:
 
 
 DEFAULT_SCORECARD_CONFIG = {
-    "min_score": 0,      # Worst customer (highest risk)
-    "max_score": 600,    # Best customer (lowest risk)
+    "min_score": 0,      # Worst customer (highest risk) in standard mode
+    "max_score": 600,    # Best customer (lowest risk) in standard mode
     "base_score": 300,   # Score at baseline odds (midpoint of 0-600)
     "base_odds": 50,
-    "points_to_double_odds": 50
+    "points_to_double_odds": 50,
+    "invert_score_range": False  # If True: 600-0 (higher score = higher risk)
 }
+
+
+def _invert_scores(scores_array, min_score=0, max_score=600):
+    """
+    Invert scores so that the range becomes 600-0 instead of 0-600.
+    
+    In standard mode (0-600):
+        - Higher score = Lower risk (better customer)
+        - Lower score = Higher risk (worse customer)
+    
+    In inverted mode (600-0):
+        - Higher score = Higher risk (worse customer)  
+        - Lower score = Lower risk (better customer)
+    
+    Formula: inverted_score = max_score - score + min_score
+    Example: score=100 with range 0-600 -> inverted = 600 - 100 + 0 = 500
+             score=550 with range 0-600 -> inverted = 600 - 550 + 0 = 50
+    
+    Parameters:
+    -----------
+    scores_array : array-like
+        Original scores in 0-600 range (or configured min_score to max_score)
+    min_score : float
+        Minimum score value (default: 0)
+    max_score : float  
+        Maximum score value (default: 600)
+        
+    Returns:
+    --------
+    numpy.ndarray
+        Inverted scores where relationship to risk is reversed
+    """
+    scores_array = np.asarray(scores_array, dtype=float)
+    inverted = max_score - scores_array + min_score
+    return np.clip(inverted, min_score, max_score)
 
 
 def _scorecard_scaling_params(config: Dict[str, float] = DEFAULT_SCORECARD_CONFIG) -> Tuple[float, float]:
@@ -16192,6 +16228,10 @@ def debug_binning(variable):
 def generate_scorecard():
     """
     Generates a score card using pre-computed model results.
+    
+    Supports two score range modes:
+    - Standard (0-600): Higher score = Lower risk (default)
+    - Inverted (600-0): Higher score = Higher risk
     """
     try:
         # Parse request data
@@ -16201,6 +16241,7 @@ def generate_scorecard():
         woe_transformed_data = data.get('woe_transformed_data', {})
         model_results = data.get('model_results', {})  # Accept pre-computed model results
         model_type = data.get('model_type', 'logistic')  # Accept model type
+        invert_score_range = data.get('invert_score_range', False)  # If True: 600-0 (higher score = higher risk)
         dataset_id = (
             data.get('record_id')
             or data.get('dataset_id')
@@ -16897,7 +16938,13 @@ def generate_scorecard():
             score_min_raw = float(min_total_score)
             score_max_raw = float(max_total_score)
         
-        # Build score_parameters with raw min/max
+        # NOTE: Do NOT invert bin scores here. The inversion is applied to final scores in apply_scorecard.
+        # We only store the invert_score_range flag so apply_scorecard knows to invert the totals.
+        if invert_score_range:
+            print(f"[generate_scorecard] Score range mode: 600-0 (higher score = higher risk)")
+            print(f"[generate_scorecard] Bin scores NOT inverted - inversion applied to final scores in apply_scorecard")
+        
+        # Build score_parameters with raw min/max and inversion flag
         score_parameters = {
             "factor": round(float(factor), 4),
             "offset": round(float(offset), 4),
@@ -16910,6 +16957,8 @@ def generate_scorecard():
             "model_type": model_type,
             "score_min_raw": score_min_raw,  # NEW: Raw min from training data
             "score_max_raw": score_max_raw,  # NEW: Raw max from training data
+            "invert_score_range": invert_score_range,  # NEW: Score range inversion flag
+            "score_interpretation": "higher_score_higher_risk" if invert_score_range else "higher_score_lower_risk",
         }
         
         # Update artifact with scorecard data
@@ -16964,6 +17013,10 @@ def generate_scorecard():
 def apply_scorecard():
     """
     Applies the score card to all records in the uploaded dataset using pre-computed model results.
+    
+    Supports two score range modes:
+    - Standard (0-600): Higher score = Lower risk (default)
+    - Inverted (600-0): Higher score = Higher risk
     """
     import numpy as np
     try:
@@ -16973,6 +17026,7 @@ def apply_scorecard():
         woe_transformed_data = data.get('woe_transformed_data', {})
         model_results = data.get('model_results', {})  # Accept pre-computed model results
         model_type = data.get('model_type', 'logistic')  # Accept model type
+        invert_score_range = data.get('invert_score_range', False)  # If True: 600-0 (higher score = higher risk)
         dataset_id = (
             data.get('record_id')
             or data.get('dataset_id')
@@ -17354,6 +17408,16 @@ def apply_scorecard():
             else:
                 print(f"[APPLY-SCORECARD] Using raw scorecard scores (no normalization parameters available)")
         
+        # Apply score inversion if requested (600-0 mode: higher score = higher risk)
+        # Check both request parameter and stored score_parameters
+        should_invert = invert_score_range or (score_parameters and score_parameters.get('invert_score_range', False))
+        if should_invert:
+            min_score = score_parameters.get('min_score', 0) if score_parameters else 0
+            max_score = score_parameters.get('max_score', 600) if score_parameters else 600
+            scores_array = _invert_scores(scores_array, min_score, max_score)
+            print(f"[APPLY-SCORECARD] Inverted scores to 600-0 range (higher score = higher risk)")
+            print(f"[APPLY-SCORECARD] Inverted scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
+        
         scores = scores_array.astype(float).tolist()
         
         print(f"[APPLY-SCORECARD] Scorecard method - Calculated {len(scores)} scores")
@@ -17392,8 +17456,15 @@ def apply_scorecard():
         
         print(f"[APPLY-SCORECARD] Created {len(results_list)} result entries from {len(scores_np)} predictions")
         
-        # Sort descending by score (HIGHEST scores first = LOWEST risk first)
-        results_list = sorted(results_list, key=lambda x: x["score"], reverse=True)
+        # Sort by score - direction depends on score interpretation
+        if should_invert:
+            # Inverted mode (600-0): Higher score = Higher risk, so sort ascending (lowest risk first)
+            results_list = sorted(results_list, key=lambda x: x["score"], reverse=False)
+            print(f"[APPLY-SCORECARD] Sorted results ascending (inverted mode: low score = low risk first)")
+        else:
+            # Standard mode (0-600): Higher score = Lower risk, so sort descending (lowest risk first)  
+            results_list = sorted(results_list, key=lambda x: x["score"], reverse=True)
+            print(f"[APPLY-SCORECARD] Sorted results descending (standard mode: high score = low risk first)")
 
         # Calculate KS statistic (separation number)
         # CRITICAL FIX: Use probabilities for ROC curve, not scores
@@ -17447,61 +17518,111 @@ def apply_scorecard():
             score_max = float(np.max(scores_array))
             score_range = score_max - score_min
             
-            # Calculate risk bands using percentiles of all scores
+            # Calculate risk bands using equal-width bands across the 0-600 range
+            # This ensures consistent bands regardless of actual score distribution
             if len(scores_array) > 0:
-                # Method: Use percentiles to create 5 risk bands
-                # Very High Risk: Bottom 20% of scores (where most bads are)
-                # High Risk: 20-40% of scores
-                # Medium Risk: 40-60% of scores  
-                # Low Risk: 60-80% of scores
-                # Very Low Risk: Top 20% of scores (where most goods are)
+                # Use fixed bands on 0-600 scale for consistency
+                # Band width = 120 (600/5)
+                band_width = 120
                 
-                p20 = float(np.percentile(scores_array, 20))
-                p40 = float(np.percentile(scores_array, 40))
-                p60 = float(np.percentile(scores_array, 60))
-                p80 = float(np.percentile(scores_array, 80))
+                # For 600-0 mode (inverted): Higher score = Higher risk
+                # For 0-600 mode (standard): Higher score = Lower risk
                 
-                risk_bands = [
-                    {
-                        "label": "Very High Risk",
-                        "description": "Likely bad",
-                        "min": score_min,
-                        "max": p20,
-                        "color": "#da3633"  # Red
-                    },
-                    {
-                        "label": "High Risk",
-                        "description": "",
-                        "min": p20,
-                        "max": p40,
-                        "color": "#ed8936"  # Orange
-                    },
-                    {
-                        "label": "Medium Risk",
-                        "description": "",
-                        "min": p40,
-                        "max": p60,
-                        "color": "#d29922"  # Yellow
-                    },
-                    {
-                        "label": "Low Risk",
-                        "description": "",
-                        "min": p60,
-                        "max": p80,
-                        "color": "#58a6ff"  # Blue
-                    },
-                    {
-                        "label": "Very Low Risk",
-                        "description": "Good customer",
-                        "min": p80,
-                        "max": score_max,
-                        "color": "#2ea043"  # Green
-                    }
-                ]
+                if should_invert:
+                    # Inverted mode (600-0): Score 600 = highest risk, Score 0 = lowest risk
+                    # Band 0-120: Very Low Risk (good customers)
+                    # Band 120-240: Low Risk
+                    # Band 240-360: Medium Risk  
+                    # Band 360-480: High Risk
+                    # Band 480-600: Very High Risk (bad customers)
+                    risk_bands = [
+                        {
+                            "label": "Very Low Risk",
+                            "description": "Good customer",
+                            "min": 0,
+                            "max": 120,
+                            "color": "#2ea043"  # Green
+                        },
+                        {
+                            "label": "Low Risk",
+                            "description": "",
+                            "min": 120,
+                            "max": 240,
+                            "color": "#58a6ff"  # Blue
+                        },
+                        {
+                            "label": "Medium Risk",
+                            "description": "",
+                            "min": 240,
+                            "max": 360,
+                            "color": "#d29922"  # Yellow
+                        },
+                        {
+                            "label": "High Risk",
+                            "description": "",
+                            "min": 360,
+                            "max": 480,
+                            "color": "#ed8936"  # Orange
+                        },
+                        {
+                            "label": "Very High Risk",
+                            "description": "Likely bad",
+                            "min": 480,
+                            "max": 600,
+                            "color": "#da3633"  # Red
+                        }
+                    ]
+                else:
+                    # Standard mode (0-600): Score 0 = highest risk, Score 600 = lowest risk
+                    # Band 0-120: Very High Risk (bad customers)
+                    # Band 120-240: High Risk
+                    # Band 240-360: Medium Risk
+                    # Band 360-480: Low Risk  
+                    # Band 480-600: Very Low Risk (good customers)
+                    risk_bands = [
+                        {
+                            "label": "Very High Risk",
+                            "description": "Likely bad",
+                            "min": 0,
+                            "max": 120,
+                            "color": "#da3633"  # Red
+                        },
+                        {
+                            "label": "High Risk",
+                            "description": "",
+                            "min": 120,
+                            "max": 240,
+                            "color": "#ed8936"  # Orange
+                        },
+                        {
+                            "label": "Medium Risk",
+                            "description": "",
+                            "min": 240,
+                            "max": 360,
+                            "color": "#d29922"  # Yellow
+                        },
+                        {
+                            "label": "Low Risk",
+                            "description": "",
+                            "min": 360,
+                            "max": 480,
+                            "color": "#58a6ff"  # Blue
+                        },
+                        {
+                            "label": "Very Low Risk",
+                            "description": "Good customer",
+                            "min": 480,
+                            "max": 600,
+                            "color": "#2ea043"  # Green
+                        }
+                    ]
                 
                 # Calculate bad rates for each band
                 for band in risk_bands:
-                    band_mask = (scores_array >= band["min"]) & (scores_array <= band["max"])
+                    band_mask = (scores_array >= band["min"]) & (scores_array < band["max"])
+                    # Include max boundary for the last band
+                    if band["max"] == 600:
+                        band_mask = (scores_array >= band["min"]) & (scores_array <= band["max"])
                     band_scores = scores_array[band_mask]
                     band_targets = targets_array[band_mask]
                     band_total = len(band_scores)
@@ -17511,15 +17632,7 @@ def apply_scorecard():
                     band["bad_count"] = band_bads
                     band["good_count"] = int(band_total - band_bads)
             else:
-                # Fallback: Equal width bands
-                band_width = score_range / 5
-                risk_bands = [
-                    {"label": "Very High Risk", "description": "Likely bad", "min": score_min, "max": score_min + band_width, "color": "#da3633", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
-                    {"label": "High Risk", "description": "", "min": score_min + band_width, "max": score_min + 2*band_width, "color": "#ed8936", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
-                    {"label": "Medium Risk", "description": "", "min": score_min + 2*band_width, "max": score_min + 3*band_width, "color": "#d29922", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
-                    {"label": "Low Risk", "description": "", "min": score_min + 3*band_width, "max": score_min + 4*band_width, "color": "#58a6ff", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
-                    {"label": "Very Low Risk", "description": "Good customer", "min": score_min + 4*band_width, "max": score_max, "color": "#2ea043", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0}
-                ]
+                risk_bands = []
                 
             print(f"DEBUG: Risk bands calculated: {len(risk_bands)} bands")
             for band in risk_bands:
@@ -17541,7 +17654,14 @@ def apply_scorecard():
             # For credit scoring, we typically use a different threshold than 0.5
             # Since scores are now properly scaled, we can use a score threshold
             score_threshold = np.percentile(scores_np, 50)  # Median score as threshold
-            y_pred = [1 if score < score_threshold else 0 for score in scores_np]  # Lower score = higher risk = predicted bad
+            
+            # Classification depends on score interpretation
+            if should_invert:
+                # Inverted mode: Higher score = Higher risk = predicted bad
+                y_pred = [1 if score > score_threshold else 0 for score in scores_np]
+            else:
+                # Standard mode: Lower score = Higher risk = predicted bad
+                y_pred = [1 if score < score_threshold else 0 for score in scores_np]
             
             accuracy = accuracy_score(y_true, y_pred)
             precision = precision_score(y_true, y_pred, zero_division=0)
@@ -17549,7 +17669,7 @@ def apply_scorecard():
             f1 = f1_score(y_true, y_pred, zero_division=0)
             
             print(f"DEBUG: Additional metrics - AUC: {roc_auc:.4f}, Accuracy: {accuracy:.4f}")
-            print(f"DEBUG: Classification at score threshold {score_threshold:.2f}")
+            print(f"DEBUG: Classification at score threshold {score_threshold:.2f} (inverted={should_invert})")
             
         except Exception as metric_err:
             print(f"DEBUG: Metric calculation error: {metric_err}")
@@ -17584,6 +17704,8 @@ def apply_scorecard():
                 "max": float(np.max(scores_np)) if len(scores_np) > 0 else 0,
                 "mean": float(np.mean(scores_np)) if len(scores_np) > 0 else 0
             },
+            "invert_score_range": should_invert,  # Return the inversion flag
+            "score_interpretation": "higher_score_higher_risk" if should_invert else "higher_score_lower_risk",
             "ks_stat": ks_stat if 'ks_stat' in locals() else None,
             "ks_threshold": ks_threshold if 'ks_threshold' in locals() else None,
             "ks_curve": ks_curve if 'ks_curve' in locals() else [],

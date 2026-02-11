@@ -356,6 +356,7 @@ const SelectedColumnsPage = () => {
   const [trainingScoreRiskBands, setTrainingScoreRiskBands] = useState<any[] | null>(null);
   const [currentDataSource, setCurrentDataSource] = useState<'training' | 'test'>('test'); // Track which data source is currently displayed
   const [isRiskLabelsInverted, setIsRiskLabelsInverted] = useState(false); // Track if risk labels are inverted (higher score = higher risk)
+  const [invertScoreRange, setInvertScoreRange] = useState(false); // If true: 600-0 range (higher score = higher risk)
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedModel, setSelectedModel] = useState<string>('stacking'); // Default to stacking ensemble
@@ -964,7 +965,8 @@ const SelectedColumnsPage = () => {
           ),
           model_results: modelResults,
           model_type: backendModelType,
-          record_id: recordId
+          record_id: recordId,
+          invert_score_range: invertScoreRange  // Pass the score range inversion option
       });
       if (data.success && data.results) {
         setTestScoreResults(data.results);
@@ -1037,7 +1039,8 @@ const SelectedColumnsPage = () => {
           model_results: modelResults,
           model_type: backendModelType,
           record_id: recordId,
-          data_source: 'training'  // Use training data instead of test
+          data_source: 'training',  // Use training data instead of test
+          invert_score_range: invertScoreRange  // Pass the score range inversion option
       });
       if (data.success && data.results) {
         setTrainingScoreResults(data.results);
@@ -1194,7 +1197,8 @@ const SelectedColumnsPage = () => {
           ),
           model_type: backendModelType,
           model_results: modelResults,
-          record_id: recordId
+          record_id: recordId,
+          invert_score_range: invertScoreRange  // Pass the score range inversion option
       });
 
       if (!data) {
@@ -1276,7 +1280,11 @@ const SelectedColumnsPage = () => {
         csvRows.push('Score Parameters');
         csvRows.push(`Factor,${scoreCardData.score_parameters.factor?.toFixed(4) || ''}`);
         csvRows.push(`Offset,${scoreCardData.score_parameters.offset?.toFixed(4) || ''}`);
-        csvRows.push(`Score Range,${scoreCardData.score_parameters.min_score || ''} - ${scoreCardData.score_parameters.max_score || ''}`);
+        const scoreRangeDisplay = scoreCardData.score_parameters.invert_score_range 
+          ? `${scoreCardData.score_parameters.max_score || ''} - ${scoreCardData.score_parameters.min_score || ''}`
+          : `${scoreCardData.score_parameters.min_score || ''} - ${scoreCardData.score_parameters.max_score || ''}`;
+        csvRows.push(`Score Range,${scoreRangeDisplay}`);
+        csvRows.push(`Score Interpretation,${scoreCardData.score_parameters.invert_score_range ? 'Higher Score = Higher Risk' : 'Higher Score = Lower Risk'}`);
       }
 
       // Create CSV content
@@ -5026,6 +5034,66 @@ const SelectedColumnsPage = () => {
                 <div className="scorecard-container">
                   {/* Left Box: Controls, Risk Scale, KS Chart */}
                   <div className="scorecard-middle-box">
+                    {/* Score Range Toggle */}
+                    <div className="scorecard-controls" style={{ marginBottom: '8px' }}>
+                      <div style={{ 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '12px',
+                        padding: '8px 12px',
+                        backgroundColor: 'var(--bg-secondary)',
+                        borderRadius: '8px',
+                        border: '1px solid var(--border-secondary)'
+                      }}>
+                        <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--fg-primary)' }}>Score Range:</span>
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                          <button
+                            onClick={() => setInvertScoreRange(false)}
+                            style={{
+                              padding: '6px 12px',
+                              fontSize: '12px',
+                              fontWeight: invertScoreRange ? 400 : 600,
+                              backgroundColor: !invertScoreRange ? 'var(--fg-accent-green)' : 'var(--bg-tertiary)',
+                              color: !invertScoreRange ? 'white' : 'var(--fg-secondary)',
+                              border: 'none',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s'
+                            }}
+                            title="Standard: 0-600 (Higher score = Lower risk)"
+                          >
+                            0-600 ↑
+                          </button>
+                          <button
+                            onClick={() => setInvertScoreRange(true)}
+                            style={{
+                              padding: '6px 12px',
+                              fontSize: '12px',
+                              fontWeight: invertScoreRange ? 600 : 400,
+                              backgroundColor: invertScoreRange ? 'var(--fg-accent-red)' : 'var(--bg-tertiary)',
+                              color: invertScoreRange ? 'white' : 'var(--fg-secondary)',
+                              border: 'none',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s'
+                            }}
+                            title="Inverted: 600-0 (Higher score = Higher risk)"
+                          >
+                            600-0 ↓
+                          </button>
+                        </div>
+                        <span style={{ 
+                          fontSize: '11px', 
+                          color: 'var(--fg-muted)',
+                          fontStyle: 'italic'
+                        }}>
+                          {invertScoreRange 
+                            ? '(Higher score = Higher risk)' 
+                            : '(Higher score = Lower risk)'
+                          }
+                        </span>
+                      </div>
+                    </div>
                     <div className="scorecard-controls">
                       <button
                         className="auto-monotonic-btn scorecard-btn-small"
@@ -5216,7 +5284,32 @@ const SelectedColumnsPage = () => {
                             </div>
                             <div className="parameter-box">
                               <div className="parameter-label">Score Range:</div>
-                              <div className="parameter-value">{scoreCardData.score_parameters.min_score} - {scoreCardData.score_parameters.max_score}</div>
+                              <div className="parameter-value">
+                                {scoreCardData.score_parameters.invert_score_range 
+                                  ? `${scoreCardData.score_parameters.max_score} - ${scoreCardData.score_parameters.min_score}` 
+                                  : `${scoreCardData.score_parameters.min_score} - ${scoreCardData.score_parameters.max_score}`
+                                }
+                                <span style={{ 
+                                  fontSize: '10px', 
+                                  marginLeft: '6px', 
+                                  color: scoreCardData.score_parameters.invert_score_range ? 'var(--fg-accent-red)' : 'var(--fg-accent-green)',
+                                  fontWeight: 500
+                                }}>
+                                  {scoreCardData.score_parameters.invert_score_range ? '(↓ risk)' : '(↑ good)'}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="parameter-box">
+                              <div className="parameter-label">Score Interpretation:</div>
+                              <div className="parameter-value" style={{ 
+                                fontSize: '12px',
+                                color: scoreCardData.score_parameters.invert_score_range ? 'var(--fg-accent-red)' : 'var(--fg-accent-green)'
+                              }}>
+                                {scoreCardData.score_parameters.invert_score_range 
+                                  ? 'Higher Score = Higher Risk' 
+                                  : 'Higher Score = Lower Risk'
+                                }
+                              </div>
                             </div>
                             <div className="parameter-box">
                               <div className="parameter-label">Model Type:</div>
@@ -5243,18 +5336,20 @@ const SelectedColumnsPage = () => {
                               </tr>
                             </thead>
                             <tbody>
-                              {((currentDataSource === 'training' ? trainingScoreResults : testScoreResults) || []).map((row: any, idx: number) => (
-                                <tr key={idx}>
-                                  <td>{idx + 1}</td>
-                                  <td>{row.score}</td>
-                                  <td style={{
-                                    color: row.target === 0 ? 'green' : row.target === 1 ? 'red' : undefined,
-                                    fontWeight: row.target === 1 ? 'bold' : 'normal'
-                                  }}>
-                                    {row.target}
-                                  </td>
-                                </tr>
-                              ))}
+                              {((currentDataSource === 'training' ? trainingScoreResults : testScoreResults) || []).map((row: any, idx: number) => {
+                                return (
+                                  <tr key={idx}>
+                                    <td>{idx + 1}</td>
+                                    <td>{Math.round(row.score)}</td>
+                                    <td style={{
+                                      color: row.target === 0 ? '#2ea043' : row.target === 1 ? '#da3633' : undefined,
+                                      fontWeight: row.target === 1 ? 'bold' : 'normal'
+                                    }}>
+                                      {row.target}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
