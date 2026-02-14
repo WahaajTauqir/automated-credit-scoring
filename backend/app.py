@@ -9623,10 +9623,14 @@ def logistic_regression_analysis():
             return jsonify({"error": "No valid data after preprocessing"}), 400
 
         # Remove constant features (zero variance)
+        dropped_details = {}  # variable_name -> reason
         variances = X.var()
         constant_cols = variances[variances == 0].index.tolist()
+        dropped_constants = []
         if constant_cols:
             dropped_constants = [col.replace('_WOE', '') for col in constant_cols]
+            for var in dropped_constants:
+                dropped_details[var] = 'constant_value'
             print(f"LOGISTIC DEBUG: Removing constant columns: {dropped_constants}")
             X = X.drop(columns=constant_cols)
             feature_cols = [col for col in feature_cols if col not in constant_cols]
@@ -9670,10 +9674,12 @@ def logistic_regression_analysis():
             
             # Drop the high VIF column
             print(f"LOGISTIC DEBUG: Dropping high VIF column '{max_vif_col}' (VIF: {max_vif})")
+            dropped_var = max_vif_col.replace('_WOE', '')
+            dropped_details[dropped_var] = f'high_multicollinearity_vif_{max_vif:.2f}'
             X = X.drop(columns=[max_vif_col])
             feature_cols = [col for col in feature_cols if col not in [max_vif_col]]
             selected_variables = [var for var in selected_variables if f'{var}_WOE' not in [max_vif_col]]
-            vif_dropped.append(max_vif_col.replace('_WOE', ''))
+            vif_dropped.append(dropped_var)
         
         if vif_dropped:
             print(f"LOGISTIC DEBUG: VIF dropped features (due to multicollinearity): {vif_dropped}")
@@ -9696,10 +9702,12 @@ def logistic_regression_analysis():
                 break
             to_drop = min(var_dict, key=var_dict.get)
             print(f"LOGISTIC DEBUG: Dropping low-variance column '{to_drop}' due to rank deficiency")
+            dropped_var = to_drop.replace('_WOE', '')
+            dropped_details[dropped_var] = 'rank_deficiency'
             X = X.drop(to_drop, axis=1)
             feature_cols = [col for col in feature_cols if col not in [to_drop]]
             selected_variables = [var for var in selected_variables if f'{var}_WOE' not in [to_drop]]
-            rank_dropped.append(to_drop.replace('_WOE', ''))
+            rank_dropped.append(dropped_var)
             X_const = sm.add_constant(X)
             rank = np.linalg.matrix_rank(X_const)
             full_rank = X_const.shape[1]
@@ -11112,7 +11120,8 @@ def logistic_regression_analysis():
             'ks_stat': ks_stat,
             'ks_threshold': ks_threshold,
             'ks_curve': ks_curve,
-            'dropped_variables': dropped_variables  # Updated: includes constants, high-VIF, rank-deficient
+            'dropped_variables': dropped_variables,  # List of dropped variable names
+            'dropped_details': dropped_details  # Dict mapping variable names to drop reasons
         }
 
         try:

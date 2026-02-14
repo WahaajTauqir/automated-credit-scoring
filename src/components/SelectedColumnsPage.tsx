@@ -350,7 +350,7 @@ const SelectedColumnsPage = () => {
   const [testScoreResults, setTestScoreResults] = useState<any[] | null>(null);
   const [testScoreKSData, setTestScoreKSData] = useState<{ ks_stat: number | null; ks_threshold: number | null; ks_curve: any[] | null } | null>(null);
   const [testScoreRiskBands, setTestScoreRiskBands] = useState<any[] | null>(null);
-  const [createRangesLoading, setCreateRangesLoading] = useState(false);
+
   const [trainingScoreResults, setTrainingScoreResults] = useState<any[] | null>(null);
   const [trainingScoreKSData, setTrainingScoreKSData] = useState<{ ks_stat: number | null; ks_threshold: number | null; ks_curve: any[] | null } | null>(null);
   const [trainingScoreRiskBands, setTrainingScoreRiskBands] = useState<any[] | null>(null);
@@ -994,79 +994,7 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  // Create ranges from training data
-  const handleCreateRanges = async (modelType: string = selectedModelForScorecard) => {
-    setCreateRangesLoading(true);
-    setTrainingScoreResults(null);
-    setTrainingScoreRiskBands(null);
-    setTrainingScoreKSData(null);
-    try {
-      // Get the appropriate model results based on the selected model
-      let modelResults: any = null;
 
-      switch (modelType) {
-        case 'logistic':
-          modelResults = logisticResults;
-          break;
-        case 'random_forest':
-          modelResults = randomForestResults;
-          break;
-        case 'xgboost':
-          modelResults = xgboostResults;
-          break;
-        case 'stacking':
-          modelResults = stackingResults;
-          break;
-        default:
-          modelResults = logisticResults;
-      }
-
-      if (!modelResults) {
-        alert(`No results available for ${modelType}. Please run the model first.`);
-        setCreateRangesLoading(false);
-        return;
-      }
-
-      // Map frontend model type to backend model type
-      const backendModelType = modelType === 'stacking' ? 'stacking_ensemble' : modelType;
-
-      const data = await authPost('/api/apply-scorecard', {
-          selected_variables: selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling,
-          target: targetVariable,
-          woe_transformed_data: Object.fromEntries(
-            Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
-          ),
-          model_results: modelResults,
-          model_type: backendModelType,
-          record_id: recordId,
-          data_source: 'training',  // Use training data instead of test
-          invert_score_range: invertScoreRange  // Pass the score range inversion option
-      });
-      if (data.success && data.results) {
-        setTrainingScoreResults(data.results);
-        // Store KS data if available
-        if (data.ks_stat !== undefined && data.ks_curve) {
-          setTrainingScoreKSData({
-            ks_stat: data.ks_stat,
-            ks_threshold: data.ks_threshold || null,
-            ks_curve: data.ks_curve
-          });
-        }
-        // Store risk bands from training data
-        if (data.risk_bands && data.risk_bands.length > 0) {
-          setTrainingScoreRiskBands(data.risk_bands);
-        }
-        setCurrentDataSource('training');
-        showNotification(`Score card applied to training data using ${modelType} model`);
-      } else {
-        alert('Error creating ranges: ' + (data.error || 'Unknown error'));
-      }
-    } catch (err) {
-      alert('Error creating ranges: ' + err);
-    } finally {
-      setCreateRangesLoading(false);
-    }
-  };
   const calculateAllBinMetrics = async (columnName: string, bins: NormalizedBin[]) => {
     if (!bins || bins.length === 0) {
       return null;
@@ -1141,6 +1069,9 @@ const SelectedColumnsPage = () => {
   };
   const generateScoreCard = async () => {
     setGeneratingScoreCard(true);
+    setTrainingScoreResults(null);
+    setTrainingScoreRiskBands(null);
+    setTrainingScoreKSData(null);
     try {
       // Get the appropriate model results based on the selected model
       let modelResults: any = null;
@@ -1214,6 +1145,37 @@ const SelectedColumnsPage = () => {
           showNotification(`Score card generated with ${totalBins} bins across ${varsToUse.length} variables using ${selectedModelForScorecard} model`);
         } else {
           showNotification(`Score card generated successfully using ${selectedModelForScorecard} model!`);
+        }
+
+        // After scorecard generation, create ranges from training data
+        const rangeData = await authPost('/api/apply-scorecard', {
+            selected_variables: selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling,
+            target: targetVariable,
+            woe_transformed_data: Object.fromEntries(
+              Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
+            ),
+            model_results: modelResults,
+            model_type: backendModelType,
+            record_id: recordId,
+            data_source: 'training',  // Use training data instead of test
+            invert_score_range: invertScoreRange  // Pass the score range inversion option
+        });
+        
+        if (rangeData.success && rangeData.results) {
+          setTrainingScoreResults(rangeData.results);
+          // Store KS data if available
+          if (rangeData.ks_stat !== undefined && rangeData.ks_curve) {
+            setTrainingScoreKSData({
+              ks_stat: rangeData.ks_stat,
+              ks_threshold: rangeData.ks_threshold || null,
+              ks_curve: rangeData.ks_curve
+            });
+          }
+          // Store risk bands from training data
+          if (rangeData.risk_bands && rangeData.risk_bands.length > 0) {
+            setTrainingScoreRiskBands(rangeData.risk_bands);
+          }
+          setCurrentDataSource('training');
         }
       } else {
         alert(`Error generating score card: ${data.error}`);
@@ -5062,7 +5024,7 @@ const SelectedColumnsPage = () => {
                             }}
                             title="Standard: 0-600 (Higher score = Lower risk)"
                           >
-                            0-600 ↑
+                            0-600
                           </button>
                           <button
                             onClick={() => setInvertScoreRange(true)}
@@ -5079,7 +5041,7 @@ const SelectedColumnsPage = () => {
                             }}
                             title="Inverted: 600-0 (Higher score = Higher risk)"
                           >
-                            600-0 ↓
+                            600-0
                           </button>
                         </div>
                         <span style={{ 
@@ -5103,15 +5065,6 @@ const SelectedColumnsPage = () => {
                       >
                         <span className="btn-icon">⚡</span>
                         {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
-                      </button>
-                      <button
-                        className="auto-monotonic-btn scorecard-btn-small"
-                        onClick={() => handleCreateRanges(selectedModelForScorecard)}
-                        disabled={generatingScoreCard || createRangesLoading || !scoreCardData || !scoreCardData.scorecard_bins}
-                        aria-label="Create ranges from training data"
-                      >
-                        <span className="btn-icon">⚡</span>
-                        {createRangesLoading ? 'Creating...' : 'Create Ranges'}
                       </button>
                       <button
                         className="run-regression-btn scorecard-btn-small"
@@ -5289,14 +5242,6 @@ const SelectedColumnsPage = () => {
                                   ? `${scoreCardData.score_parameters.max_score} - ${scoreCardData.score_parameters.min_score}` 
                                   : `${scoreCardData.score_parameters.min_score} - ${scoreCardData.score_parameters.max_score}`
                                 }
-                                <span style={{ 
-                                  fontSize: '10px', 
-                                  marginLeft: '6px', 
-                                  color: scoreCardData.score_parameters.invert_score_range ? 'var(--fg-accent-red)' : 'var(--fg-accent-green)',
-                                  fontWeight: 500
-                                }}>
-                                  {scoreCardData.score_parameters.invert_score_range ? '(↓ risk)' : '(↑ good)'}
-                                </span>
                               </div>
                             </div>
                             <div className="parameter-box">
