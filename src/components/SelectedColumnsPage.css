@@ -104,7 +104,7 @@ body {
 .page-container {
   container-type: inline-size;
   /* reduce top spacing so the page gives more room to inner panels */
-  padding: var(--spacing-sm) 0 8px 0; /* Minimal bottom padding for consistency */
+  padding: var(--spacing-sm) 0 0 0; /* Remove bottom padding to eliminate black bar */
   width: 100vw;
   max-width: none;
   margin: 0;
@@ -512,9 +512,10 @@ h4 { font-size: 0.95rem; }
   overflow-y: hidden; /* Container doesn't scroll, inner boxes do */
   overflow-x: hidden;
   padding: var(--spacing-sm);
-  padding-bottom: 8px; /* Minimal consistent bottom padding */
+  padding-bottom: 0; /* Remove bottom padding to eliminate black bar */
   display: flex;
   flex-direction: column;
+  min-height: 0; /* Allow flex shrinking */
 }
 
 .preprocessing-step {
@@ -1044,6 +1045,13 @@ tr[style*="21262d"]:hover {
   box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
 }
 
+/* Auto Monotonic Button in sidebar context - full width */
+aside .auto-monotonic-btn {
+  width: 100%;
+  justify-content: center;
+  margin-top: var(--spacing-xs);
+}
+
 .auto-monotonic-btn::before {
   content: '';
   position: absolute;
@@ -1068,6 +1076,25 @@ tr[style*="21262d"]:hover {
 .auto-monotonic-btn:active {
   transform: translateY(0);
   box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+}
+
+.auto-monotonic-btn:disabled {
+  background: var(--border-primary);
+  opacity: 0.6;
+  cursor: not-allowed;
+  color: var(--fg-tertiary);
+  box-shadow: none;
+}
+
+.auto-monotonic-btn:disabled:hover {
+  transform: none;
+  background: var(--border-primary);
+  box-shadow: none;
+}
+
+.auto-monotonic-btn:disabled .btn-icon {
+  animation: none;
+  opacity: 0.5;
 }
 
 .auto-monotonic-btn .btn-icon {
@@ -1272,13 +1299,21 @@ tr[style*="21262d"]:hover {
   box-sizing: border-box;
 }
 
+/* Scorecard Model Selection (when developer mode is on) */
+.scorecard-model-selection {
+  flex-shrink: 0; /* Don't shrink */
+  margin-bottom: var(--spacing-sm);
+}
+
 /* Scorecard Container - Three Column Layout */
 .scorecard-container {
   display: flex;
   gap: var(--spacing-md);
   width: 100%;
-  height: 100%;
+  flex: 1; /* Take remaining space */
+  min-height: 0; /* Allow flex shrinking */
   box-sizing: border-box;
+  overflow: hidden; /* Prevent overflow */
 }
 
 /* Left Box: Score Card (wider, scrollable) */
@@ -1344,11 +1379,32 @@ tr[style*="21262d"]:hover {
   padding-top: 0; /* Remove any top padding */
 }
 
+.scorecard-download-controls {
+  margin-top: 0;
+  margin-bottom: var(--spacing-sm);
+}
+
 .scorecard-controls .scorecard-btn-small {
   flex: 1;
   padding: 0.4rem 0.75rem; /* Smaller padding */
   font-size: 12px; /* Smaller font */
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Auto Monotonic Button with scorecard-btn-small class */
+.scorecard-controls .auto-monotonic-btn.scorecard-btn-small {
+  flex: 1;
+  padding: 0.4rem 0.75rem;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 0.4rem;
+}
+
+.scorecard-controls .auto-monotonic-btn.scorecard-btn-small .btn-icon {
+  font-size: 1em;
 }
 
 /* Scrollable scorecard table */
@@ -1444,6 +1500,58 @@ tr[style*="21262d"]:hover {
   font-size: 10px;
   color: var(--fg-tertiary);
   margin-top: 0.25rem;
+}
+
+/* Risk Scale Header and Flip Button */
+.risk-scale-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.flip-risk-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.flip-risk-btn:hover {
+  border-color: var(--fg-accent-green);
+  color: var(--fg-accent-green);
+  background: rgba(46, 160, 67, 0.1);
+}
+
+.flip-risk-btn:active {
+  transform: scale(0.95);
+}
+
+.flip-risk-btn svg {
+  flex-shrink: 0;
+}
+
+.flip-btn-text {
+  white-space: nowrap;
+}
+
+.risk-direction-indicator {
+  font-size: 10px;
+  color: var(--fg-tertiary);
+  text-align: center;
+  padding: 4px 8px;
+  margin-bottom: 8px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  border: 1px dashed var(--border-secondary);
 }
 
 .scorecard-ks-chart {
@@ -1898,8 +2006,11 @@ select:focus {
 }
 
 .all-auto-monotonic-container {
-  display: inline-flex;
-  padding: 4px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
   background: var(--bg-secondary);
   border-radius: 8px;
   border: 1px solid var(--border-primary);
@@ -1948,6 +2059,25 @@ select:focus {
 .all-auto-monotonic-btn:active {
   transform: translateY(0);
   box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+}
+
+.all-auto-monotonic-btn:disabled {
+  background: var(--border-primary);
+  opacity: 0.6;
+  cursor: not-allowed;
+  color: var(--fg-tertiary);
+  box-shadow: none;
+}
+
+.all-auto-monotonic-btn:disabled:hover {
+  transform: none;
+  background: var(--border-primary);
+  box-shadow: none;
+}
+
+.all-auto-monotonic-btn:disabled .btn-icon {
+  animation: none;
+  opacity: 0.5;
 }
 
 .all-auto-monotonic-btn .btn-icon {
@@ -2762,4 +2892,171 @@ select:focus {
   color: var(--fg-tertiary);
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* Export Controls Styles */
+.export-controls-divider {
+  width: 1px;
+  height: 32px;
+  background: var(--border-primary);
+  margin: 0 8px;
+}
+
+.export-controls-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.export-select-btn {
+  padding: 8px 14px;
+  border: 1.5px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.export-select-btn:hover {
+  border-color: var(--fg-accent-green);
+  color: var(--fg-accent-green);
+  background: rgba(46, 160, 67, 0.1);
+}
+
+.export-select-btn.model-ready-select-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-color: var(--fg-accent-green);
+  background: rgba(46, 160, 67, 0.08);
+  color: var(--fg-accent-green);
+}
+
+.export-select-btn.model-ready-select-btn:hover:not(:disabled) {
+  background: rgba(46, 160, 67, 0.2);
+  border-color: var(--fg-accent-green);
+}
+
+.export-select-btn.model-ready-select-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-color: var(--border-secondary);
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+}
+
+.export-select-btn.model-ready-select-btn .btn-icon {
+  font-size: 10px;
+}
+
+.export-count-badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: var(--bg-quaternary);
+  color: var(--fg-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border-secondary);
+}
+
+.export-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+  border: none;
+}
+
+.export-pdf-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.export-pdf-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.export-png-btn {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+  color: white;
+}
+
+.export-png-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(56, 239, 125, 0.4);
+}
+
+.export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.export-btn .btn-icon {
+  font-size: 14px;
+}
+
+/* Export Checkbox in Card Header */
+.export-checkbox {
+  width: 18px;
+  height: 18px;
+  accent-color: #667eea;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.2s ease;
+  margin-left: auto;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.export-checkbox:hover {
+  transform: scale(1.1);
+  box-shadow: 0 0 6px rgba(102, 126, 234, 0.4);
+}
+
+/* Selected for Export Card Styling */
+.auto-binning-card.selected-for-export {
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2), 0 4px 16px rgba(102, 126, 234, 0.15);
+}
+
+.auto-binning-card.selected-for-export::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+}
+
+/* Make card position relative for pseudo-element */
+.auto-binning-card {
+  position: relative;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .export-controls-group {
+    width: 100%;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  
+  .export-controls-divider {
+    width: 100%;
+    height: 1px;
+    margin: 8px 0;
+  }
 }

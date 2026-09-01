@@ -25,11 +25,28 @@ from db import (
 
 
 def get_csv_path():
-    """Returns the absolute path to the dataset CSV file from the database record."""
+    """Returns the absolute path to the dataset CSV file from the database record.
+    Supports both local filesystem and Cloud Storage (gs://) paths."""
     try:
         dataset = get_latest_dataset()
         if dataset and dataset.get('file_path'):
             fp = dataset.get('file_path')
+            
+            # Check if it's a Cloud Storage path
+            if fp.startswith('gs://'):
+                try:
+                    from storage import get_storage_manager
+                    storage_mgr = get_storage_manager()
+                    if storage_mgr and storage_mgr.file_exists(fp):
+                        # Download to temp file for reading
+                        temp_path = storage_mgr.save_to_temp('', fp)
+                        if temp_path:
+                            return temp_path
+                except Exception as e:
+                    print(f"[GET_CSV_PATH] Warning: Could not access Cloud Storage path {fp}: {e}")
+                # If Cloud Storage access fails, fall through to local alternatives
+            
+            # Local filesystem paths
             # First try relative to backend folder
             candidate = os.path.join(os.path.dirname(__file__), fp)
             if os.path.exists(candidate):

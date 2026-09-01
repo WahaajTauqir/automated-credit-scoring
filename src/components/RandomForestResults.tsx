@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { authPost } from '../utils/api';
 import './ModelResults.css'; // We'll create this shared CSS
 
 interface RandomForestResultsProps {
@@ -64,12 +65,12 @@ interface RandomForestResults {
 
 const RandomForestResults: React.FC<RandomForestResultsProps> = ({
     selectedVariables,
-    allSelectedVariables,
+    allSelectedVariables: _allSelectedVariables,
     targetVariable,
     woeTransformedData,
-    onColumnSelect,
-    selectedColumn,
-    onToggleSelect,
+    onColumnSelect: _onColumnSelect,
+    selectedColumn: _selectedColumn,
+    onToggleSelect: _onToggleSelect,
     onGenerateScoreCard,
     generatingScoreCard,
     onGotoScoreCard,
@@ -117,18 +118,12 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
 
         setLoading(true);
         try {
-            const response = await fetch('http://localhost:5000/api/random-forest', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+            const data = await authPost('/api/random-forest', {
                     selected_variables: selectedVariables,
                     target: targetVariable,
                     woe_transformed_data: woeTransformedData,
                     record_id: recordId
-                })
             });
-
-            const data = await response.json();
             if (data.success) {
                 setResults(data);
                 
@@ -456,7 +451,7 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
                         {onGenerateScoreCard && (
                             <div className="detail-card">
                                 <button
-                                    className="generate-scorecard-btn"
+                                    className="auto-monotonic-btn"
                                     onClick={() => {
                                         try {
                                             if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
@@ -465,6 +460,7 @@ const RandomForestResults: React.FC<RandomForestResultsProps> = ({
                                     }}
                                     disabled={generatingScoreCard || selectedVariables.length === 0}
                                 >
+                                    <span className="btn-icon">⚡</span>
                                     {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                                 </button>
                     </div>

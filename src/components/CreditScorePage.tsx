@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { authPost, authGet, authFetch } from '../utils/api';
 import Navbar from './Navbar';
 import './CreditScorePage.css';
 
@@ -43,7 +44,7 @@ const CreditScorePage = () => {
   const [predictions, setPredictions] = useState<PredictionRow[]>([]);
   const [riskBands, setRiskBands] = useState<Array<{label: string, min: number, max: number, color: string, description: string}>>([]);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [recordId, setRecordId] = useState<number | undefined>(
+  const [recordId, _setRecordId] = useState<number | undefined>(
     location.state?.recordId
   );
   const [pageError, setPageError] = useState<string | null>(
@@ -76,11 +77,10 @@ const CreditScorePage = () => {
     setModelFetchError(null);
     
     // Fetch all available models
-    fetch(`http://localhost:5000/api/datasets/${recordId}/models`)
-      .then(async response => {
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload.error || 'Failed to load available models.');
+    authGet(`/api/datasets/${recordId}/models`)
+      .then(payload => {
+        if (!payload) {
+          throw new Error('Failed to load available models.');
         }
         return payload;
       })
@@ -147,11 +147,10 @@ const CreditScorePage = () => {
     }
     
     // Fetch specific model metadata
-    fetch(`http://localhost:5000/api/datasets/${recordId}/model?model_label=${modelLabel}`)
-      .then(async response => {
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload.error || 'Failed to load model metadata.');
+    authGet(`/api/datasets/${recordId}/model?model_label=${modelLabel}`)
+      .then(payload => {
+        if (!payload) {
+          throw new Error('Failed to load model metadata.');
         }
         return payload;
       })
@@ -290,24 +289,16 @@ const CreditScorePage = () => {
       }
 
       // Call prediction API
-      const response = await fetch('http://localhost:5000/api/predict-credit-score', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          dataset_id: recordId,
-          model_type: selectedModel,
-          prediction_method: 'probability', // Default to probability method
-          csv_data: csvData,
-          identifier_column: selectedIdentifier
-        }),
+      const data = await authPost('/api/predict-credit-score', {
+        dataset_id: recordId,
+        model_type: selectedModel,
+        prediction_method: 'probability', // Default to probability method
+        csv_data: csvData,
+        identifier_column: selectedIdentifier
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to generate predictions');
+      if (!data) {
+        throw new Error('Failed to generate predictions');
       }
 
       if (data.success && data.predictions) {
@@ -339,7 +330,7 @@ const CreditScorePage = () => {
       
       // Calculate summary statistics
       const scores = predictions.map(p => p.score);
-      const probabilities = predictions.filter(p => p.probability !== undefined).map(p => p.probability!);
+      // const _probabilities = predictions.filter(p => p.probability !== undefined).map(p => p.probability!);
       
       const summary = {
         total_predictions: predictions.length,
@@ -362,7 +353,7 @@ const CreditScorePage = () => {
       };
 
       // Call backend to generate PDF
-      const response = await fetch('http://localhost:5000/api/download-pdf-report', {
+      const response = await authFetch('/api/download-pdf-report', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { authPost } from '../utils/api';
 import './ChatOverlay.css';
 
 interface Message {
@@ -55,13 +56,7 @@ const ChatOverlay = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void
     setInputText('');
 
     try {
-      const res = await fetch("http://127.0.0.1:5000/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userText })
-      });
-
-      const data = await res.json();
+      const data = await authPost('/api/chat', { message: userText });
 
       const aiMessage: Message = {
         id: messages.length + 2,

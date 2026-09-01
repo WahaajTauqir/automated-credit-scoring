@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import './Navbar.css';
 import ChatOverlay from './ChatOverlay';
 import LoginPanel from './LoginPanel';
@@ -12,6 +13,7 @@ interface NavbarProps {
 
 const Navbar = ({ developerMode = false, onDeveloperModeChange, currentStep }: NavbarProps) => {
   const { user, isAuthenticated, logout } = useAuth();
+  const navigate = useNavigate();
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isLoginOpen, setIsLoginOpen] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -30,10 +32,24 @@ const Navbar = ({ developerMode = false, onDeveloperModeChange, currentStep }: N
   // Show developer mode toggle when in models section (step 3) or scorecard section (step 4)
   const showDeveloperMode = currentStep === 3 || currentStep === 4;
 
+  const handleBrandClick = () => {
+    navigate('/');
+  };
+
+  const handleLoginSuccess = () => {
+    // Navigate to home page and refresh
+    navigate('/');
+    // Force a page refresh to reload all data
+    window.location.reload();
+  };
+
   return (
     <>
       <nav className="navbar">
-        <div className="navbar-brand">Automated Credit Score</div>
+        <div className="navbar-brand" onClick={handleBrandClick}>
+          <div className="navbar-brand-title">Automated Credit Scoring</div>
+          <div className="navbar-brand-subtitle">AI Driven Predictive Analytics for Smarter Lending</div>
+        </div>
         <div className="navbar-links">
           {showDeveloperMode && (
             <div className="developer-mode-container">
@@ -95,7 +111,7 @@ const Navbar = ({ developerMode = false, onDeveloperModeChange, currentStep }: N
         </div>
       </nav>
       <ChatOverlay isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} />
-      <LoginPanel isOpen={isLoginOpen} onClose={() => setIsLoginOpen(false)} />
+      <LoginPanel isOpen={isLoginOpen} onClose={() => setIsLoginOpen(false)} onSuccess={handleLoginSuccess} />
     </>
   );
 };

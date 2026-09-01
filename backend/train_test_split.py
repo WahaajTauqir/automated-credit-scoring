@@ -420,7 +420,65 @@ def save_split_files(train_df: pd.DataFrame, test_df: pd.DataFrame, dataset_id: 
     print(f"[TTS DEBUG] ✓ Both files saved successfully")
     print(f"[TTS DEBUG] NOTE: These files contain PREPROCESSED data (duplicates removed, missing handled, etc.)")
     
-    return train_path, test_path
+    # Upload to Cloud Storage if configured
+    final_train_path = train_path
+    final_test_path = test_path
+    
+    try:
+        from storage import get_storage_manager
+        storage_mgr = get_storage_manager()
+        if storage_mgr and storage_mgr.uploads_bucket:
+            print(f"[TTS DEBUG] Uploading files to Cloud Storage...")
+            
+            # Upload train file
+            train_blob_name = f"train_test_splits/{train_filename}"
+            try:
+                train_gcs_path = storage_mgr.upload_file(
+                    train_path,
+                    storage_mgr.uploads_bucket,
+                    train_blob_name
+                )
+                if train_gcs_path.startswith('gs://'):
+                    final_train_path = train_gcs_path
+                    print(f"[TTS DEBUG]   ✓ Train file uploaded to Cloud Storage: {train_gcs_path}")
+                else:
+                    print(f"[TTS DEBUG]   ⚠️  Train file upload returned local path (may have failed)")
+            except Exception as e:
+                print(f"[TTS DEBUG]   ⚠️  Warning: Failed to upload train file to Cloud Storage: {e}")
+                # Continue with local path
+            
+            # Upload test file
+            test_blob_name = f"train_test_splits/{test_filename}"
+            try:
+                test_gcs_path = storage_mgr.upload_file(
+                    test_path,
+                    storage_mgr.uploads_bucket,
+                    test_blob_name
+                )
+                if test_gcs_path.startswith('gs://'):
+                    final_test_path = test_gcs_path
+                    print(f"[TTS DEBUG]   ✓ Test file uploaded to Cloud Storage: {test_gcs_path}")
+                else:
+                    print(f"[TTS DEBUG]   ⚠️  Test file upload returned local path (may have failed)")
+            except Exception as e:
+                print(f"[TTS DEBUG]   ⚠️  Warning: Failed to upload test file to Cloud Storage: {e}")
+                # Continue with local path
+            
+            if final_train_path.startswith('gs://') and final_test_path.startswith('gs://'):
+                print(f"[TTS DEBUG] ✓ Both files successfully uploaded to Cloud Storage")
+            elif final_train_path.startswith('gs://') or final_test_path.startswith('gs://'):
+                print(f"[TTS DEBUG] ⚠️  Partial Cloud Storage upload (one file failed)")
+            else:
+                print(f"[TTS DEBUG] ℹ️  Using local file paths (Cloud Storage not configured or upload failed)")
+        else:
+            print(f"[TTS DEBUG] ℹ️  Cloud Storage not configured, using local file paths")
+    except ImportError:
+        print(f"[TTS DEBUG] ℹ️  Storage module not available, using local file paths")
+    except Exception as e:
+        print(f"[TTS DEBUG] ⚠️  Warning: Error checking Cloud Storage: {e}")
+        print(f"[TTS DEBUG]   Continuing with local file paths")
+    
+    return final_train_path, final_test_path
 
 
 def regenerate_split(df: pd.DataFrame, target: str, seed: int, test_size: float, method: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
