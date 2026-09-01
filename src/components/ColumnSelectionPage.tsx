@@ -1,5 +1,6 @@
 import ColumnPanels from './ColumnsPanel';
 import Navbar from './Navbar';
+import { authPost } from '../utils/api';
 import './SelectedColumnsPage.css';
 
 interface ColumnSelectionPageProps {
@@ -109,13 +110,14 @@ const ColumnSelectionPage = ({
                     let sampleData: Record<string, any[]> = {};
                     try {
                       // Fetch sample values from the uploaded CSV
-                      const sampleResp = await fetch('http://localhost:5000/api/csv-samples', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ columns: colsToClassify, sample_size: 20, record_id: recordId })
-                      });
-                      if (sampleResp.ok) {
-                        sampleData = await sampleResp.json();
+                      const sampleResult = await authPost('/api/csv-samples', {
+                        columns: colsToClassify,
+                        sample_size: 20,
+                        record_id: recordId
+                      }).catch(() => null);
+                      
+                      if (sampleResult) {
+                        sampleData = sampleResult;
                       } else {
                         console.warn('Could not fetch CSV samples, using empty data');
                         colsToClassify.forEach(col => {
@@ -130,12 +132,11 @@ const ColumnSelectionPage = ({
                       });
                     }
                     
-                    const resp = await fetch('http://localhost:5000/api/ai-classify-columns', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ columns: colsToClassify, sampleData, record_id: recordId })
+                    const data = await authPost('/api/ai-classify-columns', {
+                      columns: colsToClassify,
+                      sampleData,
+                      record_id: recordId
                     });
-                    const data = await resp.json();
                     if (data && !data.error) {
                       // Apply classifications via provided handler
                       let discreteCount = 0;

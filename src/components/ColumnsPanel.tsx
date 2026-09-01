@@ -1,4 +1,5 @@
 import Pagination from './Pagination';
+import { authPost } from '../utils/api';
 import './ColumnsPanel.css';
 import { RefObject } from 'react';
 
@@ -97,17 +98,13 @@ const ColumnPanels = ({
             assignRemainingToContinuous();
             // Persist a single record (create if none, else update)
             try {
-              await fetch('http://localhost:5000/api/upsert-single-record', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+              await authPost('/api/upsert-single-record', {
                   dataset_path: datasetPath,
                   discrete_columns: discreteColumns,
                   continuous_columns: remaining,
                   selected_columns: selectedForUnivariate,
                   target_variable: targetVariable,
                   record_id: recordId,
-                })
               });
             } catch (e) {
               // Non-blocking: keep UI responsive even if persistence fails

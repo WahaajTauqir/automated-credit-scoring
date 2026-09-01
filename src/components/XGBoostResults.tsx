@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { authPost } from '../utils/api';
 import './ModelResults.css';
 
 // ✅ Add this prop to enable callback to parent
@@ -66,12 +67,12 @@ interface XGBoostResults {
 
 const XGBoostResults: React.FC<XGBoostResultsProps> = ({
     selectedVariables,
-    allSelectedVariables,
+    allSelectedVariables: _allSelectedVariables,
     targetVariable,
     woeTransformedData,
-    onColumnSelect,
-    selectedColumn,
-    onToggleSelect,
+    onColumnSelect: _onColumnSelect,
+    selectedColumn: _selectedColumn,
+    onToggleSelect: _onToggleSelect,
     onGenerateScoreCard,
     generatingScoreCard,
     onGotoScoreCard,
@@ -120,18 +121,12 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
 
         setLoading(true);
         try {
-            const response = await fetch('http://localhost:5000/api/xgboost', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+            const data = await authPost('/api/xgboost', {
                     selected_variables: selectedVariables,
                     target: targetVariable,
                     woe_transformed_data: woeTransformedData,
                     record_id: recordId
-                })
             });
-
-            const data = await response.json();
             if (data.success) {
                 setResults(data);
 
@@ -643,7 +638,7 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
                         {onGenerateScoreCard && (
                             <div className="detail-card">
                                 <button
-                                    className="generate-scorecard-btn"
+                                    className="auto-monotonic-btn"
                                     onClick={() => {
                                         try {
                                             if (typeof onGotoScoreCard === 'function') onGotoScoreCard();
@@ -652,6 +647,7 @@ const XGBoostResults: React.FC<XGBoostResultsProps> = ({
                                     }}
                                     disabled={generatingScoreCard || selectedVariables.length === 0}
                                 >
+                                    <span className="btn-icon">⚡</span>
                                     {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                                 </button>
                     </div>

@@ -13,3 +13,7 @@ xgboost
 bcrypt
 PyJWT
 reportlab
+gunicorn>=21.2.0
+google-cloud-storage>=2.10.0
+huggingface-hub
+openai

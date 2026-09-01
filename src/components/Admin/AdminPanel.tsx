@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { authGet, authDelete } from '../../utils/api';
 import './AdminPanel.css';
 import { AnalysisRecord } from '../../types/analysis';
 import { buildBinningState, buildTypeLookup } from '../../utils/binning';
@@ -11,10 +12,7 @@ const AdminPanel: React.FC = () => {
 
   useEffect(() => {
     setLoading(true);
-    const token = localStorage.getItem('credit_scoring_auth_token');
-    const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
-    fetch('http://localhost:5000/api/records', { headers })
-      .then(res => res.json())
+    authGet('/api/records')
       .then(data => {
         setRecords(Array.isArray(data) ? data : []);
         setLoading(false);
@@ -26,26 +24,33 @@ const AdminPanel: React.FC = () => {
   const handleView = async (id: number) => {
     try {
       // Fetch the record with auth token
-      const token = localStorage.getItem('credit_scoring_auth_token');
-      const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
-      const res = await fetch(`http://localhost:5000/api/record/${id}`, { headers });
-      const data = await res.json();
+      const data = await authGet(`/api/record/${id}`);
       
       console.log('📊 Loaded record:', data);
       
-      // Infer columns from record data (much faster than loading entire CSV file)
-      const allCols = new Set<string>();
-      if (Array.isArray(data.discrete_columns)) {
-        data.discrete_columns.forEach((col: string) => allCols.add(col));
+      // Get columns from record data
+      // If all_columns is provided (for unclassified datasets), use that
+      // Otherwise, infer from discrete/continuous/selected columns
+      let columns: string[] = [];
+      if (Array.isArray(data.all_columns) && data.all_columns.length > 0) {
+        // Use columns from CSV (for unclassified datasets)
+        columns = data.all_columns;
+        console.log('✅ Using all_columns from CSV:', columns.length, 'columns');
+      } else {
+        // Infer columns from classified features
+        const allCols = new Set<string>();
+        if (Array.isArray(data.discrete_columns)) {
+          data.discrete_columns.forEach((col: string) => allCols.add(col));
+        }
+        if (Array.isArray(data.continuous_columns)) {
+          data.continuous_columns.forEach((col: string) => allCols.add(col));
+        }
+        if (Array.isArray(data.selected_columns)) {
+          data.selected_columns.forEach((col: string) => allCols.add(col));
+        }
+        columns = Array.from(allCols);
+        console.log('✅ Using columns from classified features:', columns.length, 'columns');
       }
-      if (Array.isArray(data.continuous_columns)) {
-        data.continuous_columns.forEach((col: string) => allCols.add(col));
-      }
-      if (Array.isArray(data.selected_columns)) {
-        data.selected_columns.forEach((col: string) => allCols.add(col));
-      }
-      const columns = Array.from(allCols);
-      console.log('✅ Using columns from record:', columns.length, 'columns');
       
       const typeLookup = buildTypeLookup(
         data.discrete_columns || [],
@@ -81,14 +86,11 @@ const AdminPanel: React.FC = () => {
   // Delete record
   const handleDelete = (id: number) => {
     if (!window.confirm('Are you sure you want to delete this record?')) return;
-    const token = localStorage.getItem('credit_scoring_auth_token');
-    const headers: HeadersInit = token ? { 'Authorization': `Bearer ${token}` } : {};
-    fetch(`http://localhost:5000/api/record/${id}`, { method: 'DELETE', headers })
-      .then(res => {
-        if (res.ok) {
+    authDelete(`/api/record/${id}`)
+      .then(() => {
           setRecords(records => records.filter(r => r.id !== id));
-        }
-      });
+      })
+      .catch(err => console.error('Failed to delete record:', err));
   };
 
   return (

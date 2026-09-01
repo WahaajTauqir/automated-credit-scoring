@@ -1,5 +1,7 @@
 import { useLocation } from 'react-router-dom';
 import { useEffect, useState, useRef, useCallback, useMemo, memo } from 'react';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
 import LogisticRegressionResults from './LogisticRegressionResults';
 import Navbar from './Navbar';
 import RandomForestResults from './RandomForestResults';
@@ -8,6 +10,7 @@ import StackingResults from './StackingResults';
 import { DiscreteValuesDropdown } from './DiscreteValues';
 import ColumnPanels from './ColumnsPanel';
 import PreprocessingDetails from './PreprocessingDetails';
+import { authPost, authGet } from '../utils/api';
 // import WoeIvResults from './WoeIvResults';
 import './SelectedColumnsPage.css';
 import { buildBinningState, buildTypeLookup, normalizeBinArray, prepareBinMetricsPayload } from '../utils/binning';
@@ -54,19 +57,25 @@ interface AutoBinningCardProps {
   woeData: any;
   isLoading: boolean;
   isSelected: boolean;
+  isSelectedForExport: boolean;
   onToggle: (col: string) => void;
+  onToggleExport: (col: string) => void;
   onConfigureManually: (col: string) => void;
   continuousColumns: string[];
+  cardRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 const AutoBinningCard = memo(({ 
   col, 
   woeData, 
   isLoading, 
-  isSelected, 
+  isSelected,
+  isSelectedForExport,
   onToggle,
+  onToggleExport,
   onConfigureManually,
-  continuousColumns 
+  continuousColumns,
+  cardRef
 }: AutoBinningCardProps) => {
   const woeStats: NormalizedBin[] = woeData?.stats ?? [];
   const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
@@ -91,7 +100,15 @@ const AutoBinningCard = memo(({
   const varTypeTag = isContinuous ? 'continuous' : 'discrete';
 
   return (
-    <div className="auto-binning-card">
+    <div 
+      className={`auto-binning-card ${isSelectedForExport ? 'selected-for-export' : ''}`} 
+      ref={(el) => {
+        if (cardRef && 'current' in cardRef) {
+          (cardRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+        }
+      }}
+      data-column={col}
+    >
       <div className="auto-binning-card-header">
         <input
           type="checkbox"
@@ -104,6 +121,17 @@ const AutoBinningCard = memo(({
           aria-label={`Select ${col} for modeling`}
         />
         <h4>{col}</h4>
+        <input
+          type="checkbox"
+          className="export-checkbox"
+          checked={isSelectedForExport}
+          onChange={(e) => {
+            e.stopPropagation();
+            onToggleExport(col);
+          }}
+          title="Select for export"
+          aria-label={`Select ${col} for export`}
+        />
         <span className={`var-type-tag ${varTypeTag}`}>
           {varTypeTag}
         </span>
@@ -178,6 +206,7 @@ const AutoBinningCard = memo(({
   return (
     prevProps.col === nextProps.col &&
     prevProps.isSelected === nextProps.isSelected &&
+    prevProps.isSelectedForExport === nextProps.isSelectedForExport &&
     prevProps.isLoading === nextProps.isLoading &&
     woeDataEqual &&
     prevProps.continuousColumns === nextProps.continuousColumns
@@ -321,11 +350,13 @@ const SelectedColumnsPage = () => {
   const [testScoreResults, setTestScoreResults] = useState<any[] | null>(null);
   const [testScoreKSData, setTestScoreKSData] = useState<{ ks_stat: number | null; ks_threshold: number | null; ks_curve: any[] | null } | null>(null);
   const [testScoreRiskBands, setTestScoreRiskBands] = useState<any[] | null>(null);
-  const [createRangesLoading, setCreateRangesLoading] = useState(false);
+
   const [trainingScoreResults, setTrainingScoreResults] = useState<any[] | null>(null);
   const [trainingScoreKSData, setTrainingScoreKSData] = useState<{ ks_stat: number | null; ks_threshold: number | null; ks_curve: any[] | null } | null>(null);
   const [trainingScoreRiskBands, setTrainingScoreRiskBands] = useState<any[] | null>(null);
   const [currentDataSource, setCurrentDataSource] = useState<'training' | 'test'>('test'); // Track which data source is currently displayed
+  const [isRiskLabelsInverted, setIsRiskLabelsInverted] = useState(false); // Track if risk labels are inverted (higher score = higher risk)
+  const [invertScoreRange, setInvertScoreRange] = useState(false); // If true: 600-0 range (higher score = higher risk)
   const [generatingScoreCard, setGeneratingScoreCard] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedModel, setSelectedModel] = useState<string>('stacking'); // Default to stacking ensemble
@@ -341,6 +372,9 @@ const SelectedColumnsPage = () => {
   const [isLoadingCoarseBins, setIsLoadingCoarseBins] = useState(false);
   const [isLoadingAllAutoMonotonic, setIsLoadingAllAutoMonotonic] = useState(false);
   const [isLoadingAIClassification, setIsLoadingAIClassification] = useState(false);
+  const [selectedForExport, setSelectedForExport] = useState<string[]>([]); // Charts selected for export
+  const [isExportingCharts, setIsExportingCharts] = useState(false); // Export loading state
+  const chartCardRefs = useRef<Record<string, HTMLDivElement | null>>({}); // Refs for chart cards
   const updateLocalWoeState = useCallback(
     (col: string, payload?: { iv?: number; stats?: any[]; bins?: any[] }) => {
       if (!payload) {
@@ -671,17 +705,13 @@ const SelectedColumnsPage = () => {
     // Persist change to backend (non-blocking)
     (async () => {
       try {
-        await fetch('http://localhost:5000/api/upsert-single-record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        await authPost('/api/upsert-single-record', {
             dataset_path: datasetPath,
             discrete_columns: computedDiscrete,
             continuous_columns: computedContinuous,
             selected_columns: selectedForUnivariate,
             target_variable: targetVariable,
             record_id: recordId
-          })
         });
       } catch (err) {
         console.error('Failed to persist type change:', err);
@@ -697,17 +727,13 @@ const SelectedColumnsPage = () => {
     // Persist to backend
     (async () => {
       try {
-        await fetch('http://localhost:5000/api/upsert-single-record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        await authPost('/api/upsert-single-record', {
             dataset_path: datasetPath,
             discrete_columns: discreteColumns,
             continuous_columns: remaining,
             selected_columns: selectedForUnivariate,
             target_variable: targetVariable,
             record_id: recordId
-          })
         });
       } catch (err) {
         console.error('Failed to persist remaining columns:', err);
@@ -790,17 +816,7 @@ const SelectedColumnsPage = () => {
       }
 
       // Fetch selected features from database
-      const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' }
-      });
-
-      if (!featuresResp.ok) {
-        alert('Failed to fetch selected columns from database.');
-        return;
-      }
-
-      const featuresData = await featuresResp.json();
+      const featuresData = await authGet(`/api/dataset/${recordId}/features`);
       const selectedFeatureNames = featuresData
         .filter((f: any) => f.selected === true)
         .map((f: any) => f.name);
@@ -811,19 +827,14 @@ const SelectedColumnsPage = () => {
       }
 
       // Update the record with selected columns
-      const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/upsert-single-record', {
           dataset_path: datasetPath,
           discrete_columns: discreteColumns,
           continuous_columns: continuousColumns,
           selected_columns: selectedFeatureNames,
           target_variable: targetVariable,
           record_id: recordId
-        }),
       });
-      const data = await resp.json();
       if (!data.error) {
         if (data.id) setRecordId(data.id);
         setSelectedColumns(selectedFeatureNames);
@@ -831,19 +842,14 @@ const SelectedColumnsPage = () => {
         // Create train/test split (preprocess first, then split) - exactly as before
         console.log('[TTS] Creating train/test split when moving from Data Preprocessing to Binning...');
         try {
-          const ttsResponse = await fetch('http://localhost:5000/api/train-test-split', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+          const ttsData = await authPost('/api/train-test-split', {
               dataset_id: data.id || recordId,
               test_size: DEFAULT_TEST_SIZE,
               preprocess_first: true, // Preprocess before split (exactly as before)
               force_recalculate: false // Use existing split if available, but ensure it's preprocessed
-            })
           });
 
-          if (ttsResponse.ok) {
-            const ttsData = await ttsResponse.json();
+          if (ttsData) {
             if (ttsData.success) {
               console.log('[TTS] ✅ Train/test split created successfully:', ttsData.split_info);
               if (!ttsData.is_existing) {
@@ -858,9 +864,8 @@ const SelectedColumnsPage = () => {
               showNotification('Warning: Train/test split creation had issues. Check console for details.');
             }
           } else {
-            const errorData = await ttsResponse.json();
-            console.error('[TTS] ❌ Failed to create train/test split:', errorData.error || 'Unknown error');
-            showNotification(`Error creating train/test split: ${errorData.error || 'Unknown error'}`);
+            console.error('[TTS] ❌ Failed to create train/test split: No response data');
+            showNotification('Error creating train/test split: No response data');
           }
         } catch (ttsError) {
           console.error('[TTS] ❌ Exception creating train/test split:', ttsError);
@@ -879,16 +884,11 @@ const SelectedColumnsPage = () => {
   // Fetch target counts
   const fetchTargetCounts = async (col: string) => {
     try {
-      const res = await fetch('http://localhost:5000/api/target-distribution', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/target-distribution', {
           column: col,
           record_id: recordId,
           dataset_path: datasetPath || navDatasetPath || undefined,
-        }),
       });
-      const data = await res.json();
       if (!data.error) setTargetCounts(data);
     } catch (err) {
       console.error('Failed to fetch target counts:', err);
@@ -905,17 +905,13 @@ const SelectedColumnsPage = () => {
     (async () => {
       try {
         // Persist target variable
-        await fetch('http://localhost:5000/api/upsert-single-record', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        await authPost('/api/upsert-single-record', {
             dataset_path: datasetPath,
             discrete_columns: discreteColumns,
             continuous_columns: continuousColumns,
             selected_columns: selectedForUnivariate,
             target_variable: targetVariable,
             record_id: recordId
-          })
         });
         console.log('[TARGET] ✅ Target variable persisted to backend');
       } catch (err) {
@@ -961,10 +957,7 @@ const SelectedColumnsPage = () => {
       // Map frontend model type to backend model type
       const backendModelType = modelType === 'stacking' ? 'stacking_ensemble' : modelType;
 
-      const response = await fetch('http://localhost:5000/api/apply-scorecard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/apply-scorecard', {
           selected_variables: selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling,
           target: targetVariable,
           woe_transformed_data: Object.fromEntries(
@@ -972,11 +965,9 @@ const SelectedColumnsPage = () => {
           ),
           model_results: modelResults,
           model_type: backendModelType,
-          record_id: recordId
-        })
+          record_id: recordId,
+          invert_score_range: invertScoreRange  // Pass the score range inversion option
       });
-
-      const data = await response.json();
       if (data.success && data.results) {
         setTestScoreResults(data.results);
         // Store KS data if available
@@ -1003,100 +994,19 @@ const SelectedColumnsPage = () => {
     }
   };
 
-  // Create ranges from training data
-  const handleCreateRanges = async (modelType: string = selectedModelForScorecard) => {
-    setCreateRangesLoading(true);
-    setTrainingScoreResults(null);
-    setTrainingScoreRiskBands(null);
-    setTrainingScoreKSData(null);
-    try {
-      // Get the appropriate model results based on the selected model
-      let modelResults: any = null;
 
-      switch (modelType) {
-        case 'logistic':
-          modelResults = logisticResults;
-          break;
-        case 'random_forest':
-          modelResults = randomForestResults;
-          break;
-        case 'xgboost':
-          modelResults = xgboostResults;
-          break;
-        case 'stacking':
-          modelResults = stackingResults;
-          break;
-        default:
-          modelResults = logisticResults;
-      }
-
-      if (!modelResults) {
-        alert(`No results available for ${modelType}. Please run the model first.`);
-        setCreateRangesLoading(false);
-        return;
-      }
-
-      // Map frontend model type to backend model type
-      const backendModelType = modelType === 'stacking' ? 'stacking_ensemble' : modelType;
-
-      const response = await fetch('http://localhost:5000/api/apply-scorecard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          selected_variables: selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling,
-          target: targetVariable,
-          woe_transformed_data: Object.fromEntries(
-            Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
-          ),
-          model_results: modelResults,
-          model_type: backendModelType,
-          record_id: recordId,
-          data_source: 'training'  // Use training data instead of test
-        })
-      });
-
-      const data = await response.json();
-      if (data.success && data.results) {
-        setTrainingScoreResults(data.results);
-        // Store KS data if available
-        if (data.ks_stat !== undefined && data.ks_curve) {
-          setTrainingScoreKSData({
-            ks_stat: data.ks_stat,
-            ks_threshold: data.ks_threshold || null,
-            ks_curve: data.ks_curve
-          });
-        }
-        // Store risk bands from training data
-        if (data.risk_bands && data.risk_bands.length > 0) {
-          setTrainingScoreRiskBands(data.risk_bands);
-        }
-        setCurrentDataSource('training');
-        showNotification(`Score card applied to training data using ${modelType} model`);
-      } else {
-        alert('Error creating ranges: ' + (data.error || 'Unknown error'));
-      }
-    } catch (err) {
-      alert('Error creating ranges: ' + err);
-    } finally {
-      setCreateRangesLoading(false);
-    }
-  };
   const calculateAllBinMetrics = async (columnName: string, bins: NormalizedBin[]) => {
     if (!bins || bins.length === 0) {
       return null;
     }
     try {
-      const response = await fetch('http://localhost:5000/api/calculate-bin-metrics', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bins: prepareBinMetricsPayload(bins) })
+      const data = await authPost('/api/calculate-bin-metrics', {
+        bins: prepareBinMetricsPayload(bins)
       });
 
-      if (!response.ok) {
+      if (!data) {
         return null;
       }
-
-      const data = await response.json();
 
       if (data?.success) {
         setBinScoringMetrics(prev => ({
@@ -1159,6 +1069,9 @@ const SelectedColumnsPage = () => {
   };
   const generateScoreCard = async () => {
     setGeneratingScoreCard(true);
+    setTrainingScoreResults(null);
+    setTrainingScoreRiskBands(null);
+    setTrainingScoreKSData(null);
     try {
       // Get the appropriate model results based on the selected model
       let modelResults: any = null;
@@ -1207,10 +1120,7 @@ const SelectedColumnsPage = () => {
       // Map frontend model type to backend model type
       const backendModelType = selectedModelForScorecard === 'stacking' ? 'stacking_ensemble' : selectedModelForScorecard;
 
-      const response = await fetch('http://localhost:5000/api/generate-scorecard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/generate-scorecard', {
           selected_variables: validVariables,
           target: targetVariable,
           woe_transformed_data: Object.fromEntries(
@@ -1218,18 +1128,15 @@ const SelectedColumnsPage = () => {
           ),
           model_type: backendModelType,
           model_results: modelResults,
-          record_id: recordId
-        })
+          record_id: recordId,
+          invert_score_range: invertScoreRange  // Pass the score range inversion option
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to generate scorecard' }));
-        alert(`Error generating score card: ${errorData.error || 'Unknown error'}`);
+      if (!data) {
+        alert(`Error generating score card: Failed to generate scorecard`);
         setGeneratingScoreCard(false);
         return;
       }
-
-      const data = await response.json();
       if (data.success) {
         setScoreCardData(data);
         if (data.scorecard_bins) {
@@ -1238,6 +1145,37 @@ const SelectedColumnsPage = () => {
           showNotification(`Score card generated with ${totalBins} bins across ${varsToUse.length} variables using ${selectedModelForScorecard} model`);
         } else {
           showNotification(`Score card generated successfully using ${selectedModelForScorecard} model!`);
+        }
+
+        // After scorecard generation, create ranges from training data
+        const rangeData = await authPost('/api/apply-scorecard', {
+            selected_variables: selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling,
+            target: targetVariable,
+            woe_transformed_data: Object.fromEntries(
+              Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
+            ),
+            model_results: modelResults,
+            model_type: backendModelType,
+            record_id: recordId,
+            data_source: 'training',  // Use training data instead of test
+            invert_score_range: invertScoreRange  // Pass the score range inversion option
+        });
+        
+        if (rangeData.success && rangeData.results) {
+          setTrainingScoreResults(rangeData.results);
+          // Store KS data if available
+          if (rangeData.ks_stat !== undefined && rangeData.ks_curve) {
+            setTrainingScoreKSData({
+              ks_stat: rangeData.ks_stat,
+              ks_threshold: rangeData.ks_threshold || null,
+              ks_curve: rangeData.ks_curve
+            });
+          }
+          // Store risk bands from training data
+          if (rangeData.risk_bands && rangeData.risk_bands.length > 0) {
+            setTrainingScoreRiskBands(rangeData.risk_bands);
+          }
+          setCurrentDataSource('training');
         }
       } else {
         alert(`Error generating score card: ${data.error}`);
@@ -1254,6 +1192,84 @@ const SelectedColumnsPage = () => {
       generateScoreCard();
     }, 50);
   };
+
+  const handleDownloadScorecard = () => {
+    if (!scoreCardData || !scoreCardData.scorecard_bins) {
+      alert('No scorecard data available to download');
+      return;
+    }
+
+    try {
+      // Prepare CSV data
+      const csvRows: string[] = [];
+      
+      // Header row
+      const headers = ['Bin #', 'Variable', 'Bin Range', 'WOE', 
+        (selectedModelForScorecard === 'logistic' || selectedModelForScorecard === 'stacking') ? 'Coefficient (β)' : 'Feature Importance',
+        'Score'];
+      csvRows.push(headers.join(','));
+
+      // Group bins by variable
+      const grouped: Record<string, any[]> = {};
+      const varsToUse = selectedForFinalModeling.length > 0 ? selectedForFinalModeling : selectedForModeling;
+      
+      scoreCardData.scorecard_bins.forEach((b: any) => {
+        if (varsToUse.includes(b.variable)) {
+          grouped[b.variable] = grouped[b.variable] || [];
+          grouped[b.variable].push(b);
+        }
+      });
+
+      // Add data rows
+      Object.keys(grouped).sort().forEach(variable => {
+        grouped[variable].forEach((bin: any, index: number) => {
+          const row = [
+            index + 1,
+            `"${variable}"`,
+            `"${bin.bin_range || bin.range || ''}"`,
+            bin.woe !== undefined ? bin.woe.toFixed(4) : '',
+            bin.coefficient !== undefined ? bin.coefficient.toFixed(4) : 
+            bin.feature_importance !== undefined ? bin.feature_importance.toFixed(4) : '',
+            bin.score !== undefined ? bin.score.toFixed(2) : ''
+          ];
+          csvRows.push(row.join(','));
+        });
+      });
+
+      // Add score parameters section
+      if (scoreCardData.score_parameters) {
+        csvRows.push('');
+        csvRows.push('Score Parameters');
+        csvRows.push(`Factor,${scoreCardData.score_parameters.factor?.toFixed(4) || ''}`);
+        csvRows.push(`Offset,${scoreCardData.score_parameters.offset?.toFixed(4) || ''}`);
+        const scoreRangeDisplay = scoreCardData.score_parameters.invert_score_range 
+          ? `${scoreCardData.score_parameters.max_score || ''} - ${scoreCardData.score_parameters.min_score || ''}`
+          : `${scoreCardData.score_parameters.min_score || ''} - ${scoreCardData.score_parameters.max_score || ''}`;
+        csvRows.push(`Score Range,${scoreRangeDisplay}`);
+        csvRows.push(`Score Interpretation,${scoreCardData.score_parameters.invert_score_range ? 'Higher Score = Higher Risk' : 'Higher Score = Lower Risk'}`);
+      }
+
+      // Create CSV content
+      const csvContent = csvRows.join('\n');
+      
+      // Create blob and download
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `scorecard_${selectedModelForScorecard}_${new Date().toISOString().split('T')[0]}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      
+      showNotification('Scorecard downloaded successfully');
+    } catch (error) {
+      console.error('Error downloading scorecard:', error);
+      alert('Failed to download scorecard. Please try again.');
+    }
+  };
+
   const runFineBinPassThrough = async (
     col: string,
     varType: string,
@@ -1263,23 +1279,20 @@ const SelectedColumnsPage = () => {
       return null;
     }
     try {
-      const res = await fetch('http://localhost:5000/api/fine-bin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/fine-bin', {
           variable: col,
           target: targetVariable,
           type: varType,
           bin_merges: mergesOverride || {},
           record_id: recordId,
           dashboard_selected_columns: Array.from(selectedForModeling),
-        }),
+      }).catch(err => {
+        console.warn(`Fine-bin fallback failed for ${col}:`, err);
+        return null;
       });
-      if (!res.ok) {
-        console.warn(`Fine-bin fallback failed for ${col}:`, await res.text());
+      if (!data) {
         return null;
       }
-      const data = await res.json();
       if (!data.success || data.error) {
         console.warn(`Fine-bin fallback response for ${col} indicated failure`, data);
         return null;
@@ -1325,10 +1338,8 @@ const SelectedColumnsPage = () => {
 
     // First attempt: hydrate directly from persisted fine-bin cache (no recomputation)
     try {
-      const cacheResp = await fetch(`http://localhost:5000/api/finebin-cache/${recordId}/${encodeURIComponent(col)}`);
-      if (cacheResp.ok) {
-        const cacheData = await cacheResp.json();
-        if (cacheData?.success && Array.isArray(cacheData.stats) && cacheData.stats.length > 0) {
+      const cacheData = await authGet(`/api/finebin-cache/${recordId}/${encodeURIComponent(col)}`);
+      if (cacheData?.success && Array.isArray(cacheData.stats) && cacheData.stats.length > 0) {
           const normalizedStats = normalizeBinArray(cacheData.stats);
           setFineBinResults((prev) => ({ ...prev, [col]: normalizedStats }));
           const mergesFromCache: Record<string, any[]> = cacheData.bin_merges || {};
@@ -1355,19 +1366,13 @@ const SelectedColumnsPage = () => {
             hydrated: true,
           };
         }
-      }
     } catch (cacheError) {
       console.warn(`Fine-bin cache hydrate failed for ${col}:`, cacheError);
     }
 
     // Fallback: pull merge blueprint then recompute via fine-bin endpoint
     try {
-      const resp = await fetch(`http://localhost:5000/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
-      if (!resp.ok) {
-        console.error(`Failed to load finebin details for ${col}:`, resp.status);
-        return { merges: undefined, hydrated: false };
-      }
-      const details = await resp.json();
+      const details = await authGet(`/api/finebin-details/${recordId}/${encodeURIComponent(col)}`);
       if (!Array.isArray(details) || details.length === 0) {
         return { merges: undefined, hydrated: false };
       }
@@ -1393,8 +1398,7 @@ const SelectedColumnsPage = () => {
     if (!recordId) return;
     try {
       console.log(`[SelectedColumnsPage] 🔄 Loading saved data for record ${recordId}`);
-      const recordResp = await fetch(`http://localhost:5000/api/record/${recordId}`);
-      const recordData = await recordResp.json();
+      const recordData = await authGet(`/api/record/${recordId}`);
 
       // CRITICAL: Load ALL record-specific data to ensure complete isolation
       // Load dataset path from record
@@ -1463,10 +1467,8 @@ const SelectedColumnsPage = () => {
       }
 
       try {
-        const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-        if (featuresResp.ok) {
-          const featureList = await featuresResp.json();
-          if (Array.isArray(featureList)) {
+        const featureList = await authGet(`/api/dataset/${recordId}/features`);
+        if (Array.isArray(featureList)) {
             const modelReadyFromDb = featureList
               .filter((feature: any) => feature?.model_ready)
               .map((feature: any) => String(feature.name).trim())
@@ -1483,7 +1485,6 @@ const SelectedColumnsPage = () => {
               finalSelections = finalSelectedFromDb;
             }
           }
-        }
       } catch (err) {
         console.error('Failed to load feature selections from database:', err);
       }
@@ -1527,18 +1528,12 @@ const SelectedColumnsPage = () => {
         await new Promise(resolve => setTimeout(resolve, 300));
       } else {
         // No saved data - calculate from scratch and store
-        const res = await fetch('http://localhost:5000/api/univariate-analysis', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const data = await authPost('/api/univariate-analysis', {
             discrete: varType === 'discrete' ? [col] : [],
             continuous: varType === 'continuous' ? [col] : [],
             target: targetVariable,
             record_id: recordId, // Pass record_id to persist results
-          }),
         });
-        
-        const data = await res.json();
         const coarseStats = normalizeBinArray(data[col]?.stats || data[col] || []);
         setUnivariateResults((prev) => ({ ...prev, [col]: { ...(data[col] || {}), stats: coarseStats } }));
         setCoarseBinResults((prev) => ({ ...prev, [col]: coarseStats }));
@@ -1622,17 +1617,12 @@ const SelectedColumnsPage = () => {
 
     try {
       // Re-run coarse binning to get latest stats
-      const coarseRes = await fetch('http://localhost:5000/api/univariate-analysis', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const coarseData = await authPost('/api/univariate-analysis', {
           discrete: varType === 'discrete' ? [col] : [],
           continuous: varType === 'continuous' ? [col] : [],
           target: targetVariable,
           record_id: recordId,
-        }),
       });
-      const coarseData = await coarseRes.json();
       const coarseStats = normalizeBinArray(coarseData[col]?.stats || coarseData[col] || []);
       const updatedUnivariate = {
         ...univariateResults,
@@ -1643,19 +1633,14 @@ const SelectedColumnsPage = () => {
       setCoarseBinResults(updatedCoarse);
 
       // Run fine binning
-      const fineRes = await fetch('http://localhost:5000/api/fine-bin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const fineData = await authPost('/api/fine-bin', {
           variable: col,
           target: targetVariable,
           type: varType,
           bin_merges: payloadMerges,
           record_id: recordId,
           dashboard_selected_columns: selectedForModeling,
-        }),
       });
-      const fineData = await fineRes.json();
 
       if (!fineData.success) throw new Error(fineData.error);
 
@@ -1739,30 +1724,20 @@ const SelectedColumnsPage = () => {
     delete newHistory[keyToRemove];
 
     // Re-run fine binning
-    const res = await fetch('http://localhost:5000/api/fine-bin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        variable: col,
-        target: targetVariable,
-        type: varType,
-        bin_merges: newHistory,
-        record_id: recordId,
-        dashboard_selected_columns: selectedForModeling,
-      }),
-    });
-
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({ error: 'Failed to unmerge fine bin' }));
-      showNotification(`Error: ${errorData.error || 'Failed to unmerge fine bin'}`);
-      return;
-    }
-
-    const data = await res.json();
-    if (!data.success) {
-      showNotification(`Error: ${data.error || 'Fine binning returned no results'}`);
-      return;
-    }
+    try {
+      const data = await authPost('/api/fine-bin', {
+          variable: col,
+          target: targetVariable,
+          type: varType,
+          bin_merges: newHistory,
+          record_id: recordId,
+          dashboard_selected_columns: selectedForModeling,
+      });
+      
+      if (!data.success) {
+        showNotification(`Error: ${data.error || 'Fine binning returned no results'}`);
+        return;
+      }
 
     const normalizedStats = normalizeBinArray(data.stats || []);
     const updatedFine = { ...fineBinResults, [col]: normalizedStats };
@@ -1790,29 +1765,22 @@ const SelectedColumnsPage = () => {
     });
 
     showNotification(`Unmerged '${mergedLabel}'`);
+    } catch (err) {
+      console.error('Error unmerging fine bin:', err);
+      showNotification(`Error: ${err instanceof Error ? err.message : 'Failed to unmerge fine bin'}`);
+    }
   };
   const resetFineBinning = async (col: string) => {
     const varType = (continuousColumns || []).includes(col) ? 'continuous' : 'discrete';
 
     try {
       // Call backend API to reset binning and delete all binning data including merged_bins
-      const resetRes = await fetch('http://localhost:5000/api/reset-bins', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const resetData = await authPost('/api/reset-bins', {
           variable: col,
           target: targetVariable,
           type: varType,
           record_id: recordId,
-        }),
       });
-
-      if (!resetRes.ok) {
-        const errorData = await resetRes.json().catch(() => ({ error: 'Failed to reset binning' }));
-        throw new Error(errorData.error || 'Failed to reset binning');
-      }
-
-      const resetData = await resetRes.json();
       
       // Reset UI state
       const clearedFine = { ...fineBinResults, [col]: [] };
@@ -1877,10 +1845,7 @@ const SelectedColumnsPage = () => {
       }
 
       // Call the auto-monotonic-binning API
-      const response = await fetch('http://localhost:5000/api/auto-monotonic-binning', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/auto-monotonic-binning', {
           variable: col,
           target: targetVariable,
           type: varType,
@@ -1888,10 +1853,7 @@ const SelectedColumnsPage = () => {
           method: 'exhaustive',  // Use exhaustive algorithm
           record_id: recordId,
           dashboard_selected_columns: selectedForModeling,
-        }),
       });
-
-      const data = await response.json();
 
       if (!data.success) {
         throw new Error(data.error || 'Auto-binning failed');
@@ -1948,10 +1910,8 @@ const SelectedColumnsPage = () => {
         
         try {
           // Fetch sorted features for reordering
-          const sortResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features-sorted`);
-          if (sortResponse.ok) {
-            const sortData = await sortResponse.json();
-            const sortedFeatureNames = sortData.sorted_feature_names || [];
+          const sortData = await authGet(`/api/dataset/${recordId}/features-sorted`);
+          const sortedFeatureNames = sortData.sorted_feature_names || [];
             
             if (sortedFeatureNames.length > 0) {
               // Reorder selectedColumns to match the sorted order
@@ -1961,17 +1921,14 @@ const SelectedColumnsPage = () => {
               const reorderedColumns = [...sortedSelected, ...unsortedSelected];
               setSelectedColumns(reorderedColumns);
             }
-          }
           
           // Fetch features to sync model_ready checkboxes (with retry if needed)
           // FIX: Retry once if model_ready status doesn't match response
           let retryCount = 0;
           const maxRetries = 2;
           while (retryCount < maxRetries) {
-            const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-            if (featuresResponse.ok) {
-              const featureList = await featuresResponse.json();
-              if (Array.isArray(featureList)) {
+            const featureList = await authGet(`/api/dataset/${recordId}/features`);
+            if (Array.isArray(featureList)) {
                 const currentFeature = featureList.find((f: any) => f.name === col);
                 // FIX: Only select features that are BOTH model_ready AND monotonic
                 // Check is_monotonic from fine binning metadata
@@ -2013,7 +1970,6 @@ const SelectedColumnsPage = () => {
                 }
                 break; // Exit retry loop
               }
-            }
             retryCount++;
             if (retryCount < maxRetries) {
               await new Promise(resolve => setTimeout(resolve, 500));
@@ -2052,13 +2008,7 @@ const SelectedColumnsPage = () => {
     if (!recordId) return;
     
     try {
-      const response = await fetch(`http://localhost:5000/api/dataset/${recordId}/features-sorted`);
-      if (!response.ok) {
-        console.error('Failed to fetch sorted features');
-        return;
-      }
-      
-      const data = await response.json();
+      const data = await authGet(`/api/dataset/${recordId}/features-sorted`);
       const sortedFeatureNames = data.sorted_feature_names || [];
       
       if (sortedFeatureNames.length > 0) {
@@ -2082,10 +2032,8 @@ const SelectedColumnsPage = () => {
     if (!recordId) return;
     
     try {
-      const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-      if (featuresResponse.ok) {
-        const featureList = await featuresResponse.json();
-        if (Array.isArray(featureList)) {
+      const featureList = await authGet(`/api/dataset/${recordId}/features`);
+      if (Array.isArray(featureList)) {
           const modelReadyFeatures = featureList
             .filter((feature: any) => feature?.model_ready)
             .map((feature: any) => String(feature.name).trim())
@@ -2101,7 +2049,6 @@ const SelectedColumnsPage = () => {
           setSelectedForModeling([]);
           console.log('[syncModelReadyCheckboxes] Feature response not array; cleared selections');
         }
-      }
     } catch (err) {
       console.error('Error syncing model_ready checkboxes:', err);
     }
@@ -2112,24 +2059,15 @@ const SelectedColumnsPage = () => {
     if (!recordId) return;
     
     try {
-      const response = await fetch(`http://localhost:5000/api/dataset/${recordId}/mark-monotonic-as-model-ready`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const data = await authPost(`/api/dataset/${recordId}/mark-monotonic-as-model-ready`, {});
       
-      if (response.ok) {
-        const data = await response.json();
-        if (data.success) {
-          console.log(`[markMonotonicAsModelReady] Successfully marked ${data.count} monotonic features as model_ready:`, data.features);
-          if (data.count === 0) {
-            console.warn(`[markMonotonicAsModelReady] No monotonic features found to mark as model_ready`);
-          }
-        } else {
-          console.error(`[markMonotonicAsModelReady] Failed:`, data.error || data.message);
+      if (data.success) {
+        console.log(`[markMonotonicAsModelReady] Successfully marked ${data.count} monotonic features as model_ready:`, data.features);
+        if (data.count === 0) {
+          console.warn(`[markMonotonicAsModelReady] No monotonic features found to mark as model_ready`);
         }
       } else {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        console.error(`[markMonotonicAsModelReady] HTTP error ${response.status}:`, errorData);
+        console.error(`[markMonotonicAsModelReady] Failed:`, data.error || data.message);
       }
     } catch (err) {
       console.error('[markMonotonicAsModelReady] Error marking monotonic features as model_ready:', err);
@@ -2277,18 +2215,12 @@ const SelectedColumnsPage = () => {
         );
 
         if (discreteCols.length > 0 || continuousCols.length > 0) {
-          const res = await fetch('http://localhost:5000/api/univariate-analysis', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+          const data = await authPost('/api/univariate-analysis', {
               discrete: discreteCols,
               continuous: continuousCols,
               target: targetVariable,
               record_id: recordId,
-            }),
           });
-
-          const data = await res.json();
           
           // Update coarse bin results for all columns
           const updatedCoarse: Record<string, NormalizedBin[]> = { ...coarseBinResults };
@@ -2335,10 +2267,7 @@ const SelectedColumnsPage = () => {
       const payloadSelectedColumns = overrides.selectedColumns ?? selectedColumns ?? [];
       const payloadDashboard = overrides.dashboardSelectedColumns ?? selectedForModeling ?? [];
 
-      const upsertResp = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const up = await authPost('/api/upsert-single-record', {
           dataset_path: datasetPath || undefined,
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
@@ -2346,19 +2275,13 @@ const SelectedColumnsPage = () => {
           dashboard_selected_columns: payloadDashboard,
           target_variable: targetVariable || '',
           record_id: recordId,
-        }),
       });
-      const up = await upsertResp.json();
       if (!up.error && typeof up.id !== 'undefined') {
         current = up.id;
         setRecordId(up.id);
       }
       if (current) {
-        await fetch('http://localhost:5000/api/finebin-details', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ record_id: current, column_name: col, bin_merges: merges }),
-        });
+        await authPost('/api/finebin-details', { record_id: current, column_name: col, bin_merges: merges });
       }
     } catch (e) {
 
@@ -2370,10 +2293,7 @@ const SelectedColumnsPage = () => {
     forceSync = false
   ): Promise<number | undefined> => {
     const performPersist = async () => {
-      const resp = await fetch('http://localhost:5000/api/upsert-single-record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/upsert-single-record', {
           dataset_path: datasetPath || undefined,
           discrete_columns: discreteColumns || [],
           continuous_columns: continuousColumns || [],
@@ -2381,9 +2301,7 @@ const SelectedColumnsPage = () => {
           dashboard_selected_columns: newSelection,
           target_variable: targetVariable || '',
           record_id: recordId || undefined,
-        }),
       });
-      const data = await resp.json();
       if (!data.error && data.id) {
         setRecordId(data.id);
         return data.id as number;
@@ -2422,14 +2340,10 @@ const SelectedColumnsPage = () => {
     }
     if (!datasetId) return undefined;
     try {
-      await fetch('http://localhost:5000/api/update-feature-modeling', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await authPost('/api/update-feature-modeling', {
           feature_name: col,
           record_id: datasetId,
           is_selected: shouldSelect,
-        }),
       });
     } catch (err) {
       console.error('Failed to update feature modeling:', err);
@@ -2449,14 +2363,10 @@ const SelectedColumnsPage = () => {
     }
     if (!datasetId) return;
     try {
-      await fetch('http://localhost:5000/api/update-feature-final-selected', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      await authPost('/api/update-feature-final-selected', {
           feature_name: col,
           record_id: datasetId,
           is_selected: shouldSelect,
-        }),
       });
     } catch (err) {
       console.error('Failed to update feature final_selected:', err);
@@ -2529,6 +2439,479 @@ const SelectedColumnsPage = () => {
     });
   };
 
+  // Toggle selection for chart export
+  const toggleSelectedForExport = (col: string) => {
+    setSelectedForExport((prev) => {
+      if (prev.includes(col)) {
+        return prev.filter((c) => c !== col);
+      } else {
+        return [...prev, col];
+      }
+    });
+  };
+
+  // Select all charts for export
+  const selectAllForExport = () => {
+    const columnsToSelect = selectedColumns.filter(col => col !== targetVariable);
+    setSelectedForExport(columnsToSelect);
+  };
+
+  // Deselect all charts for export
+  const deselectAllForExport = () => {
+    setSelectedForExport([]);
+  };
+
+  // Select only model-ready columns (auto-selected after auto monotonic fine binning) for export
+  const selectModelReadyForExport = () => {
+    const modelReadyColumns = selectedForModeling.filter(col => col !== targetVariable && selectedColumns.includes(col));
+    setSelectedForExport(modelReadyColumns);
+  };
+
+  // Export selected charts as PDF
+  const exportSelectedCharts = async (format: 'pdf' | 'png' = 'pdf') => {
+    if (selectedForExport.length === 0) {
+      showNotification('Please select at least one chart to export.');
+      return;
+    }
+
+    setIsExportingCharts(true);
+    showNotification(`Exporting ${selectedForExport.length} chart(s) as ${format.toUpperCase()}...`);
+
+    try {
+      const chartElements: HTMLDivElement[] = [];
+      
+      // Collect all selected chart elements
+      for (const col of selectedForExport) {
+        const element = chartCardRefs.current[col];
+        if (element) {
+          chartElements.push(element);
+        }
+      }
+
+      if (chartElements.length === 0) {
+        showNotification('No chart elements found to export.');
+        setIsExportingCharts(false);
+        return;
+      }
+
+      // Helper function to get IV strength classification
+      const getIVStrength = (iv: number): { label: string; color: number[] } => {
+        if (iv < 0.02) return { label: 'Not Predictive', color: [200, 80, 80] };
+        if (iv < 0.1) return { label: 'Weak Predictor', color: [230, 150, 50] };
+        if (iv < 0.3) return { label: 'Medium Predictor', color: [100, 180, 100] };
+        if (iv < 0.5) return { label: 'Strong Predictor', color: [50, 150, 200] };
+        return { label: 'Very Strong Predictor', color: [130, 80, 200] };
+      };
+
+      // Helper function to check monotonicity
+      const checkMonotonicity = (woeValues: number[]): { isMonotonic: boolean; direction: string } => {
+        if (woeValues.length < 2) return { isMonotonic: true, direction: 'N/A' };
+        let increasing = true;
+        let decreasing = true;
+        for (let i = 1; i < woeValues.length; i++) {
+          if (woeValues[i] < woeValues[i - 1]) increasing = false;
+          if (woeValues[i] > woeValues[i - 1]) decreasing = false;
+        }
+        if (increasing) return { isMonotonic: true, direction: 'Increasing' };
+        if (decreasing) return { isMonotonic: true, direction: 'Decreasing' };
+        return { isMonotonic: false, direction: 'Non-Monotonic' };
+      };
+
+      if (format === 'pdf') {
+        // Create PDF document in landscape for better chart display
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        const pageWidth = pdf.internal.pageSize.getWidth();
+        const pageHeight = pdf.internal.pageSize.getHeight();
+        const margin = 15;
+        const usableWidth = pageWidth - margin * 2;
+        
+        // Title Page
+        pdf.setFillColor(26, 26, 46);
+        pdf.rect(0, 0, pageWidth, 60, 'F');
+        
+        pdf.setFontSize(24);
+        pdf.setTextColor(255, 255, 255);
+        pdf.text('WOE Analysis Report', margin, 30);
+        
+        pdf.setFontSize(12);
+        pdf.setTextColor(200, 200, 200);
+        pdf.text('Auto Monotonic Fine Binning Results', margin, 40);
+        
+        pdf.setFontSize(10);
+        pdf.setTextColor(100, 100, 100);
+        pdf.text(`Generated: ${new Date().toLocaleDateString()} at ${new Date().toLocaleTimeString()}`, margin, 75);
+        pdf.text(`Total Features Exported: ${selectedForExport.length}`, margin, 82);
+        pdf.text(`Target Variable: ${targetVariable || 'N/A'}`, margin, 89);
+        
+        // Summary Section
+        pdf.setFontSize(14);
+        pdf.setTextColor(40, 40, 40);
+        pdf.text('Summary Statistics', margin, 105);
+        
+        pdf.setDrawColor(200, 200, 200);
+        pdf.line(margin, 108, pageWidth - margin, 108);
+        
+        let summaryY = 118;
+        const continuousCount = selectedForExport.filter(col => (continuousColumns || []).includes(col)).length;
+        const discreteCount = selectedForExport.length - continuousCount;
+        
+        pdf.setFontSize(10);
+        pdf.setTextColor(80, 80, 80);
+        pdf.text(`• Continuous Variables: ${continuousCount}`, margin + 5, summaryY);
+        summaryY += 7;
+        pdf.text(`• Discrete Variables: ${discreteCount}`, margin + 5, summaryY);
+        summaryY += 12;
+        
+        // Feature Overview Table Header
+        pdf.setFontSize(11);
+        pdf.setTextColor(40, 40, 40);
+        pdf.text('Feature Overview:', margin, summaryY);
+        summaryY += 8;
+        
+        // Table headers
+        pdf.setFillColor(240, 240, 240);
+        pdf.rect(margin, summaryY - 4, usableWidth, 8, 'F');
+        pdf.setFontSize(9);
+        pdf.setTextColor(60, 60, 60);
+        pdf.text('Feature', margin + 2, summaryY);
+        pdf.text('Type', margin + 55, summaryY);
+        pdf.text('Bins', margin + 85, summaryY);
+        pdf.text('Total IV', margin + 105, summaryY);
+        pdf.text('IV Strength', margin + 130, summaryY);
+        pdf.text('Monotonic', margin + 165, summaryY);
+        summaryY += 8;
+        
+        // Table rows
+        for (const col of selectedForExport) {
+          const woeData = woeIvResults[col];
+          const woeStats: NormalizedBin[] = woeData?.stats ?? [];
+          const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
+          const isContinuous = (continuousColumns || []).includes(col);
+          const woeValues = woeStats.map(s => Number(s.WOE ?? 0));
+          const monotonicity = checkMonotonicity(woeValues);
+          const ivStrength = getIVStrength(totalIV);
+          
+          if (summaryY > pageHeight - 30) {
+            pdf.addPage();
+            summaryY = 20;
+          }
+          
+          pdf.setFontSize(8);
+          pdf.setTextColor(80, 80, 80);
+          pdf.text(col.length > 20 ? col.substring(0, 18) + '...' : col, margin + 2, summaryY);
+          pdf.text(isContinuous ? 'Continuous' : 'Discrete', margin + 55, summaryY);
+          pdf.text(String(woeStats.length), margin + 85, summaryY);
+          pdf.text(totalIV.toFixed(4), margin + 105, summaryY);
+          
+          pdf.setTextColor(ivStrength.color[0], ivStrength.color[1], ivStrength.color[2]);
+          pdf.text(ivStrength.label, margin + 130, summaryY);
+          
+          pdf.setTextColor(monotonicity.isMonotonic ? 50 : 180, monotonicity.isMonotonic ? 150 : 80, monotonicity.isMonotonic ? 50 : 80);
+          pdf.text(monotonicity.direction, margin + 165, summaryY);
+          
+          summaryY += 6;
+        }
+        
+        // Individual Feature Pages
+        for (let i = 0; i < chartElements.length; i++) {
+          pdf.addPage();
+          const element = chartElements[i];
+          const colName = selectedForExport[i];
+          const woeData = woeIvResults[colName];
+          const woeStats: NormalizedBin[] = woeData?.stats ?? [];
+          const isContinuous = (continuousColumns || []).includes(colName);
+          
+          // Calculate statistics
+          const totalIV = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.IV) || 0), 0);
+          const totalGood = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.Good) || 0), 0);
+          const totalBad = woeStats.reduce((sum: number, s: NormalizedBin) => sum + (Number(s.Bad) || 0), 0);
+          const totalCount = totalGood + totalBad;
+          const overallBadRate = totalCount > 0 ? (totalBad / totalCount * 100) : 0;
+          const woeValues = woeStats.map(s => Number(s.WOE ?? 0));
+          const monotonicity = checkMonotonicity(woeValues);
+          const ivStrength = getIVStrength(totalIV);
+          
+          // Feature Header
+          pdf.setFillColor(26, 26, 46);
+          pdf.rect(0, 0, pageWidth, 25, 'F');
+          
+          pdf.setFontSize(16);
+          pdf.setTextColor(255, 255, 255);
+          pdf.text(`${i + 1}. ${colName}`, margin, 16);
+          
+          pdf.setFontSize(10);
+          pdf.setTextColor(150, 150, 150);
+          pdf.text(isContinuous ? 'Continuous Variable' : 'Discrete Variable', pageWidth - margin - 35, 16);
+          
+          let yPos = 35;
+          
+          // Key Metrics Cards
+          pdf.setFillColor(245, 245, 250);
+          pdf.roundedRect(margin, yPos, 40, 22, 3, 3, 'F');
+          pdf.roundedRect(margin + 45, yPos, 40, 22, 3, 3, 'F');
+          pdf.roundedRect(margin + 90, yPos, 40, 22, 3, 3, 'F');
+          pdf.roundedRect(margin + 135, yPos, 50, 22, 3, 3, 'F');
+          
+          pdf.setFontSize(8);
+          pdf.setTextColor(100, 100, 100);
+          pdf.text('Total IV', margin + 5, yPos + 8);
+          pdf.text('Number of Bins', margin + 50, yPos + 8);
+          pdf.text('Bad Rate', margin + 95, yPos + 8);
+          pdf.text('Monotonicity', margin + 140, yPos + 8);
+          
+          pdf.setFontSize(12);
+          pdf.setTextColor(ivStrength.color[0], ivStrength.color[1], ivStrength.color[2]);
+          pdf.text(totalIV.toFixed(4), margin + 5, yPos + 18);
+          
+          pdf.setTextColor(60, 60, 60);
+          pdf.text(String(woeStats.length), margin + 50, yPos + 18);
+          pdf.text(`${overallBadRate.toFixed(2)}%`, margin + 95, yPos + 18);
+          
+          pdf.setTextColor(monotonicity.isMonotonic ? 50 : 180, monotonicity.isMonotonic ? 150 : 80, monotonicity.isMonotonic ? 50 : 80);
+          pdf.text(monotonicity.direction, margin + 140, yPos + 18);
+          
+          yPos += 30;
+          
+          // IV Strength indicator
+          pdf.setFontSize(9);
+          pdf.setTextColor(ivStrength.color[0], ivStrength.color[1], ivStrength.color[2]);
+          pdf.text(`IV Classification: ${ivStrength.label}`, margin, yPos);
+          yPos += 10;
+          
+          // Chart Section
+          pdf.setFontSize(11);
+          pdf.setTextColor(40, 40, 40);
+          pdf.text('WOE Trend Chart', margin, yPos);
+          yPos += 3;
+          
+          try {
+            const originalBackground = element.style.background;
+            element.style.background = '#1a1a2e';
+            
+            const canvas = await html2canvas(element, {
+              backgroundColor: '#1a1a2e',
+              scale: 2.5, // Higher quality
+              logging: false,
+              useCORS: true,
+              allowTaint: true,
+            });
+            
+            element.style.background = originalBackground;
+            
+            const imgData = canvas.toDataURL('image/png');
+            
+            // Calculate balanced dimensions - maintain aspect ratio
+            const aspectRatio = canvas.width / canvas.height;
+            const maxChartWidth = usableWidth * 0.9;
+            const maxChartHeight = 55;
+            
+            let chartWidth = maxChartWidth;
+            let chartHeight = chartWidth / aspectRatio;
+            
+            if (chartHeight > maxChartHeight) {
+              chartHeight = maxChartHeight;
+              chartWidth = chartHeight * aspectRatio;
+            }
+            
+            // Center the chart
+            const chartX = margin + (usableWidth - chartWidth) / 2;
+            
+            pdf.addImage(imgData, 'PNG', chartX, yPos, chartWidth, chartHeight);
+            yPos += chartHeight + 8;
+          } catch (err) {
+            console.error(`Error capturing chart for ${colName}:`, err);
+            yPos += 60;
+          }
+          
+          // Detailed Binning Table
+          pdf.setFontSize(11);
+          pdf.setTextColor(40, 40, 40);
+          pdf.text('Binning Details', margin, yPos);
+          yPos += 6;
+          
+          // Table header
+          pdf.setFillColor(50, 50, 70);
+          pdf.rect(margin, yPos - 3, usableWidth, 7, 'F');
+          pdf.setFontSize(7);
+          pdf.setTextColor(255, 255, 255);
+          
+          const colWidths = [30, 20, 20, 22, 22, 20, 22, 24];
+          let xPos = margin + 2;
+          const headers = ['Bin', 'Good', 'Bad', 'Total', 'Bad Rate%', 'Freq%', 'WOE', 'IV'];
+          headers.forEach((header, idx) => {
+            pdf.text(header, xPos, yPos + 2);
+            xPos += colWidths[idx];
+          });
+          yPos += 7;
+          
+          // Table rows
+          pdf.setFontSize(7);
+          woeStats.forEach((bin, idx) => {
+            const binLabel = getBinLabelValue(bin, idx);
+            const good = Number(bin.Good ?? 0);
+            const bad = Number(bin.Bad ?? 0);
+            const total = Number(bin.Total ?? good + bad);
+            const badRate = total > 0 ? (bad / total * 100) : 0;
+            const freqPct = totalCount > 0 ? (total / totalCount * 100) : 0;
+            const woe = Number(bin.WOE ?? 0);
+            const iv = Number(bin.IV ?? 0);
+            
+            // Alternating row colors
+            if (idx % 2 === 0) {
+              pdf.setFillColor(248, 248, 252);
+              pdf.rect(margin, yPos - 3, usableWidth, 6, 'F');
+            }
+            
+            pdf.setTextColor(60, 60, 60);
+            xPos = margin + 2;
+            
+            const displayLabel = binLabel.length > 12 ? binLabel.substring(0, 10) + '..' : binLabel;
+            pdf.text(displayLabel, xPos, yPos);
+            xPos += colWidths[0];
+            pdf.text(String(good), xPos, yPos);
+            xPos += colWidths[1];
+            pdf.text(String(bad), xPos, yPos);
+            xPos += colWidths[2];
+            pdf.text(String(total), xPos, yPos);
+            xPos += colWidths[3];
+            
+            // Color code bad rate
+            pdf.setTextColor(badRate > overallBadRate ? 200 : 80, badRate > overallBadRate ? 80 : 150, 80);
+            pdf.text(badRate.toFixed(2), xPos, yPos);
+            xPos += colWidths[4];
+            
+            pdf.setTextColor(60, 60, 60);
+            pdf.text(freqPct.toFixed(2), xPos, yPos);
+            xPos += colWidths[5];
+            
+            // Color code WOE
+            pdf.setTextColor(woe >= 0 ? 50 : 180, woe >= 0 ? 150 : 80, 50);
+            pdf.text(woe.toFixed(4), xPos, yPos);
+            xPos += colWidths[6];
+            
+            pdf.setTextColor(60, 60, 60);
+            pdf.text(iv.toFixed(4), xPos, yPos);
+            
+            yPos += 6;
+          });
+          
+          // Totals row
+          pdf.setFillColor(230, 230, 240);
+          pdf.rect(margin, yPos - 3, usableWidth, 7, 'F');
+          pdf.setFontSize(7);
+          pdf.setTextColor(40, 40, 40);
+          xPos = margin + 2;
+          pdf.text('TOTAL', xPos, yPos);
+          xPos += colWidths[0];
+          pdf.text(String(totalGood), xPos, yPos);
+          xPos += colWidths[1];
+          pdf.text(String(totalBad), xPos, yPos);
+          xPos += colWidths[2];
+          pdf.text(String(totalCount), xPos, yPos);
+          xPos += colWidths[3];
+          pdf.text(overallBadRate.toFixed(2), xPos, yPos);
+          xPos += colWidths[4];
+          pdf.text('100.00', xPos, yPos);
+          xPos += colWidths[5];
+          pdf.text('-', xPos, yPos);
+          xPos += colWidths[6];
+          pdf.setTextColor(ivStrength.color[0], ivStrength.color[1], ivStrength.color[2]);
+          pdf.text(totalIV.toFixed(4), xPos, yPos);
+          
+          yPos += 12;
+          
+          // Insights Section
+          pdf.setFontSize(10);
+          pdf.setTextColor(40, 40, 40);
+          pdf.text('Key Insights', margin, yPos);
+          yPos += 5;
+          
+          pdf.setFontSize(8);
+          pdf.setTextColor(80, 80, 80);
+          
+          // Generate insights
+          const insights: string[] = [];
+          
+          // IV insight
+          insights.push(`• Information Value (${totalIV.toFixed(4)}) indicates this is a ${ivStrength.label.toLowerCase()}.`);
+          
+          // Monotonicity insight
+          if (monotonicity.isMonotonic) {
+            insights.push(`• WOE trend is ${monotonicity.direction.toLowerCase()}, showing good risk differentiation.`);
+          } else {
+            insights.push(`• WOE trend is non-monotonic - consider reviewing bin boundaries for better risk ordering.`);
+          }
+          
+          // Find highest and lowest WOE bins
+          if (woeStats.length > 0) {
+            const sortedByWOE = [...woeStats].sort((a, b) => (Number(b.WOE) || 0) - (Number(a.WOE) || 0));
+            const highestWOE = sortedByWOE[0];
+            const lowestWOE = sortedByWOE[sortedByWOE.length - 1];
+            insights.push(`• Lowest risk bin: "${getBinLabelValue(highestWOE)}" (WOE: ${Number(highestWOE.WOE || 0).toFixed(4)})`);
+            insights.push(`• Highest risk bin: "${getBinLabelValue(lowestWOE)}" (WOE: ${Number(lowestWOE.WOE || 0).toFixed(4)})`);
+          }
+          
+          // Bin distribution insight
+          const maxFreqBin = woeStats.reduce((max, bin) => {
+            const freq = Number(bin.Total ?? 0);
+            const maxFreq = Number(max.Total ?? 0);
+            return freq > maxFreq ? bin : max;
+          }, woeStats[0]);
+          if (maxFreqBin) {
+            const maxFreqPct = totalCount > 0 ? (Number(maxFreqBin.Total ?? 0) / totalCount * 100) : 0;
+            insights.push(`• Most populated bin: "${getBinLabelValue(maxFreqBin)}" (${maxFreqPct.toFixed(1)}% of records)`);
+          }
+          
+          insights.forEach(insight => {
+            pdf.text(insight, margin + 3, yPos);
+            yPos += 5;
+          });
+        }
+
+        pdf.save(`woe-analysis-report-${new Date().toISOString().split('T')[0]}.pdf`);
+        showNotification(`Successfully exported ${selectedForExport.length} chart(s) as PDF!`);
+      } else {
+        // Export as individual PNG files
+        for (let i = 0; i < chartElements.length; i++) {
+          const element = chartElements[i];
+          const colName = selectedForExport[i];
+          
+          try {
+            const originalBackground = element.style.background;
+            element.style.background = '#1a1a2e';
+            
+            const canvas = await html2canvas(element, {
+              backgroundColor: '#1a1a2e',
+              scale: 2,
+              logging: false,
+              useCORS: true,
+              allowTaint: true,
+            });
+            
+            element.style.background = originalBackground;
+            
+            // Create download link
+            const link = document.createElement('a');
+            link.download = `woe-chart-${colName}-${new Date().toISOString().split('T')[0]}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+            
+            // Small delay between downloads to prevent browser blocking
+            await new Promise(resolve => setTimeout(resolve, 200));
+          } catch (err) {
+            console.error(`Error capturing chart for ${colName}:`, err);
+          }
+        }
+        showNotification(`Successfully exported ${selectedForExport.length} chart(s) as PNG!`);
+      }
+    } catch (error) {
+      console.error('Export error:', error);
+      showNotification('Error exporting charts. Please try again.');
+    } finally {
+      setIsExportingCharts(false);
+    }
+  };
+
   const prevSelectedColumnsRef = useRef<string[]>(selectedColumns);
 
   useEffect(() => {
@@ -2576,18 +2959,7 @@ const SelectedColumnsPage = () => {
       }
 
 
-      const res = await fetch('http://localhost:5000/api/woe-iv', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ error: 'Failed to calculate WOE/IV' }));
-        throw new Error(errorData.error || `WOE/IV calculation failed: ${res.status}`);
-      }
-
-      const data = await res.json();
+      const data = await authPost('/api/woe-iv', body);
 
 
       if (!data.error && data[col]) {
@@ -2694,29 +3066,20 @@ const SelectedColumnsPage = () => {
       if (currentStep === 1 && recordId) {
         try {
           // First check preprocess_selection status
-          const recordResponse = await fetch(`http://localhost:5000/api/record/${recordId}`, {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-          });
+          const recordData = await authGet(`/api/record/${recordId}`);
           
           let shouldLoadFromDb = false;
-          if (recordResponse.ok) {
-            const recordData = await recordResponse.json();
-            shouldLoadFromDb = recordData.preprocess_selection === true;
-            setPreprocessSelectionSaved(shouldLoadFromDb);
+          if (recordData.preprocess_selection === true) {
+            shouldLoadFromDb = true;
+            setPreprocessSelectionSaved(true);
           }
           
           // Only load features if preprocess_selection is true
           // If false, calculations will determine selections, no need to poll
           if (shouldLoadFromDb) {
-            const featuresResp = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`, {
-              method: 'GET',
-              headers: { 'Content-Type': 'application/json' }
-            });
-
-            if (featuresResp.ok) {
-              const featuresData = await featuresResp.json();
-              // Load selected features from database (not stored in state as not used elsewhere)
+            const featuresData = await authGet(`/api/dataset/${recordId}/features`);
+            // Load selected features from database (not stored in state as not used elsewhere)
+            if (Array.isArray(featuresData)) {
               featuresData
                 .filter((f: any) => f.selected === true)
                 .map((f: any) => f.name);
@@ -2735,8 +3098,7 @@ const SelectedColumnsPage = () => {
   // Load model_ready checkboxes when moving to Classification section (step 0)
   useEffect(() => {
     if (currentStep === 0 && recordId) {
-      fetch(`http://localhost:5000/api/dataset/${recordId}/features`)
-        .then(r => r.json())
+      authGet(`/api/dataset/${recordId}/features`)
         .then((features: any[]) => {
           const modelReadyNames = features
             .filter((f: any) => f.model_ready)
@@ -2754,17 +3116,12 @@ const SelectedColumnsPage = () => {
   useEffect(() => {
     if (currentStep === 2 && recordId) {
       // First sync model_ready to final_selected
-      fetch('http://localhost:5000/api/sync-model-ready-to-final-selected', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      authPost('/api/sync-model-ready-to-final-selected', {
           record_id: recordId
-        })
-      }).then(async (res) => {
-        if (res.ok) {
+      }).then(async () => {
           // After syncing, load final_selected values to initialize selectedForFinalModeling
           try {
-            const features = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`).then(r => r.json());
+          const features = await authGet(`/api/dataset/${recordId}/features`);
             const finalSelectedNames = features
               .filter((f: any) => f.final_selected)
               .map((f: any) => String(f.name).trim())
@@ -2775,7 +3132,6 @@ const SelectedColumnsPage = () => {
             }
           } catch (err) {
             console.error('Failed to load final_selected features:', err);
-          }
         }
       }).catch(err => console.error('Failed to sync model_ready to final_selected:', err));
     }
@@ -2874,10 +3230,8 @@ const SelectedColumnsPage = () => {
 
         // Try database first
         try {
-          const featuresResponse = await fetch(`http://localhost:5000/api/dataset/${recordId}/features`);
-          if (featuresResponse.ok) {
-            const featureList = await featuresResponse.json();
-            if (Array.isArray(featureList)) {
+          const featureList = await authGet(`/api/dataset/${recordId}/features`);
+          if (Array.isArray(featureList)) {
               const finalSelectedFeatures = featureList
                 .filter((feature: any) => feature?.final_selected)
                 .map((feature: any) => String(feature.name).trim())
@@ -2893,7 +3247,6 @@ const SelectedColumnsPage = () => {
                 return;
               }
             }
-          }
         } catch (err) {
           console.error('[Models] Error loading final_selected from database:', err);
         }
@@ -2996,20 +3349,14 @@ const SelectedColumnsPage = () => {
     setIsCalculatingVIF(true);
     setHasLRCompleted(false);
     try {
-      const response = await fetch('http://localhost:5000/api/logistic-regression', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const data = await authPost('/api/logistic-regression', {
           selected_variables: selectedForModeling, // Use all model_ready features
           target: targetVariable,
           woe_transformed_data: Object.fromEntries(
             Object.entries(woeIvResults).map(([key, value]) => [key, value.stats || []])
           ),
           record_id: recordId
-        })
       });
-
-      const data = await response.json();
       console.log('[VIF] Response received:', data);
       
       // Initialize maps with all requested features (set to null initially)
@@ -3442,7 +3789,7 @@ const SelectedColumnsPage = () => {
                 )}
                 {selectedModel === 'stacking' && (
                   <button
-                    className="run-regression-btn-sidebar"
+                    className="auto-monotonic-btn"
                     onClick={() => {
                       setTriggerStacking(prev => prev + 1);
                     }}
@@ -3456,6 +3803,7 @@ const SelectedColumnsPage = () => {
                       !Object.values(significanceData).some(s => s.pValue !== null)
                     }
                   >
+                    <span className="btn-icon">⚡</span>
                     Run Stacking Ensemble
                   </button>
                 )}
@@ -3475,7 +3823,7 @@ const SelectedColumnsPage = () => {
                     </div>
                   )}
                   <button
-                    className="progress-action-btn"
+                    className="auto-monotonic-btn"
                     disabled={isLoadingAIClassification}
                     onClick={async () => {
                       try {
@@ -3489,30 +3837,21 @@ const SelectedColumnsPage = () => {
 
                         let sampleData: Record<string, any[]> = {};
                         try {
-                          const sampleResp = await fetch('http://localhost:5000/api/csv-samples', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ columns: colsToClassify, sample_size: 20, record_id: recordId })
-                          });
-                          if (sampleResp.ok) {
-                            sampleData = await sampleResp.json();
-                          } else {
-                            colsToClassify.forEach(col => {
-                              sampleData[col] = [];
-                            });
+                          const sampleResp = await authPost('/api/csv-samples', { columns: colsToClassify, sample_size: 20, record_id: recordId });
+                          if (sampleResp && typeof sampleResp === 'object') {
+                            sampleData = sampleResp as Record<string, any[]>;
                           }
                         } catch (e) {
-                          colsToClassify.forEach(col => {
-                            sampleData[col] = [];
-                          });
+                          console.warn('Could not fetch CSV samples:', e);
                         }
-
-                        const resp = await fetch('http://localhost:5000/api/ai-classify-columns', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ columns: colsToClassify, sampleData, record_id: recordId })
+                        // Ensure all columns have sample data (even if empty)
+                        colsToClassify.forEach(col => {
+                          if (!sampleData[col]) {
+                            sampleData[col] = [];
+                          }
                         });
-                        const data = await resp.json();
+
+                        const data = await authPost('/api/ai-classify-columns', { columns: colsToClassify, sampleData, record_id: recordId });
                         if (data && !data.error) {
                           let discreteCount = 0;
                           let continuousCount = 0;
@@ -3525,15 +3864,19 @@ const SelectedColumnsPage = () => {
                           });
                           alert(`AI classification complete!\nClassified ${discreteCount} discrete and ${continuousCount} continuous variables.`);
                         } else {
-                          alert('AI classification failed. See console for details.');
+                          const errorMsg = data?.error || 'Unknown error';
+                          console.error('AI classification failed:', errorMsg, data);
+                          alert(`AI classification failed: ${errorMsg}`);
                         }
                       } catch (e) {
-                        alert('AI classification failed. See console for details.');
+                        console.error('AI classification error:', e);
+                        alert(`AI classification failed: ${e instanceof Error ? e.message : String(e)}`);
                       } finally {
                         setIsLoadingAIClassification(false);
                       }
                     }}
                   >
+                    <span className="btn-icon">⚡</span>
                     <span className="btn-text">{isLoadingAIClassification ? 'Classifying...' : 'AI Recommendation on Classification of Discrete and Continuous'}</span>
                   </button>
                 </div>
@@ -3607,12 +3950,60 @@ const SelectedColumnsPage = () => {
                     <button
                       className="all-auto-monotonic-btn"
                       onClick={runAllAutoMonotonicFineBinning}
+                      disabled={
+                        isLoadingAllAutoMonotonic ||
+                        isLoadingCoarseBins ||
+                        selectedColumns.some(col => {
+                          if (col === targetVariable) return false;
+                          return !Array.isArray(coarseBinResults[col]) || coarseBinResults[col].length === 0;
+                        })
+                      }
                       aria-label="Run auto-monotonic fine binning for all columns"
                       title="Automatically merge bins to achieve monotonic WOE trend for all columns"
                     >
                       <span className="btn-icon">⚡</span>
                       All Auto Monotonic Fine binning
                     </button>
+                    <div className="export-controls-divider" />
+                    <div className="export-controls-group">
+                      <button
+                        className="export-select-btn"
+                        onClick={selectedForExport.length === selectedColumns.filter(c => c !== targetVariable).length ? deselectAllForExport : selectAllForExport}
+                        title={selectedForExport.length === selectedColumns.filter(c => c !== targetVariable).length ? 'Deselect all charts' : 'Select all charts for export'}
+                      >
+                        {selectedForExport.length === selectedColumns.filter(c => c !== targetVariable).length ? '☐ Deselect All' : '☑ Select All'}
+                      </button>
+                      <button
+                        className="export-select-btn model-ready-select-btn"
+                        onClick={selectModelReadyForExport}
+                        title={`Select only model-ready columns for export (${selectedForModeling.filter(c => c !== targetVariable && selectedColumns.includes(c)).length} columns)`}
+                        disabled={selectedForModeling.filter(c => c !== targetVariable && selectedColumns.includes(c)).length === 0}
+                      >
+                        <span className="btn-icon">✓</span>
+                        Select Model Ready ({selectedForModeling.filter(c => c !== targetVariable && selectedColumns.includes(c)).length})
+                      </button>
+                      <span className="export-count-badge">
+                        {selectedForExport.length} selected
+                      </span>
+                      <button
+                        className="export-btn export-pdf-btn"
+                        onClick={() => exportSelectedCharts('pdf')}
+                        disabled={selectedForExport.length === 0 || isExportingCharts}
+                        title="Export selected charts as PDF"
+                      >
+                        <span className="btn-icon">📄</span>
+                        {isExportingCharts ? 'Exporting...' : 'Export PDF'}
+                      </button>
+                      <button
+                        className="export-btn export-png-btn"
+                        onClick={() => exportSelectedCharts('png')}
+                        disabled={selectedForExport.length === 0 || isExportingCharts}
+                        title="Export selected charts as PNG images"
+                      >
+                        <span className="btn-icon">🖼️</span>
+                        {isExportingCharts ? 'Exporting...' : 'Export PNGs'}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -3638,6 +4029,12 @@ const SelectedColumnsPage = () => {
                       const woeData = woeIvResults[col];
                       const isLoading = loadingColumns.has(col);
                       const isSelected = selectedForModeling.includes(col);
+                      const isExportSelected = selectedForExport.includes(col);
+
+                      // Create a stable ref object for this column
+                      if (!chartCardRefs.current[col]) {
+                        chartCardRefs.current[col] = null;
+                      }
 
                       return (
                         <AutoBinningCard
@@ -3646,9 +4043,15 @@ const SelectedColumnsPage = () => {
                           woeData={woeData}
                           isLoading={isLoading}
                           isSelected={isSelected}
+                          isSelectedForExport={isExportSelected}
                           onToggle={toggleSelectedForModeling}
+                          onToggleExport={toggleSelectedForExport}
                           onConfigureManually={handleConfigureManually}
                           continuousColumns={continuousColumns || []}
+                          cardRef={{
+                            get current() { return chartCardRefs.current[col]; },
+                            set current(el) { chartCardRefs.current[col] = el; }
+                          } as React.RefObject<HTMLDivElement | null>}
                         />
                       );
                     })}
@@ -4593,30 +4996,98 @@ const SelectedColumnsPage = () => {
                 <div className="scorecard-container">
                   {/* Left Box: Controls, Risk Scale, KS Chart */}
                   <div className="scorecard-middle-box">
+                    {/* Score Range Toggle */}
+                    <div className="scorecard-controls" style={{ marginBottom: '8px' }}>
+                      <div style={{ 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '12px',
+                        padding: '8px 12px',
+                        backgroundColor: 'var(--bg-secondary)',
+                        borderRadius: '8px',
+                        border: '1px solid var(--border-secondary)'
+                      }}>
+                        <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--fg-primary)' }}>Score Range:</span>
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                          <button
+                            onClick={() => setInvertScoreRange(false)}
+                            style={{
+                              padding: '6px 12px',
+                              fontSize: '12px',
+                              fontWeight: invertScoreRange ? 400 : 600,
+                              backgroundColor: !invertScoreRange ? 'var(--fg-accent-green)' : 'var(--bg-tertiary)',
+                              color: !invertScoreRange ? 'white' : 'var(--fg-secondary)',
+                              border: 'none',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s'
+                            }}
+                            title="Standard: 0-600 (Higher score = Lower risk)"
+                          >
+                            0-600
+                          </button>
+                          <button
+                            onClick={() => setInvertScoreRange(true)}
+                            style={{
+                              padding: '6px 12px',
+                              fontSize: '12px',
+                              fontWeight: invertScoreRange ? 600 : 400,
+                              backgroundColor: invertScoreRange ? 'var(--fg-accent-red)' : 'var(--bg-tertiary)',
+                              color: invertScoreRange ? 'white' : 'var(--fg-secondary)',
+                              border: 'none',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s'
+                            }}
+                            title="Inverted: 600-0 (Higher score = Higher risk)"
+                          >
+                            600-0
+                          </button>
+                        </div>
+                        <span style={{ 
+                          fontSize: '11px', 
+                          color: 'var(--fg-muted)',
+                          fontStyle: 'italic'
+                        }}>
+                          {invertScoreRange 
+                            ? '(Higher score = Higher risk)' 
+                            : '(Higher score = Lower risk)'
+                          }
+                        </span>
+                      </div>
+                    </div>
                     <div className="scorecard-controls">
                       <button
-                        className="run-regression-btn scorecard-btn-small"
+                        className="auto-monotonic-btn scorecard-btn-small"
                         onClick={generateScoreCard}
                         disabled={generatingScoreCard || selectedForModeling.length === 0}
                         aria-label="Generate score card"
                       >
+                        <span className="btn-icon">⚡</span>
                         {generatingScoreCard ? 'Generating...' : 'Generate Score Card'}
                       </button>
                       <button
                         className="run-regression-btn scorecard-btn-small"
-                        onClick={() => handleCreateRanges(selectedModelForScorecard)}
-                        disabled={createRangesLoading || !scoreCardData}
-                        aria-label="Create ranges from training data"
-                      >
-                        {createRangesLoading ? 'Creating...' : 'Create Ranges'}
-                      </button>
-                      <button
-                        className="run-regression-btn scorecard-btn-small"
                         onClick={() => handleTestScoreCard(selectedModelForScorecard)}
-                        disabled={testScoreLoading || !scoreCardData}
+                        disabled={generatingScoreCard || testScoreLoading || !scoreCardData || !scoreCardData.scorecard_bins}
                         aria-label="Test Score Card on Data"
                       >
                         {testScoreLoading ? 'Testing...' : 'Test Score Card'}
+                      </button>
+                    </div>
+                    <div className="scorecard-controls scorecard-download-controls">
+                      <button
+                        className="run-regression-btn scorecard-btn-small"
+                        onClick={handleDownloadScorecard}
+                        disabled={!scoreCardData || !scoreCardData.scorecard_bins}
+                        aria-label="Download score card"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: '6px' }}>
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                          <polyline points="7 10 12 15 17 10"></polyline>
+                          <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Download Score Card
                       </button>
                     </div>
 
@@ -4766,7 +5237,24 @@ const SelectedColumnsPage = () => {
                             </div>
                             <div className="parameter-box">
                               <div className="parameter-label">Score Range:</div>
-                              <div className="parameter-value">{scoreCardData.score_parameters.min_score} - {scoreCardData.score_parameters.max_score}</div>
+                              <div className="parameter-value">
+                                {scoreCardData.score_parameters.invert_score_range 
+                                  ? `${scoreCardData.score_parameters.max_score} - ${scoreCardData.score_parameters.min_score}` 
+                                  : `${scoreCardData.score_parameters.min_score} - ${scoreCardData.score_parameters.max_score}`
+                                }
+                              </div>
+                            </div>
+                            <div className="parameter-box">
+                              <div className="parameter-label">Score Interpretation:</div>
+                              <div className="parameter-value" style={{ 
+                                fontSize: '12px',
+                                color: scoreCardData.score_parameters.invert_score_range ? 'var(--fg-accent-red)' : 'var(--fg-accent-green)'
+                              }}>
+                                {scoreCardData.score_parameters.invert_score_range 
+                                  ? 'Higher Score = Higher Risk' 
+                                  : 'Higher Score = Lower Risk'
+                                }
+                              </div>
                             </div>
                             <div className="parameter-box">
                               <div className="parameter-label">Model Type:</div>
@@ -4793,18 +5281,20 @@ const SelectedColumnsPage = () => {
                               </tr>
                             </thead>
                             <tbody>
-                              {((currentDataSource === 'training' ? trainingScoreResults : testScoreResults) || []).map((row: any, idx: number) => (
-                                <tr key={idx}>
-                                  <td>{idx + 1}</td>
-                                  <td>{row.score}</td>
-                                  <td style={{
-                                    color: row.target === 0 ? 'green' : row.target === 1 ? 'red' : undefined,
-                                    fontWeight: row.target === 1 ? 'bold' : 'normal'
-                                  }}>
-                                    {row.target}
-                                  </td>
-                                </tr>
-                              ))}
+                              {((currentDataSource === 'training' ? trainingScoreResults : testScoreResults) || []).map((row: any, idx: number) => {
+                                return (
+                                  <tr key={idx}>
+                                    <td>{idx + 1}</td>
+                                    <td>{Math.round(row.score)}</td>
+                                    <td style={{
+                                      color: row.target === 0 ? '#2ea043' : row.target === 1 ? '#da3633' : undefined,
+                                      fontWeight: row.target === 1 ? 'bold' : 'normal'
+                                    }}>
+                                      {row.target}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>

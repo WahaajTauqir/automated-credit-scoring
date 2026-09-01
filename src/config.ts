@@ -6,7 +6,11 @@
 
 // API Configuration
 // ===============================
-export const API_BASE_URL = 'http://localhost:5000';
+// Use environment variable in production, fallback to localhost for development
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 
+  (import.meta.env.PROD 
+    ? 'https://credit-scoring-backend-XXXXX-uc.a.run.app'  // Replace with your Cloud Run URL
+    : 'http://localhost:5000');
 
 // Train/Test Split Configuration
 // ===============================

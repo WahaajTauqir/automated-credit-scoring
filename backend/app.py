@@ -82,19 +82,29 @@ except Exception:
     pass
 
 # configure basic logging for debug
-logging.basicConfig(level=logging.DEBUG)
+# Set logging level based on environment
+log_level = logging.DEBUG if os.getenv('ENVIRONMENT') != 'production' else logging.INFO
+logging.basicConfig(level=log_level)
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://localhost:5174"])
+
+# CORS configuration - supports both local and production
+ALLOWED_ORIGINS = os.getenv('ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:5174').split(',')
+CORS(app, origins=ALLOWED_ORIGINS)
+
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), 'artifacts')
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
+# Import storage manager for Cloud Storage support
+try:
+    from storage import get_storage_manager
+    storage_manager = get_storage_manager()
+except ImportError:
+    storage_manager = None
+    print("[APP] Storage manager not available")
+
 # Cache for preprocessed data to avoid re-preprocessing
 _preprocessed_data_cache = {}  # {f"{dataset_id}_{stage}": preprocessed_df}
-
-# Cache for features-sorted endpoint to reduce database queries
-_features_sorted_cache = {}  # {dataset_id: {"data": ..., "timestamp": ...}}
-FEATURES_SORTED_CACHE_TTL = 2.0  # Cache for 2 seconds (short TTL to balance freshness and performance)
 
 # Cache for features-sorted endpoint to reduce database queries
 _features_sorted_cache = {}  # {dataset_id: {"data": ..., "timestamp": ...}}
@@ -155,23 +165,52 @@ def save_model_artifact(dataset_id: int, model_label: str, payload: Dict[str, An
         payload_copy.setdefault('dataset_id', dataset_id)
         payload_copy.setdefault('model_label', model_label)
         payload_copy.setdefault('saved_at', datetime.datetime.utcnow().isoformat())
-        artifact_path = target_path
-        with open(artifact_path, 'wb') as handle:
+        
+        # Save locally first (required for Cloud Storage upload)
+        with open(target_path, 'wb') as handle:
             pickle.dump(payload_copy, handle)
+        
+        # Upload to Cloud Storage if configured
+        artifact_path = target_path
+        if storage_manager and storage_manager.artifacts_bucket:
+            try:
+                blob_name = f"artifacts/{dataset_id}_{model_label}.pkl"
+                artifact_path = storage_manager.upload_file(
+                    target_path,
+                    storage_manager.artifacts_bucket,
+                    blob_name
+                )
+                print(f"[MODEL ARTIFACT] Uploaded to Cloud Storage: {artifact_path}")
+            except Exception as e:
+                print(f"[MODEL ARTIFACT] Warning: Failed to upload to Cloud Storage: {e}")
+                # Continue with local path
+        
         return _build_artifact_metadata(payload_copy, artifact_path)
     except Exception as err:
         print(f"[MODEL ARTIFACT] Failed to save artifact for dataset {dataset_id}: {err}")
         return None
 
 def load_model_artifact(dataset_id: int, model_label: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    # Try local files first
     paths = []
     if model_label:
         target = _artifact_path(dataset_id, model_label)
         if os.path.exists(target):
             paths.append(target)
+        # Also check Cloud Storage if configured
+        if storage_manager and storage_manager.artifacts_bucket:
+            blob_name = f"artifacts/{dataset_id}_{model_label}.pkl"
+            if storage_manager.file_exists(f"gs://{storage_manager.artifacts_bucket}/{blob_name}"):
+                temp_path = storage_manager.save_to_temp(
+                    storage_manager.artifacts_bucket,
+                    blob_name
+                )
+                if temp_path:
+                    paths.append(temp_path)
     else:
         pattern = _artifact_pattern(dataset_id)
         paths = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+        # TODO: Could also list from Cloud Storage, but for now use local pattern
 
     for path in paths:
         try:
@@ -665,19 +704,45 @@ def _normalize_dataset_id(value):
 
 
 def _resolve_dataset_file_path(file_path: Optional[str]) -> Optional[str]:
-    """Resolve relative/absolute dataset paths and ensure the file exists."""
+    """Resolve relative/absolute dataset paths and ensure the file exists.
+    Supports both local filesystem and Cloud Storage (gs://) paths."""
     if not file_path:
         return None
+    
+    # Check if it's a Cloud Storage path
+    if file_path.startswith('gs://'):
+        # Verify file exists in Cloud Storage
+        try:
+            from storage import get_storage_manager
+            storage_mgr = get_storage_manager()
+            if storage_mgr and storage_mgr.file_exists(file_path):
+                # Download to temp file for reading
+                temp_path = storage_mgr.save_to_temp('', file_path)
+                if temp_path:
+                    return temp_path
+        except Exception as e:
+            print(f"[RESOLVE_PATH] Warning: Could not access Cloud Storage path {file_path}: {e}")
+        # If Cloud Storage access fails, return None (don't fall through to local)
+        return None
+    
+    # Local filesystem paths
     if os.path.isabs(file_path) and os.path.exists(file_path):
         return file_path
     base_dir = os.path.dirname(__file__)
     candidate = os.path.join(base_dir, file_path)
     if os.path.exists(candidate):
         return candidate
+    # Check backend/uploads (for backward compatibility)
     uploads_dir = os.path.join(base_dir, 'uploads')
     fallback = os.path.join(uploads_dir, os.path.basename(file_path))
     if os.path.exists(fallback):
         return fallback
+    # Check project root uploads directory (where train/test files are stored)
+    project_root = os.path.dirname(base_dir)
+    project_uploads_dir = os.path.join(project_root, 'uploads')
+    project_fallback = os.path.join(project_uploads_dir, os.path.basename(file_path))
+    if os.path.exists(project_fallback):
+        return project_fallback
     return None
 
 
@@ -748,12 +813,48 @@ def _clean_nan_values(obj: Any) -> Any:
 
 
 DEFAULT_SCORECARD_CONFIG = {
-    "min_score": 0,      # Worst customer (highest risk)
-    "max_score": 600,    # Best customer (lowest risk)
+    "min_score": 0,      # Worst customer (highest risk) in standard mode
+    "max_score": 600,    # Best customer (lowest risk) in standard mode
     "base_score": 300,   # Score at baseline odds (midpoint of 0-600)
     "base_odds": 50,
-    "points_to_double_odds": 50
+    "points_to_double_odds": 50,
+    "invert_score_range": False  # If True: 600-0 (higher score = higher risk)
 }
+
+
+def _invert_scores(scores_array, min_score=0, max_score=600):
+    """
+    Invert scores so that the range becomes 600-0 instead of 0-600.
+    
+    In standard mode (0-600):
+        - Higher score = Lower risk (better customer)
+        - Lower score = Higher risk (worse customer)
+    
+    In inverted mode (600-0):
+        - Higher score = Higher risk (worse customer)  
+        - Lower score = Lower risk (better customer)
+    
+    Formula: inverted_score = max_score - score + min_score
+    Example: score=100 with range 0-600 -> inverted = 600 - 100 + 0 = 500
+             score=550 with range 0-600 -> inverted = 600 - 550 + 0 = 50
+    
+    Parameters:
+    -----------
+    scores_array : array-like
+        Original scores in 0-600 range (or configured min_score to max_score)
+    min_score : float
+        Minimum score value (default: 0)
+    max_score : float  
+        Maximum score value (default: 600)
+        
+    Returns:
+    --------
+    numpy.ndarray
+        Inverted scores where relationship to risk is reversed
+    """
+    scores_array = np.asarray(scores_array, dtype=float)
+    inverted = max_score - scores_array + min_score
+    return np.clip(inverted, min_score, max_score)
 
 
 def _scorecard_scaling_params(config: Dict[str, float] = DEFAULT_SCORECARD_CONFIG) -> Tuple[float, float]:
@@ -2171,6 +2272,84 @@ def preprocessing_steps_detailed():
     except Exception as e:
         return jsonify({"error": f"Preprocessing visualization failed: {str(e)}"}), 500
 
+def is_ordered_counting_feature(series, threshold=0.95):
+    """
+    Detect if a column appears to be an ordered counting feature like customer number/ID.
+    These are complete sequential sequences (e.g., 1, 2, 3, 4... or 0, 1, 2, 3...) 
+    that start from 0 or 1 and continue without gaps - essentially row identifiers.
+    
+    Args:
+        series: pandas Series to check
+        threshold: Minimum percentage of values that should match the ordered pattern (default 0.95)
+    
+    Returns:
+        bool: True if the column appears to be an ordered counting/ID feature
+    """
+    if series.empty or len(series) < 10:  # Need at least 10 values to be meaningful
+        return False
+    
+    # Only check numeric columns
+    if not pd.api.types.is_numeric_dtype(series):
+        return False
+    
+    # Remove NaN values
+    clean_series = series.dropna()
+    if len(clean_series) < 10:  # Need at least 10 non-null values
+        return False
+    
+    # Convert to numeric, handling any non-numeric values
+    try:
+        numeric_series = pd.to_numeric(clean_series, errors='coerce').dropna()
+        if len(numeric_series) < 10:
+            return False
+    except:
+        return False
+    
+    # Check if values are integers (or very close to integers)
+    is_integer_like = numeric_series.apply(lambda x: abs(x - round(x)) < 1e-6).all()
+    if not is_integer_like:
+        return False
+    
+    # Convert to integers
+    int_series = numeric_series.round().astype(int)
+    
+    # Get unique values sorted
+    unique_vals = sorted(int_series.unique())
+    if len(unique_vals) < 10:  # Need at least 10 unique values
+        return False
+    
+    # Check if unique values form a COMPLETE sequential sequence (no gaps)
+    # This is the key: all values from min to max must be present
+    min_val = unique_vals[0]
+    max_val = unique_vals[-1]
+    expected_count = max_val - min_val + 1
+    
+    # If the number of unique values equals the expected count, it's a complete sequence
+    if len(unique_vals) == expected_count:
+        # Check if it's a sequential sequence (each value is exactly 1 more than previous)
+        is_sequential = all(unique_vals[i+1] - unique_vals[i] == 1 for i in range(len(unique_vals)-1))
+        
+        if is_sequential:
+            # Check if most values in the series are within this range
+            matching = (int_series >= min_val) & (int_series <= max_val)
+            match_ratio = matching.sum() / len(int_series)
+            
+            # Also check that the sequence starts from a reasonable starting point (0, 1, or small positive number)
+            # This helps identify ID/counter features vs. other sequential data
+            starts_from_low = min_val <= 5  # Starts from 0, 1, 2, 3, 4, or 5
+            
+            # The sequence should cover a significant portion of the data
+            # (at least 80% of rows should have values in this sequential range)
+            if match_ratio >= threshold and starts_from_low:
+                # Additional check: the max value should be close to the number of rows
+                # (ID features typically go from 1 to n or 0 to n-1 where n is number of rows)
+                total_rows = len(series)
+                # Allow some flexibility: max_val should be within 20% of total rows
+                if abs(max_val - total_rows) <= total_rows * 0.2 or abs(max_val - (total_rows - 1)) <= total_rows * 0.2:
+                    return True
+    
+    return False
+
 @app.route('/api/preprocessing-column-changes', methods=['POST'])
 @optional_auth
 def preprocessing_column_changes():
@@ -2257,7 +2436,44 @@ def preprocessing_column_changes():
                 "column_changes": []
             }), 400
         
+        # First, detect ordered counting features and mark them for removal
+        ordered_counting_features = []
         for col in df_original.columns:
+            original_series = df_original[col]
+            if is_ordered_counting_feature(original_series):
+                ordered_counting_features.append(col)
+        
+        for col in df_original.columns:
+            # Skip ordered counting features - they will be marked as removed
+            if col in ordered_counting_features:
+                original_series = df_original[col]
+                missing_count = original_series.isna().sum()
+                negative_one_count = (original_series == -1).sum() if pd.api.types.is_numeric_dtype(original_series) else 0
+                
+                # Calculate variance for reference
+                variance = 0.0
+                if pd.api.types.is_numeric_dtype(original_series):
+                    if not original_series.empty:
+                        var_val = original_series.var()
+                        if var_val is not None and not (isinstance(var_val, float) and (np.isnan(var_val) or np.isinf(var_val))):
+                            variance = float(var_val)
+                
+                column_changes.append({
+                    'column': col,
+                    'changes': ["Column removed: Ordered counting feature (sequential numbers like 1, 2, 3, 4...) - not suitable for credit scoring"],
+                    'original_dtype': str(original_series.dtype),
+                    'processed_dtype': 'REMOVED',
+                    'original_missing': int(missing_count),
+                    'processed_missing': 0,
+                    'negative_one_count': int(negative_one_count),
+                    'variance': variance,
+                    'has_changes': True,
+                    'removed': True,
+                    'removal_reason': 'ordered_counting',
+                    'is_warning': True
+                })
+                continue
+            
             if col in df_processed.columns:
                 # Column was retained
                 original_series = df_original[col]
@@ -2833,21 +3049,52 @@ def preprocess_dataset_api():
         )
         
         # Generate new dataset ID and save processed data
-        new_dataset_id = generate_dataset_id()
-        processed_filename = f"processed_dataset_{new_dataset_id}.csv"
-        processed_path = os.path.join('uploads', processed_filename)
+        user_id = get_current_user_id()
+        ts_fname = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        processed_filename = f"processed_dataset_{ts_fname}.csv"
         
-        # Save processed dataset
-        df_processed.to_csv(processed_path, index=False)
+        # Ensure uploads directory exists
+        uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        processed_path = os.path.join(uploads_dir, processed_filename)
+        
+        # Save processed dataset locally first
+        try:
+            df_processed.to_csv(processed_path, index=False)
+            if not os.path.exists(processed_path):
+                raise Exception("Failed to save processed dataset file")
+        except Exception as e:
+            print(f"[PREPROCESS] Error saving processed dataset: {e}")
+            return jsonify({"error": f"Failed to save processed dataset: {str(e)}"}), 500
+        
+        # Upload to Cloud Storage if configured
+        final_file_path = processed_path
+        if storage_manager and storage_manager.uploads_bucket:
+            try:
+                blob_name = f"uploads/{processed_filename}"
+                gcs_path = storage_manager.upload_file(
+                    processed_path,
+                    storage_manager.uploads_bucket,
+                    blob_name
+                )
+                if gcs_path.startswith('gs://'):
+                    final_file_path = gcs_path
+                    print(f"[PREPROCESS] Processed dataset uploaded to Cloud Storage: {gcs_path}")
+                else:
+                    print(f"[PREPROCESS] Warning: Cloud Storage upload returned local path, using local file")
+            except Exception as e:
+                print(f"[PREPROCESS] Warning: Failed to upload processed dataset to Cloud Storage: {e}")
+                import traceback
+                traceback.print_exc()
+                # Continue with local path
         
         # Store dataset info in database
         dataset_info = {
-            'id': new_dataset_id,
             'filename': processed_filename,
-            'file_path': processed_path,
+            'file_path': final_file_path if final_file_path.startswith('gs://') else os.path.join('uploads', processed_filename),
             'original_filename': f"processed_from_{dataset_id}",
             'upload_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'file_size': os.path.getsize(processed_path),
+            'file_size': os.path.getsize(processed_path) if os.path.exists(processed_path) else 0,
             'num_rows': len(df_processed),
             'num_columns': len(df_processed.columns),
             'preprocessing_applied': True,
@@ -2855,8 +3102,12 @@ def preprocess_dataset_api():
             'preprocessing_report': preprocessing_report
         }
         
-        # Save to database (you'll need to implement this based on your storage)
-        save_dataset_info(dataset_info)
+        # Save to database
+        new_dataset_id = save_dataset_info(dataset_info)
+        if not new_dataset_id:
+            # Fallback: generate timestamp-based ID if database save fails
+            new_dataset_id = int(datetime.now().timestamp())
+            print(f"[PREPROCESS] Warning: Database save failed, using fallback ID: {new_dataset_id}")
         
         return jsonify({
             "success": True,
@@ -2881,33 +3132,73 @@ def generate_dataset_id():
 
 def save_dataset_info(dataset_info):
     """
-    Save dataset information to your database.
-    You'll need to implement this based on your storage (SQLite, JSON file, etc.)
+    Save dataset information to the database.
+    Uses the database instead of JSON file for Cloud Run compatibility.
     """
-    # Example implementation using a JSON file
     try:
-        if os.path.exists('datasets.json'):
-            with open('datasets.json', 'r') as f:
-                datasets = json.load(f)
-        else:
-            datasets = []
-        
-        datasets.append(dataset_info)
-        
-        with open('datasets.json', 'w') as f:
-            json.dump(datasets, f, indent=2)
+        user_id = get_current_user_id()
+        dataset_id = create_dataset(
+            name=dataset_info.get('original_filename', f"processed_from_{dataset_info.get('original_dataset_id', 'unknown')}"),
+            file_path=dataset_info.get('file_path', ''),
+            total_features=dataset_info.get('num_columns', 0),
+            target_variable='',  # Will be set later if needed
+            user_id=user_id
+        )
+        print(f"[SAVE_DATASET_INFO] Created dataset record with ID: {dataset_id}")
+        return dataset_id
     except Exception as e:
-        print(f"Warning: Could not save dataset info: {e}")
+        print(f"[SAVE_DATASET_INFO] Error: Could not save dataset info to database: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # Helper function to safely save CSV with retry logic
 def safe_save_csv(df, dataset_id: Optional[int] = None, max_retries=3):
     """
     Safely saves DataFrame to dataset CSV file with retry logic for Windows permission issues.
+    Handles both local filesystem and Cloud Storage paths.
     """
     csv_path = get_csv_path(dataset_id)
+    
+    # If path is Cloud Storage, we need to save to temp first, then upload
+    if csv_path.startswith('gs://'):
+        try:
+            from storage import get_storage_manager
+            import tempfile
+            storage_mgr = get_storage_manager()
+            
+            # Save to temporary file first
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as tmp:
+                temp_path = tmp.name
+                df.to_csv(temp_path, index=False)
+            
+            # Upload to Cloud Storage
+            if storage_mgr and storage_mgr.uploads_bucket:
+                # Extract blob name from gs:// path
+                parts = csv_path[5:].split('/', 1)
+                if len(parts) > 1:
+                    blob_name = parts[1]
+                else:
+                    blob_name = f"uploads/{os.path.basename(temp_path)}"
+                
+                storage_mgr.upload_file(temp_path, storage_mgr.uploads_bucket, blob_name)
+                os.remove(temp_path)  # Clean up temp file
+                return True
+            else:
+                # No Cloud Storage configured, save locally instead
+                local_path = os.path.join('uploads', os.path.basename(temp_path))
+                os.rename(temp_path, local_path)
+                return True
+        except Exception as e:
+            print(f"[SAFE_SAVE_CSV] Error saving to Cloud Storage: {e}")
+            return False
+    
+    # Local filesystem path
     import time
     for attempt in range(max_retries):
         try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
             df.to_csv(csv_path, index=False)
             return True
         except PermissionError as e:
@@ -2915,6 +3206,13 @@ def safe_save_csv(df, dataset_id: Optional[int] = None, max_retries=3):
                 time.sleep(0.1)  # Wait 100ms before retry
             else:
                 raise e  # Re-raise on final attempt
+        except FileNotFoundError:
+            # Directory doesn't exist, try creating it
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+            if attempt < max_retries - 1:
+                continue
+            else:
+                raise
     return False
 
 
@@ -2938,12 +3236,28 @@ def get_uploaded_csv_columns():
         return jsonify({"error": str(e)}), 500
 
 # ----------- Health Check -----------
+@app.route('/health', methods=['GET'])
 @app.route('/api/health', methods=['GET'])
 def health():
     """
-    A simple health check endpoint.
+    Health check endpoint for Cloud Run and general monitoring.
     """
-    return jsonify({"status": "OK", "time": str(datetime.datetime.now())})
+    try:
+        # Test database connection
+        conn = get_db_connection()
+        conn.close()
+        return jsonify({
+            "status": "healthy",
+            "database": "connected",
+            "time": str(datetime.datetime.utcnow()),
+            "storage": "gcs" if (storage_manager and storage_manager.use_gcs) else "local"
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "time": str(datetime.datetime.utcnow())
+        }), 503
 
 # ----------- Database Health Check -----------
 @app.route('/api/db-health', methods=['GET'])
@@ -4122,6 +4436,23 @@ def upload_csv():
                 os.remove(save_path)
                 return jsonify({"error": "Uploaded CSV file is empty"}), 400
             
+            # Upload to Cloud Storage if configured
+            final_file_path = save_path
+            if storage_manager and storage_manager.uploads_bucket:
+                try:
+                    blob_name = f"uploads/{timestamped_name}"
+                    gcs_path = storage_manager.upload_file(
+                        save_path,
+                        storage_manager.uploads_bucket,
+                        blob_name
+                    )
+                    if gcs_path.startswith('gs://'):
+                        final_file_path = gcs_path
+                        print(f"[UPLOAD] File uploaded to Cloud Storage: {gcs_path}")
+                except Exception as e:
+                    print(f"[UPLOAD] Warning: Failed to upload to Cloud Storage: {e}")
+                    # Continue with local path
+            
             # Read header to get column names - try multiple methods for reliability
             columns = None
             try:
@@ -4184,11 +4515,16 @@ def upload_csv():
             # Create dataset record
             dataset_name = file.filename.replace('.csv', '')
 
-            # Store a relative path in the dataset record (so DB does not hold machine-specific absolute paths)
-            rel_path = os.path.join('uploads', timestamped_name)
+            # Store path in the dataset record
+            # If using Cloud Storage, store gs:// path, otherwise relative path
+            if final_file_path.startswith('gs://'):
+                stored_path = final_file_path
+            else:
+                stored_path = os.path.join('uploads', timestamped_name)
+            
             dataset_id = create_dataset(
                 name=f"{dataset_name}_{timestamp}",
-                file_path=rel_path,
+                file_path=stored_path,
                 total_features=len(columns),
                 discrete_features=0,  # Will be updated after classification
                 continuous_features=0,  # Will be updated after classification
@@ -4196,16 +4532,9 @@ def upload_csv():
                 user_id=user_id  # Associate with authenticated user
             )
             
-            # Create feature records for all columns (initially unclassified)
-            features_data = [
-                {
-                    'name': col,
-                    'type': 'continuous',  # Default, will be updated by classification
-                    'selected': False
-                }
-                for col in columns
-            ]
-            create_features_batch(dataset_id, features_data)
+            # Don't create feature records until user explicitly classifies them
+            # Features will be created when user classifies columns via /api/upsert-single-record
+            # This ensures no default classification happens
             
             return jsonify({
                 "success": True,
@@ -4214,7 +4543,7 @@ def upload_csv():
                 "rowCount": row_count,
                 "timestamp": timestamp,
                 # dataset_path shows the stored (relative) path; resolved_path has the absolute path on server
-                "dataset_path": rel_path,
+                "dataset_path": stored_path,
                 "resolved_path": save_path
             })
         except Exception as e:
@@ -6771,7 +7100,16 @@ def get_csv_samples():
 
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
-client = InferenceClient(api_key=HF_TOKEN)
+# Initialize client only if token is available
+if HF_TOKEN:
+    try:
+        client = InferenceClient(api_key=HF_TOKEN)
+    except Exception as e:
+        print(f"[APP] Warning: Failed to initialize InferenceClient: {e}")
+        client = None
+else:
+    client = None
+    print("[APP] Warning: HF_TOKEN not set, chat endpoint will not work")
 
 MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct:novita"
 
@@ -6879,6 +7217,9 @@ RULES:
 """
 
         # ---------- CALL LLAMA ----------
+        if not client:
+            return jsonify({"error": "Chat service is not available. HF_TOKEN is not configured."}), 503
+        
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -6889,7 +7230,11 @@ RULES:
             max_tokens=350
         )
 
-        ai_reply = response.choices[0].message["content"]
+        # Handle both dictionary and attribute access patterns
+        if hasattr(response.choices[0].message, 'content'):
+            ai_reply = response.choices[0].message.content
+        else:
+            ai_reply = response.choices[0].message.get("content", "")
 
         return jsonify({"reply": ai_reply})
 
@@ -6948,7 +7293,7 @@ def ai_classify_columns():
         )
 
         completion = client.chat.completions.create(
-            model="meta-llama/Llama-3.1-8B-Instruct:novita",
+            model="Qwen/Qwen2.5-72B-Instruct:novita",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that replies with strict JSON to classify discrete and continuous."},
                 {"role": "user", "content": prompt}
@@ -8851,6 +9196,22 @@ def get_record(record_id):
         continuous_cols = [f['name'] for f in features if f.get('type') == 'continuous']
         selected_cols = [f['name'] for f in features if f.get('selected')]
         
+        # If no features exist (unclassified dataset), get columns from CSV file
+        all_csv_columns = []
+        if len(features) == 0:
+            try:
+                csv_path = get_csv_path(record_id)
+                # get_csv_path() uses _resolve_dataset_file_path() which handles Cloud Storage
+                # and returns a local temp file path for gs:// files, so we can read it directly
+                if csv_path:
+                    df_sample = pd.read_csv(csv_path, nrows=1)
+                    all_csv_columns = df_sample.columns.tolist()
+                    print(f"[get_record] No features found, loaded {len(all_csv_columns)} columns from CSV")
+            except Exception as e:
+                print(f"[get_record] Warning: Could not load columns from CSV: {e}")
+                import traceback
+                traceback.print_exc()
+        
         print(f"[get_record] Discrete: {len(discrete_cols)}, Continuous: {len(continuous_cols)}, Selected: {len(selected_cols)}")
         
         model_ready_cols = [f['name'] for f in features if f.get('model_ready')]
@@ -8919,7 +9280,8 @@ def get_record(record_id):
             'binning_data': binning_data,  # New structured binning data
             'dashboard_selected_columns': model_ready_cols,
             'final_selected_columns': final_selected_cols,
-            'preprocess_selection': dataset.get('preprocess_selection', False)
+            'preprocess_selection': dataset.get('preprocess_selection', False),
+            'all_columns': all_csv_columns if all_csv_columns else None  # Include CSV columns if no features exist
         }
         
         return jsonify(result)
@@ -9261,10 +9623,14 @@ def logistic_regression_analysis():
             return jsonify({"error": "No valid data after preprocessing"}), 400
 
         # Remove constant features (zero variance)
+        dropped_details = {}  # variable_name -> reason
         variances = X.var()
         constant_cols = variances[variances == 0].index.tolist()
+        dropped_constants = []
         if constant_cols:
             dropped_constants = [col.replace('_WOE', '') for col in constant_cols]
+            for var in dropped_constants:
+                dropped_details[var] = 'constant_value'
             print(f"LOGISTIC DEBUG: Removing constant columns: {dropped_constants}")
             X = X.drop(columns=constant_cols)
             feature_cols = [col for col in feature_cols if col not in constant_cols]
@@ -9308,10 +9674,12 @@ def logistic_regression_analysis():
             
             # Drop the high VIF column
             print(f"LOGISTIC DEBUG: Dropping high VIF column '{max_vif_col}' (VIF: {max_vif})")
+            dropped_var = max_vif_col.replace('_WOE', '')
+            dropped_details[dropped_var] = f'high_multicollinearity_vif_{max_vif:.2f}'
             X = X.drop(columns=[max_vif_col])
             feature_cols = [col for col in feature_cols if col not in [max_vif_col]]
             selected_variables = [var for var in selected_variables if f'{var}_WOE' not in [max_vif_col]]
-            vif_dropped.append(max_vif_col.replace('_WOE', ''))
+            vif_dropped.append(dropped_var)
         
         if vif_dropped:
             print(f"LOGISTIC DEBUG: VIF dropped features (due to multicollinearity): {vif_dropped}")
@@ -9334,10 +9702,12 @@ def logistic_regression_analysis():
                 break
             to_drop = min(var_dict, key=var_dict.get)
             print(f"LOGISTIC DEBUG: Dropping low-variance column '{to_drop}' due to rank deficiency")
+            dropped_var = to_drop.replace('_WOE', '')
+            dropped_details[dropped_var] = 'rank_deficiency'
             X = X.drop(to_drop, axis=1)
             feature_cols = [col for col in feature_cols if col not in [to_drop]]
             selected_variables = [var for var in selected_variables if f'{var}_WOE' not in [to_drop]]
-            rank_dropped.append(to_drop.replace('_WOE', ''))
+            rank_dropped.append(dropped_var)
             X_const = sm.add_constant(X)
             rank = np.linalg.matrix_rank(X_const)
             full_rank = X_const.shape[1]
@@ -10750,7 +11120,8 @@ def logistic_regression_analysis():
             'ks_stat': ks_stat,
             'ks_threshold': ks_threshold,
             'ks_curve': ks_curve,
-            'dropped_variables': dropped_variables  # Updated: includes constants, high-VIF, rank-deficient
+            'dropped_variables': dropped_variables,  # List of dropped variable names
+            'dropped_details': dropped_details  # Dict mapping variable names to drop reasons
         }
 
         try:
@@ -15254,6 +15625,7 @@ def delete_record(record_id):
     """
     Delete a specific analysis record/dataset by ID.
     Cascade delete handles all related features, binning_steps, bins, etc.
+    Also deletes associated artifacts and uploaded CSV files.
     Only allows deletion if user owns the record.
     """
     try:
@@ -15263,6 +15635,186 @@ def delete_record(record_id):
             # Check ownership if user is authenticated
             if user_id and not user_owns_dataset(user_id, record_id):
                 return jsonify({"error": "Access denied"}), 403
+            
+            # Delete uploaded CSV file if it exists
+            dataset_path = dataset.get('dataset_path') or dataset.get('file_path')
+            if dataset_path:
+                # Use storage manager for Cloud Storage paths, os.remove for local paths
+                if dataset_path.startswith('gs://'):
+                    if storage_manager:
+                        storage_manager.delete_file(dataset_path)
+                    else:
+                        print(f"[DELETE RECORD] Warning: Cloud Storage not configured, cannot delete: {dataset_path}")
+                else:
+                    resolved_path = _resolve_dataset_file_path(dataset_path)
+                    if resolved_path:
+                        if resolved_path.startswith('gs://'):
+                            # Resolved path is still gs://, use storage manager
+                            if storage_manager:
+                                storage_manager.delete_file(resolved_path)
+                        else:
+                            # Local file
+                            if os.path.exists(resolved_path):
+                                try:
+                                    os.remove(resolved_path)
+                                    print(f"[DELETE RECORD] Deleted uploaded file: {resolved_path}")
+                                except OSError as e:
+                                    print(f"[DELETE RECORD] Warning: Failed to delete uploaded file {resolved_path}: {e}")
+            
+            # Delete train and test dataset files
+            # Uploads directory is at project root, not in backend folder
+            project_root = os.path.dirname(os.path.dirname(__file__))
+            uploads_dir = os.path.join(project_root, 'uploads')
+            
+            # First, try to delete using paths from database
+            train_path = dataset.get('train_path')
+            test_path = dataset.get('test_path')
+            
+            if train_path:
+                if train_path.startswith('gs://'):
+                    # Cloud Storage path
+                    if storage_manager:
+                        storage_manager.delete_file(train_path)
+                    else:
+                        print(f"[DELETE RECORD] Warning: Cloud Storage not configured, cannot delete: {train_path}")
+                else:
+                    resolved_train_path = _resolve_dataset_file_path(train_path)
+                    if resolved_train_path:
+                        if resolved_train_path.startswith('gs://'):
+                            if storage_manager:
+                                storage_manager.delete_file(resolved_train_path)
+                        else:
+                            if os.path.exists(resolved_train_path):
+                                try:
+                                    os.remove(resolved_train_path)
+                                    print(f"[DELETE RECORD] Deleted train dataset (from DB path): {resolved_train_path}")
+                                except OSError as e:
+                                    print(f"[DELETE RECORD] Warning: Failed to delete train dataset {resolved_train_path}: {e}")
+            
+            if test_path:
+                if test_path.startswith('gs://'):
+                    # Cloud Storage path
+                    if storage_manager:
+                        storage_manager.delete_file(test_path)
+                    else:
+                        print(f"[DELETE RECORD] Warning: Cloud Storage not configured, cannot delete: {test_path}")
+                else:
+                    resolved_test_path = _resolve_dataset_file_path(test_path)
+                    if resolved_test_path:
+                        if resolved_test_path.startswith('gs://'):
+                            if storage_manager:
+                                storage_manager.delete_file(resolved_test_path)
+                        else:
+                            if os.path.exists(resolved_test_path):
+                                try:
+                                    os.remove(resolved_test_path)
+                                    print(f"[DELETE RECORD] Deleted test dataset (from DB path): {resolved_test_path}")
+                                except OSError as e:
+                                    print(f"[DELETE RECORD] Warning: Failed to delete test dataset {resolved_test_path}: {e}")
+            
+            # Always search for train/test files matching the pattern (more reliable)
+            if os.path.exists(uploads_dir):
+                # Pattern: train_set_dataset_{record_id}_*.csv
+                train_pattern = os.path.join(uploads_dir, f"train_set_dataset_{record_id}_*.csv")
+                test_pattern = os.path.join(uploads_dir, f"test_set_dataset_{record_id}_*.csv")
+                
+                # Also try without .csv extension in case files were saved differently
+                train_pattern_no_ext = os.path.join(uploads_dir, f"train_set_dataset_{record_id}_*")
+                test_pattern_no_ext = os.path.join(uploads_dir, f"test_set_dataset_{record_id}_*")
+                
+                print(f"[DELETE RECORD] Searching for train files with pattern: {train_pattern}")
+                print(f"[DELETE RECORD] Searching for test files with pattern: {test_pattern}")
+                
+                train_files = glob.glob(train_pattern)
+                test_files = glob.glob(test_pattern)
+                
+                # Also check pattern without extension
+                train_files_no_ext = [f for f in glob.glob(train_pattern_no_ext) if f not in train_files and not f.endswith('.csv')]
+                test_files_no_ext = [f for f in glob.glob(test_pattern_no_ext) if f not in test_files and not f.endswith('.csv')]
+                
+                # Additional approach: list all files and filter by record_id pattern
+                try:
+                    all_files = os.listdir(uploads_dir)
+                    train_files_manual = [
+                        os.path.join(uploads_dir, f) 
+                        for f in all_files 
+                        if f.startswith(f"train_set_dataset_{record_id}_") and os.path.isfile(os.path.join(uploads_dir, f))
+                    ]
+                    test_files_manual = [
+                        os.path.join(uploads_dir, f) 
+                        for f in all_files 
+                        if f.startswith(f"test_set_dataset_{record_id}_") and os.path.isfile(os.path.join(uploads_dir, f))
+                    ]
+                    
+                    # Combine all found files (remove duplicates)
+                    all_train_files = list(set(train_files + train_files_no_ext + train_files_manual))
+                    all_test_files = list(set(test_files + test_files_no_ext + test_files_manual))
+                except OSError as e:
+                    print(f"[DELETE RECORD] Warning: Failed to list uploads directory: {e}")
+                    all_train_files = train_files + train_files_no_ext
+                    all_test_files = test_files + test_files_no_ext
+                
+                print(f"[DELETE RECORD] Found {len(all_train_files)} train file(s), {len(all_test_files)} test file(s)")
+                
+                # Delete all train files
+                for train_file in all_train_files:
+                    try:
+                        if os.path.exists(train_file) and os.path.isfile(train_file):
+                            os.remove(train_file)
+                            print(f"[DELETE RECORD] ✓ Deleted train dataset: {train_file}")
+                        else:
+                            print(f"[DELETE RECORD] Train file not found or not a file (already deleted?): {train_file}")
+                    except OSError as e:
+                        print(f"[DELETE RECORD] Warning: Failed to delete train dataset {train_file}: {e}")
+                
+                # Delete all test files
+                for test_file in all_test_files:
+                    try:
+                        if os.path.exists(test_file) and os.path.isfile(test_file):
+                            os.remove(test_file)
+                            print(f"[DELETE RECORD] ✓ Deleted test dataset: {test_file}")
+                        else:
+                            print(f"[DELETE RECORD] Test file not found or not a file (already deleted?): {test_file}")
+                    except OSError as e:
+                        print(f"[DELETE RECORD] Warning: Failed to delete test dataset {test_file}: {e}")
+            else:
+                print(f"[DELETE RECORD] Warning: Uploads directory does not exist: {uploads_dir}")
+            
+            # Delete all artifact files for this dataset (local filesystem)
+            artifact_pattern = _artifact_pattern(record_id)
+            artifact_files = glob.glob(artifact_pattern)
+            for artifact_file in artifact_files:
+                try:
+                    os.remove(artifact_file)
+                    print(f"[DELETE RECORD] Deleted artifact: {artifact_file}")
+                except OSError as e:
+                    print(f"[DELETE RECORD] Warning: Failed to delete artifact {artifact_file}: {e}")
+            
+            # Also delete artifacts from Cloud Storage if configured
+            if storage_manager and storage_manager.artifacts_bucket:
+                try:
+                    # List and delete artifacts matching the pattern
+                    bucket = storage_manager.client.bucket(storage_manager.artifacts_bucket)
+                    prefix = f"artifacts/{record_id}_"
+                    blobs = bucket.list_blobs(prefix=prefix)
+                    
+                    deleted_count = 0
+                    for blob in blobs:
+                        try:
+                            blob.delete()
+                            deleted_count += 1
+                            print(f"[DELETE RECORD] Deleted artifact from Cloud Storage: gs://{storage_manager.artifacts_bucket}/{blob.name}")
+                        except Exception as e:
+                            print(f"[DELETE RECORD] Warning: Failed to delete artifact blob {blob.name}: {e}")
+                    
+                    if deleted_count > 0:
+                        print(f"[DELETE RECORD] Deleted {deleted_count} artifact(s) from Cloud Storage")
+                except Exception as e:
+                    print(f"[DELETE RECORD] Warning: Failed to list/delete artifacts from Cloud Storage: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Delete from database (cascade will handle related records)
             delete_dataset(record_id)
             return jsonify({"success": True})
         return jsonify({"error": "Dataset not found"}), 404
@@ -15685,6 +16237,10 @@ def debug_binning(variable):
 def generate_scorecard():
     """
     Generates a score card using pre-computed model results.
+    
+    Supports two score range modes:
+    - Standard (0-600): Higher score = Lower risk (default)
+    - Inverted (600-0): Higher score = Higher risk
     """
     try:
         # Parse request data
@@ -15694,6 +16250,7 @@ def generate_scorecard():
         woe_transformed_data = data.get('woe_transformed_data', {})
         model_results = data.get('model_results', {})  # Accept pre-computed model results
         model_type = data.get('model_type', 'logistic')  # Accept model type
+        invert_score_range = data.get('invert_score_range', False)  # If True: 600-0 (higher score = higher risk)
         dataset_id = (
             data.get('record_id')
             or data.get('dataset_id')
@@ -16390,7 +16947,13 @@ def generate_scorecard():
             score_min_raw = float(min_total_score)
             score_max_raw = float(max_total_score)
         
-        # Build score_parameters with raw min/max
+        # NOTE: Do NOT invert bin scores here. The inversion is applied to final scores in apply_scorecard.
+        # We only store the invert_score_range flag so apply_scorecard knows to invert the totals.
+        if invert_score_range:
+            print(f"[generate_scorecard] Score range mode: 600-0 (higher score = higher risk)")
+            print(f"[generate_scorecard] Bin scores NOT inverted - inversion applied to final scores in apply_scorecard")
+        
+        # Build score_parameters with raw min/max and inversion flag
         score_parameters = {
             "factor": round(float(factor), 4),
             "offset": round(float(offset), 4),
@@ -16403,6 +16966,8 @@ def generate_scorecard():
             "model_type": model_type,
             "score_min_raw": score_min_raw,  # NEW: Raw min from training data
             "score_max_raw": score_max_raw,  # NEW: Raw max from training data
+            "invert_score_range": invert_score_range,  # NEW: Score range inversion flag
+            "score_interpretation": "higher_score_higher_risk" if invert_score_range else "higher_score_lower_risk",
         }
         
         # Update artifact with scorecard data
@@ -16457,6 +17022,10 @@ def generate_scorecard():
 def apply_scorecard():
     """
     Applies the score card to all records in the uploaded dataset using pre-computed model results.
+    
+    Supports two score range modes:
+    - Standard (0-600): Higher score = Lower risk (default)
+    - Inverted (600-0): Higher score = Higher risk
     """
     import numpy as np
     try:
@@ -16466,6 +17035,7 @@ def apply_scorecard():
         woe_transformed_data = data.get('woe_transformed_data', {})
         model_results = data.get('model_results', {})  # Accept pre-computed model results
         model_type = data.get('model_type', 'logistic')  # Accept model type
+        invert_score_range = data.get('invert_score_range', False)  # If True: 600-0 (higher score = higher risk)
         dataset_id = (
             data.get('record_id')
             or data.get('dataset_id')
@@ -16847,6 +17417,16 @@ def apply_scorecard():
             else:
                 print(f"[APPLY-SCORECARD] Using raw scorecard scores (no normalization parameters available)")
         
+        # Apply score inversion if requested (600-0 mode: higher score = higher risk)
+        # Check both request parameter and stored score_parameters
+        should_invert = invert_score_range or (score_parameters and score_parameters.get('invert_score_range', False))
+        if should_invert:
+            min_score = score_parameters.get('min_score', 0) if score_parameters else 0
+            max_score = score_parameters.get('max_score', 600) if score_parameters else 600
+            scores_array = _invert_scores(scores_array, min_score, max_score)
+            print(f"[APPLY-SCORECARD] Inverted scores to 600-0 range (higher score = higher risk)")
+            print(f"[APPLY-SCORECARD] Inverted scores range: {np.min(scores_array):.2f} to {np.max(scores_array):.2f}")
+        
         scores = scores_array.astype(float).tolist()
         
         print(f"[APPLY-SCORECARD] Scorecard method - Calculated {len(scores)} scores")
@@ -16885,8 +17465,15 @@ def apply_scorecard():
         
         print(f"[APPLY-SCORECARD] Created {len(results_list)} result entries from {len(scores_np)} predictions")
         
-        # Sort descending by score (HIGHEST scores first = LOWEST risk first)
-        results_list = sorted(results_list, key=lambda x: x["score"], reverse=True)
+        # Sort by score - direction depends on score interpretation
+        if should_invert:
+            # Inverted mode (600-0): Higher score = Higher risk, so sort ascending (lowest risk first)
+            results_list = sorted(results_list, key=lambda x: x["score"], reverse=False)
+            print(f"[APPLY-SCORECARD] Sorted results ascending (inverted mode: low score = low risk first)")
+        else:
+            # Standard mode (0-600): Higher score = Lower risk, so sort descending (lowest risk first)  
+            results_list = sorted(results_list, key=lambda x: x["score"], reverse=True)
+            print(f"[APPLY-SCORECARD] Sorted results descending (standard mode: high score = low risk first)")
 
         # Calculate KS statistic (separation number)
         # CRITICAL FIX: Use probabilities for ROC curve, not scores
@@ -16940,61 +17527,111 @@ def apply_scorecard():
             score_max = float(np.max(scores_array))
             score_range = score_max - score_min
             
-            # Calculate risk bands using percentiles of all scores
+            # Calculate risk bands using equal-width bands across the 0-600 range
+            # This ensures consistent bands regardless of actual score distribution
             if len(scores_array) > 0:
-                # Method: Use percentiles to create 5 risk bands
-                # Very High Risk: Bottom 20% of scores (where most bads are)
-                # High Risk: 20-40% of scores
-                # Medium Risk: 40-60% of scores  
-                # Low Risk: 60-80% of scores
-                # Very Low Risk: Top 20% of scores (where most goods are)
+                # Use fixed bands on 0-600 scale for consistency
+                # Band width = 120 (600/5)
+                band_width = 120
                 
-                p20 = float(np.percentile(scores_array, 20))
-                p40 = float(np.percentile(scores_array, 40))
-                p60 = float(np.percentile(scores_array, 60))
-                p80 = float(np.percentile(scores_array, 80))
+                # For 600-0 mode (inverted): Higher score = Higher risk
+                # For 0-600 mode (standard): Higher score = Lower risk
                 
-                risk_bands = [
-                    {
-                        "label": "Very High Risk",
-                        "description": "Likely bad",
-                        "min": score_min,
-                        "max": p20,
-                        "color": "#da3633"  # Red
-                    },
-                    {
-                        "label": "High Risk",
-                        "description": "",
-                        "min": p20,
-                        "max": p40,
-                        "color": "#ed8936"  # Orange
-                    },
-                    {
-                        "label": "Medium Risk",
-                        "description": "",
-                        "min": p40,
-                        "max": p60,
-                        "color": "#d29922"  # Yellow
-                    },
-                    {
-                        "label": "Low Risk",
-                        "description": "",
-                        "min": p60,
-                        "max": p80,
-                        "color": "#58a6ff"  # Blue
-                    },
-                    {
-                        "label": "Very Low Risk",
-                        "description": "Good customer",
-                        "min": p80,
-                        "max": score_max,
-                        "color": "#2ea043"  # Green
-                    }
-                ]
+                if should_invert:
+                    # Inverted mode (600-0): Score 600 = highest risk, Score 0 = lowest risk
+                    # Band 0-120: Very Low Risk (good customers)
+                    # Band 120-240: Low Risk
+                    # Band 240-360: Medium Risk  
+                    # Band 360-480: High Risk
+                    # Band 480-600: Very High Risk (bad customers)
+                    risk_bands = [
+                        {
+                            "label": "Very Low Risk",
+                            "description": "Good customer",
+                            "min": 0,
+                            "max": 120,
+                            "color": "#2ea043"  # Green
+                        },
+                        {
+                            "label": "Low Risk",
+                            "description": "",
+                            "min": 120,
+                            "max": 240,
+                            "color": "#58a6ff"  # Blue
+                        },
+                        {
+                            "label": "Medium Risk",
+                            "description": "",
+                            "min": 240,
+                            "max": 360,
+                            "color": "#d29922"  # Yellow
+                        },
+                        {
+                            "label": "High Risk",
+                            "description": "",
+                            "min": 360,
+                            "max": 480,
+                            "color": "#ed8936"  # Orange
+                        },
+                        {
+                            "label": "Very High Risk",
+                            "description": "Likely bad",
+                            "min": 480,
+                            "max": 600,
+                            "color": "#da3633"  # Red
+                        }
+                    ]
+                else:
+                    # Standard mode (0-600): Score 0 = highest risk, Score 600 = lowest risk
+                    # Band 0-120: Very High Risk (bad customers)
+                    # Band 120-240: High Risk
+                    # Band 240-360: Medium Risk
+                    # Band 360-480: Low Risk  
+                    # Band 480-600: Very Low Risk (good customers)
+                    risk_bands = [
+                        {
+                            "label": "Very High Risk",
+                            "description": "Likely bad",
+                            "min": 0,
+                            "max": 120,
+                            "color": "#da3633"  # Red
+                        },
+                        {
+                            "label": "High Risk",
+                            "description": "",
+                            "min": 120,
+                            "max": 240,
+                            "color": "#ed8936"  # Orange
+                        },
+                        {
+                            "label": "Medium Risk",
+                            "description": "",
+                            "min": 240,
+                            "max": 360,
+                            "color": "#d29922"  # Yellow
+                        },
+                        {
+                            "label": "Low Risk",
+                            "description": "",
+                            "min": 360,
+                            "max": 480,
+                            "color": "#58a6ff"  # Blue
+                        },
+                        {
+                            "label": "Very Low Risk",
+                            "description": "Good customer",
+                            "min": 480,
+                            "max": 600,
+                            "color": "#2ea043"  # Green
+                        }
+                    ]
                 
                 # Calculate bad rates for each band
                 for band in risk_bands:
-                    band_mask = (scores_array >= band["min"]) & (scores_array <= band["max"])
+                    band_mask = (scores_array >= band["min"]) & (scores_array < band["max"])
+                    # Include max boundary for the last band
+                    if band["max"] == 600:
+                        band_mask = (scores_array >= band["min"]) & (scores_array <= band["max"])
                     band_scores = scores_array[band_mask]
                     band_targets = targets_array[band_mask]
                     band_total = len(band_scores)
@@ -17004,15 +17641,7 @@ def apply_scorecard():
                     band["bad_count"] = band_bads
                     band["good_count"] = int(band_total - band_bads)
             else:
-                # Fallback: Equal width bands
-                band_width = score_range / 5
-                risk_bands = [
-                    {"label": "Very High Risk", "description": "Likely bad", "min": score_min, "max": score_min + band_width, "color": "#da3633", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
-                    {"label": "High Risk", "description": "", "min": score_min + band_width, "max": score_min + 2*band_width, "color": "#ed8936", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
-                    {"label": "Medium Risk", "description": "", "min": score_min + 2*band_width, "max": score_min + 3*band_width, "color": "#d29922", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
-                    {"label": "Low Risk", "description": "", "min": score_min + 3*band_width, "max": score_min + 4*band_width, "color": "#58a6ff", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0},
-                    {"label": "Very Low Risk", "description": "Good customer", "min": score_min + 4*band_width, "max": score_max, "color": "#2ea043", "bad_rate": 0, "count": 0, "bad_count": 0, "good_count": 0}
-                ]
+                risk_bands = []
                 
             print(f"DEBUG: Risk bands calculated: {len(risk_bands)} bands")
             for band in risk_bands:
@@ -17034,7 +17663,14 @@ def apply_scorecard():
             # For credit scoring, we typically use a different threshold than 0.5
             # Since scores are now properly scaled, we can use a score threshold
             score_threshold = np.percentile(scores_np, 50)  # Median score as threshold
-            y_pred = [1 if score < score_threshold else 0 for score in scores_np]  # Lower score = higher risk = predicted bad
+            
+            # Classification depends on score interpretation
+            if should_invert:
+                # Inverted mode: Higher score = Higher risk = predicted bad
+                y_pred = [1 if score > score_threshold else 0 for score in scores_np]
+            else:
+                # Standard mode: Lower score = Higher risk = predicted bad
+                y_pred = [1 if score < score_threshold else 0 for score in scores_np]
             
             accuracy = accuracy_score(y_true, y_pred)
             precision = precision_score(y_true, y_pred, zero_division=0)
@@ -17042,7 +17678,7 @@ def apply_scorecard():
             f1 = f1_score(y_true, y_pred, zero_division=0)
             
             print(f"DEBUG: Additional metrics - AUC: {roc_auc:.4f}, Accuracy: {accuracy:.4f}")
-            print(f"DEBUG: Classification at score threshold {score_threshold:.2f}")
+            print(f"DEBUG: Classification at score threshold {score_threshold:.2f} (inverted={should_invert})")
             
         except Exception as metric_err:
             print(f"DEBUG: Metric calculation error: {metric_err}")
@@ -17077,6 +17713,8 @@ def apply_scorecard():
                 "max": float(np.max(scores_np)) if len(scores_np) > 0 else 0,
                 "mean": float(np.mean(scores_np)) if len(scores_np) > 0 else 0
             },
+            "invert_score_range": should_invert,  # Return the inversion flag
+            "score_interpretation": "higher_score_higher_risk" if should_invert else "higher_score_lower_risk",
             "ks_stat": ks_stat if 'ks_stat' in locals() else None,
             "ks_threshold": ks_threshold if 'ks_threshold' in locals() else None,
             "ks_curve": ks_curve if 'ks_curve' in locals() else [],
@@ -18161,6 +18799,11 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"⚠️  Warning: Could not register new v2 endpoints: {e}")
     
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    # Only run Flask dev server locally
+    # In production, gunicorn will handle it
+    if os.getenv('ENVIRONMENT') != 'production':
+        port = int(os.environ.get('PORT', 5000))
+        app.run(debug=True, host='0.0.0.0', port=port)
+    else:
+        print("[APP] Running in production mode - use gunicorn to start the server")
 
